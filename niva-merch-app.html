@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>NIVA — Merchandising Execution Console</title>
 <style>
 /* ============================================================
@@ -534,6 +534,354 @@ table.tbl tr:last-child td{border-bottom:0}
   .split3{grid-template-columns:1fr}
 }
 @media (max-width:620px){ .kpis{grid-template-columns:repeat(2,1fr)} .crumb{display:none} }
+
+/* ============================================================================
+   FIELD LAYER — mobile.
+   Everything below is additive: new selectors, plus a mobile breakpoint that
+   overrides the desktop rules above rather than editing them. The desktop
+   console at >=1180px is untouched by any of it.
+
+   Two audiences share this file. The manager console is legitimately dense and
+   only gets a responsive pass (things stop overflowing, tables scroll inside
+   themselves, controls become thumb-sized). The merchandiser side is
+   restructured: a bottom bar instead of a sidebar, job cards instead of table
+   rows, and a four-step sequence instead of one long scroll.
+   ============================================================================ */
+
+/* ---- the page body must never scroll sideways, at any width ---- */
+html{overflow-x:hidden}
+body{overflow-x:hidden;max-width:100%}
+.mainwrap,main#app{max-width:100%;min-width:0}
+img,svg,video,canvas{max-width:100%}
+.tblwrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
+pre,.mono{overflow-wrap:anywhere}
+/* The AR capture layer sizes its own surfaces and is not this layer's
+   business — opt it out of every global above. */
+#arlayer img,#arlayer svg,#arlayer video,#arlayer canvas{max-width:none}
+#arlayer .mono,#arlayer pre{overflow-wrap:normal}
+
+/* ---- bottom bar: the merchandiser's whole navigation ---- */
+.botnav{
+  display:none; position:fixed; left:0; right:0; bottom:0; z-index:70;
+  background:var(--surface); border-top:1px solid var(--border);
+  padding-bottom:env(safe-area-inset-bottom,0px);
+  box-shadow:0 -2px 10px rgba(10,16,26,.10);
+}
+.botnav .row{display:flex; align-items:stretch}
+.botnav.many .row{overflow-x:auto; scrollbar-width:none}
+.botnav.many .row::-webkit-scrollbar{display:none}
+.botitem{
+  flex:1 1 0; min-width:60px; min-height:56px; position:relative;
+  display:flex; flex-direction:column; align-items:center; justify-content:center; gap:3px;
+  border:0; background:transparent; color:var(--text-2); cursor:pointer;
+  font-size:11px; font-weight:650; letter-spacing:.01em; padding:8px 4px 9px;
+  -webkit-tap-highlight-color:transparent;
+}
+/* a manager's five destinations have to fit 375px without a sideways swipe;
+   the scroller behind them is only a safety net for anything narrower */
+.botnav.many .botitem{flex:1 0 64px;min-width:64px;font-size:10px;padding:8px 2px 9px}
+.botnav.many .botitem span{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.botitem svg{width:22px;height:22px;stroke-width:1.85}
+.botitem.on{color:var(--accent)}
+.botitem.on::before{
+  content:""; position:absolute; top:0; left:50%; transform:translateX(-50%);
+  width:32px; height:3px; border-radius:0 0 3px 3px; background:var(--accent);
+}
+.botitem .cnt{
+  position:absolute; top:5px; left:50%; margin-left:5px; background:var(--st-rework); color:#fff;
+  font-size:10px; font-weight:800; border-radius:99px; padding:0 5px; line-height:16px;
+  min-width:16px; text-align:center;
+}
+
+/* ---- job cards: what a merchandiser sees instead of a table row ---- */
+.joblist{display:block}
+.jobcard{
+  display:block; width:100%; text-align:left; background:var(--surface);
+  border:1px solid var(--border); border-left:3px solid var(--border);
+  border-radius:var(--r-lg); box-shadow:var(--shadow); margin-bottom:10px;
+  overflow:hidden; cursor:pointer; transition:border-color var(--t), box-shadow var(--t);
+}
+.jobcard:hover{border-color:var(--border-strong)}
+.jobcard.now{border-left-color:var(--accent)}
+.jobcard.fix{border-left-color:var(--st-rework)}
+.jobcard.wait{border-left-color:var(--st-submitted)}
+.jobcard.done{border-left-color:var(--st-approved)}
+.jc-b{padding:14px 15px 12px}
+.jc-store{font-size:16.5px;font-weight:680;letter-spacing:-.012em;line-height:1.25;color:var(--text)}
+.jc-where{font-size:13px;color:var(--text-2);margin-top:2px}
+.jc-what{
+  display:flex; gap:9px; align-items:flex-start; margin-top:11px; padding:9px 11px;
+  border-radius:var(--r); background:var(--surface-3); color:var(--text); font-size:13.5px; line-height:1.4;
+}
+.jc-what svg{width:17px;height:17px;flex:0 0 17px;margin-top:1px;color:var(--text-2)}
+.jc-what b{font-weight:660}
+.jc-meta{display:flex;gap:7px;flex-wrap:wrap;align-items:center;margin-top:10px}
+.jc-act{
+  display:flex; align-items:center; justify-content:space-between; gap:10px;
+  border-top:1px solid var(--border); background:var(--surface-2); padding:9px 11px 9px 15px;
+}
+.jc-when{font-size:12.5px;color:var(--text-2);font-weight:550}
+.jc-act .btn{min-height:44px}
+
+/* plain-language status pill — no tiers, no capture modes, no error percentages */
+.plain{
+  display:inline-flex; align-items:center; gap:6px; font-size:12px; font-weight:680;
+  padding:4px 10px; border-radius:99px; background:var(--surface-3); color:var(--text-2);
+  white-space:nowrap; letter-spacing:.005em;
+}
+.plain.ok{background:var(--st-approved-bg);color:var(--st-approved)}
+.plain.go{background:var(--accent-soft);color:var(--accent-ink)}
+.plain.warn{background:var(--st-progress-bg);color:var(--st-progress)}
+.plain.stop{background:var(--st-rework-bg);color:var(--st-rework)}
+.plain.wait{background:var(--st-submitted-bg);color:var(--st-submitted)}
+/* inside a tinted geobox the pill shares the box's own tint, so lift it */
+.geobox .plain{background:var(--surface)}
+
+/* ---- the four-step sequence ---- */
+.seqrail{
+  display:flex; align-items:stretch; gap:2px; margin:0 0 14px; padding:4px;
+  background:var(--surface); border:1px solid var(--border); border-radius:99px; box-shadow:var(--shadow);
+}
+.seqrail .sq{
+  flex:1 1 0; min-width:0; min-height:46px; display:flex; align-items:center; justify-content:center; gap:7px;
+  border:0; background:transparent; border-radius:99px; padding:0 8px; cursor:pointer;
+  font-size:12.5px; font-weight:650; color:var(--text-2); white-space:nowrap; overflow:hidden;
+}
+.seqrail .sq i{
+  width:19px; height:19px; flex:0 0 19px; border-radius:99px; background:var(--surface-3); color:var(--text-2);
+  display:flex; align-items:center; justify-content:center; font-style:normal; font-size:10.5px; font-weight:800;
+}
+.seqrail .sq.done{color:var(--accent)}
+.seqrail .sq.done i{background:var(--accent);color:#022f2b}
+.seqrail .sq.on{background:var(--accent);color:#022f2b;flex:2 1 0}
+.seqrail .sq.on i{background:rgba(2,47,43,.22);color:#022f2b}
+.seqrail .sq:disabled{opacity:.42;cursor:default}
+.seqrail .sq svg{width:12px;height:12px;stroke-width:3.2}
+
+.steptitle{margin:0 0 3px;font-size:21px;font-weight:690;letter-spacing:-.018em;line-height:1.2}
+.stepsub{margin:0 0 14px;font-size:13.5px;color:var(--text-2);line-height:1.5}
+
+.here{
+  background:var(--surface); border:1px solid var(--border); border-radius:var(--r-lg);
+  box-shadow:var(--shadow); padding:15px 15px 14px; margin-bottom:12px;
+}
+.here .hs{font-size:19px;font-weight:700;letter-spacing:-.015em;line-height:1.22}
+.here .hw{font-size:13.5px;color:var(--text-2);margin-top:3px}
+.bigfact{
+  display:flex; gap:11px; align-items:flex-start; padding:12px 14px; border-radius:var(--r);
+  background:var(--accent-soft); color:var(--accent-ink); margin-top:13px;
+}
+.bigfact svg{width:19px;height:19px;flex:0 0 19px;margin-top:1px;opacity:.85}
+.bigfact .bn{font-size:15px;font-weight:680;line-height:1.32}
+.bigfact .bs{font-size:12.5px;opacity:.85;margin-top:2px;line-height:1.4}
+
+/* progressive disclosure — the things that matter only sometimes */
+.disc{
+  border:1px solid var(--border); border-radius:var(--r-lg); background:var(--surface);
+  margin-bottom:10px; overflow:hidden;
+}
+.disc>summary{
+  list-style:none; cursor:pointer; padding:13px 15px; min-height:48px;
+  display:flex; align-items:center; gap:10px; font-size:13.5px; font-weight:640; color:var(--text);
+}
+.disc>summary::-webkit-details-marker{display:none}
+.disc>summary::after{
+  content:""; margin-left:auto; flex:none; width:8px; height:8px;
+  border-right:2px solid var(--text-3); border-bottom:2px solid var(--text-3);
+  transform:rotate(45deg) translate(-2px,-2px); transition:transform var(--t);
+}
+.disc[open]>summary::after{transform:rotate(-135deg)}
+.disc>summary svg{width:17px;height:17px;color:var(--text-3);flex:none}
+.disc .dbd{padding:0 15px 15px;font-size:13.5px;color:var(--text-2);line-height:1.62}
+.disc .dbd .tl{margin-top:2px}
+
+/* one obvious primary action, always within thumb reach */
+.actionbar{
+  position:sticky; bottom:0; z-index:35; display:flex; gap:8px; margin:18px 0 0; padding:20px 0 4px;
+  background:linear-gradient(to top,var(--bg) 0,var(--bg) 76%,rgba(128,128,128,0) 100%);
+}
+.actionbar .btn{flex:1 1 auto;min-height:52px;font-size:15px;font-weight:690;justify-content:center}
+.actionbar .btn.back{flex:0 0 52px;min-width:52px;padding:0}
+.actionbar .btn.back svg{width:19px;height:19px}
+/* A short step must not leave its action stranded halfway up the screen: the
+   screen fills the viewport and the bar is pushed to the bottom of it. */
+.fieldscreen{display:flex;flex-direction:column;min-height:calc(100vh - 160px)}
+.fieldscreen>.actionbar{margin-top:auto}
+
+.stepnote{font-size:12.5px;color:var(--text-2);line-height:1.55;margin-top:10px}
+.photogrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:10px}
+.photocell{position:relative}
+.photocell .rm{
+  position:absolute;top:6px;right:6px;min-height:34px;padding:6px 10px;font-size:12px;
+  background:rgba(4,10,18,.78);color:#fff;border-color:transparent;
+}
+.readonly-note{
+  border-radius:var(--r); padding:12px 14px; background:var(--st-progress-bg); color:var(--st-progress);
+  font-size:13px; line-height:1.55; margin-bottom:12px;
+}
+.outcome{
+  border-radius:var(--r-lg); padding:16px; background:var(--surface); border:1px solid var(--border);
+  border-left:3px solid var(--accent); box-shadow:var(--shadow); margin-bottom:12px;
+}
+.outcome .ot{font-size:16.5px;font-weight:680;letter-spacing:-.01em}
+.outcome .ob{font-size:13.5px;color:var(--text-2);margin-top:5px;line-height:1.55}
+.outcome.wait{border-left-color:var(--st-submitted)}
+.outcome.ok{border-left-color:var(--st-approved)}
+.outcome.fix{border-left-color:var(--st-rework)}
+
+/* updates strip — the notification bell, folded into the job list */
+.updates{
+  background:var(--surface); border:1px solid var(--border); border-left:3px solid var(--st-assigned);
+  border-radius:var(--r-lg); box-shadow:var(--shadow); margin-bottom:14px; overflow:hidden;
+}
+.updates .uh{
+  display:flex; align-items:center; gap:9px; padding:11px 13px; font-size:12.5px; font-weight:700;
+  letter-spacing:.02em; color:var(--text);
+}
+.updates .uh>svg{width:18px;height:18px;flex:none;color:var(--st-assigned)}
+.updates .uh .btn{margin-left:auto}
+.updates .ur{
+  display:block; width:100%; text-align:left; border:0; border-top:1px solid var(--border);
+  background:transparent; padding:11px 13px; cursor:pointer; min-height:48px;
+}
+.updates .ur:hover{background:var(--surface-2)}
+.updates .ur .ut{font-size:13px;font-weight:640;color:var(--text)}
+.updates .ur .ub{font-size:12.5px;color:var(--text-2);margin-top:2px;line-height:1.45}
+.updates .ur .um{font-size:11.5px;color:var(--text-3);margin-top:3px}
+
+/* ---- approvals queue: dense by design, but it has to fit a phone ---- */
+.apv{display:flex;gap:16px;align-items:center;flex-wrap:wrap}
+.apv-thumb{width:132px;flex:0 0 132px}
+.apv-body{flex:1 1 200px;min-width:0}
+.apv-acts{display:flex;flex-direction:column;gap:7px}
+@media (max-width:760px){
+  .apv{gap:12px;align-items:flex-start}
+  .apv-thumb{width:88px;flex:0 0 88px}
+  .apv-body{flex:1 1 140px}
+  .apv-acts{flex:1 1 100%;flex-direction:row;flex-wrap:wrap}
+  .apv-acts .btn{flex:1 1 46%}
+}
+
+/* ============================================================================
+   TABLET — 761px to 1000px keeps the existing horizontal nav strip, but the
+   dense widgets stop being dense.
+   ============================================================================ */
+@media (max-width:1000px){
+  .tblwrap table.tbl{min-width:620px}
+  .kpis{grid-template-columns:repeat(auto-fit,minmax(140px,1fr))}
+}
+@media (max-width:900px){
+  .filters input,.filters select{min-width:0;flex:1 1 190px}
+  .rowbar{grid-template-columns:110px 1fr 52px;gap:10px}
+  .shots{grid-template-columns:repeat(auto-fill,minmax(150px,1fr))}
+  .posterthumb{max-width:132px}
+}
+
+/* ============================================================================
+   MOBILE — <=760px. The sidebar goes away entirely and the bottom bar takes
+   over; the topbar keeps only where-you-are and an honest sync indicator.
+   ============================================================================ */
+@media (max-width:760px){
+  aside#sidebar{display:none}
+  .botnav{display:block}
+  .shell{flex-direction:column;min-height:100vh}
+
+  header#topbar{padding:8px 6px 8px 12px;gap:8px;min-height:60px}
+  main#app{padding:14px 12px calc(80px + env(safe-area-inset-bottom,0px))}
+
+  /* topbar: where they are, plus sync. Nothing else. */
+  #whochip{display:none}
+  #bell{display:none}
+  #gear{display:none}          /* the overflow menu lives behind "More" */
+  .crumb{
+    display:block; font-size:15.5px; font-weight:670; letter-spacing:-.01em; color:var(--text);
+    flex:1; min-width:0;
+  }
+  .crumb .cwho{display:none}   /* name + role belong in the menu, not the chrome */
+  /* the sync indicator keeps its words. A bare coloured dot is not an honest
+     status when the answer might be "3 photos are still on this phone". */
+  .syncchip{height:44px;padding:0 14px;font-size:12px;flex:0 1 auto;max-width:52%}
+  .syncchip .lbl{display:inline;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .syncchip i{width:9px;height:9px}
+
+  /* touch targets */
+  .btn{min-height:44px;padding:10px 15px;font-size:14px;border-radius:10px}
+  /* 44px is the floor for anything a thumb has to hit, "small" included */
+  .btn.sm{min-height:44px;padding:9px 13px;font-size:13px}
+  .photocell .rm{min-height:44px}
+  .iconbtn{width:44px;height:44px}
+  .menuitem{min-height:48px;display:flex;align-items:center;font-size:14px;padding:12px 14px}
+  .seg{width:100%;display:flex}
+  .seg button{flex:1;min-height:40px;font-size:13px}
+  input,select,textarea{min-height:44px;font-size:16px;padding:10px 12px}  /* 16px: iOS will not zoom */
+  textarea{min-height:110px}
+  .nrow{min-height:52px}
+
+  /* AR capture layer keeps its own metrics — not this layer's business */
+  #arlayer .btn{min-height:auto;padding:7px 12px;font-size:13px;border-radius:var(--r)}
+  #arlayer input,#arlayer select,#arlayer textarea{min-height:auto;font-size:14px;padding:7px 9px}
+
+  /* legibility in daylight: stop using the faintest ink for anything real */
+  .hint{color:var(--text-2);font-size:12.5px}
+  .kpi .s{color:var(--text-2)}
+
+  /* density */
+  .pagehd{gap:8px;margin-bottom:14px}
+  .pagehd h1{font-size:19px}
+  .pagehd p{font-size:12.5px}
+  .card>.hd{padding:11px 13px}
+  .card>.bd{padding:13px}
+  .kpis{grid-template-columns:repeat(2,1fr);gap:10px}
+  .kpi{padding:13px 13px 11px;border-radius:var(--r-lg)}
+  .kpi .v{font-size:23px}
+  .split,.split3,.grid2,.grid3{grid-template-columns:1fr}
+  .shots{grid-template-columns:repeat(auto-fill,minmax(132px,1fr));gap:9px}
+  .rowbar{grid-template-columns:1fr auto;gap:2px 10px;padding:9px 0}
+  .rowbar .lbl{grid-column:1;white-space:normal}
+  .filters{gap:8px}
+  .filters input,.filters select{flex:1 1 100%;width:100%}
+  .kv{grid-template-columns:1fr;gap:0}
+  .kv dt{margin-top:9px}
+  .kv dd{margin:1px 0 0}
+  .kv dt:first-of-type{margin-top:0}
+  .postercard{gap:11px}
+  .posterthumb{max-width:104px}
+  .mobile{max-width:100%}
+  .tl{padding-left:18px}
+
+  /* popovers become sheets anchored above the bottom bar */
+  /* !important because toggleNotifs/toggleMenu set a pixel width inline */
+  .pop{
+    position:fixed; top:auto; left:8px; right:8px; max-width:none;
+    width:auto !important;
+    bottom:calc(64px + env(safe-area-inset-bottom,0px));
+  }
+  .pop .plist{max-height:min(52vh,420px)}
+  /* toasts move to the top: the bottom of a phone screen belongs to the bottom
+     bar and the step's primary action, and a toast must never cover either */
+  #toasts{left:12px;right:12px;bottom:auto;top:calc(68px + env(safe-area-inset-top,0px))}
+  .toast{max-width:none}
+  .scrim{padding:0;align-items:flex-end}
+  .modal{width:100%;max-height:90vh;border-radius:var(--r-lg) var(--r-lg) 0 0}
+  .modal .mf{position:sticky;bottom:0;background:var(--surface);flex-wrap:wrap}
+  .modal .mf .btn{flex:1 1 auto}
+
+  /* the sequence's primary action sits above the bottom bar */
+  .actionbar{
+    bottom:calc(56px + env(safe-area-inset-bottom,0px));
+    margin-left:-12px; margin-right:-12px; padding:12px 12px 10px;
+  }
+  .steptitle{font-size:20px}
+  .seqrail .sq:not(.on) span{display:none}
+  .seqrail .sq:not(.on){flex:0 0 46px;gap:0}
+}
+
+@media (max-width:400px){
+  .jc-store{font-size:15.5px}
+  .here .hs{font-size:17.5px}
+  .kpis{grid-template-columns:1fr 1fr;gap:8px}
+  .photogrid{grid-template-columns:repeat(auto-fill,minmax(120px,1fr))}
+}
 </style>
 </head>
 <body>
@@ -568,6 +916,10 @@ table.tbl tr:last-child td{border-bottom:0}
     <main id="app"></main>
   </div>
 </div>
+<!-- Bottom bar. Hidden above 760px, where the sidebar does this job. It is a
+     sibling of .shell rather than a child so it can be position:fixed without
+     inheriting the shell's flex context. -->
+<nav class="botnav" id="botnav" aria-label="Main navigation"></nav>
 <div id="pops"></div>
 <div id="modals"></div>
 <!-- Setup panel / login screen / session-expired prompt. Rendered over
@@ -3203,7 +3555,14 @@ const ICONS = {
   pin:'<path d="M12 21s7-5.6 7-11a7 7 0 1 0-14 0c0 5.4 7 11 7 11z"/><circle cx="12" cy="10" r="2.6"/>',
   cam:'<path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/>',
   box:'<path d="M21 16V8l-9-5-9 5v8l9 5z"/><path d="M3.3 7.3 12 12l8.7-4.7M12 22V12"/>',
-  back:'<path d="M19 12H5M12 19l-7-7 7-7"/>'
+  back:'<path d="M19 12H5M12 19l-7-7 7-7"/>',
+  /* --- field layer additions --- */
+  dots:'<circle cx="5" cy="12" r="1.7"/><circle cx="12" cy="12" r="1.7"/><circle cx="19" cy="12" r="1.7"/>',
+  fwd:'<path d="M5 12h14M12 5l7 7-7 7"/>',
+  poster:'<rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8 8h8M8 12h8M8 16h4"/>',
+  store:'<path d="M4 10v10h16V10"/><path d="M3 10 5 4h14l2 6a3 3 0 0 1-6 0 3 3 0 0 1-6 0 3 3 0 0 1-6 0z"/>',
+  bell:'<path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/>',
+  info:'<circle cx="12" cy="12" r="9"/><path d="M12 16v-4M12 8h.01"/>'
 };
 const icon = (k, cls)=> '<svg class="'+(cls||"")+'" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">'+ICONS[k]+'</svg>';
 const chip = s => '<span class="chip '+STATUS_CLASS[s]+'">'+esc(s)+'</span>';
@@ -3903,14 +4262,14 @@ function viewApprovals(){
         +(pl.pass?'':' · GATES FAILED')+'</span>';
     return '<div class="card" style="margin-bottom:12px'
       + (placementUnverified(pl) ? ';border-left:3px solid var(--st-rework)' : '')+'"><div class="bd">'
-      + '<div style="display:flex;gap:16px;align-items:center;flex-wrap:wrap">'
-      + '<div style="width:132px;flex:0 0 132px">'
+      + '<div class="apv">'
+      + '<div class="apv-thumb">'
       +   '<div class="shot">'+(t.afterImages[0]
             ? '<img alt="after" src="'+resolveImg(t.afterImages[0].src)+'"'
               + (t.afterImages[0].fb ? ' data-fb="'+esc(t.afterImages[0].fb)+'"' : '')+'>'
             : '<div style="padding:24px;text-align:center;color:var(--text-3);font-size:11.5px">No image</div>')+'</div>'
       + '</div>'
-      + '<div style="flex:1;min-width:200px">'
+      + '<div class="apv-body">'
       +   '<div style="font-size:15px;font-weight:650">'+esc(t.storeName)+' <span class="tag">'+esc(t.storeCode)+'</span></div>'
       +   '<div style="font-size:12.5px;color:var(--text-2);margin-top:2px">'+esc(t.city)+' · '+esc(t.state)+' · '+esc(t.region)
       +     ' &nbsp;|&nbsp; '+esc(t.displayType)+' · <span class="num">'+t.widthFt+'×'+t.heightFt+' ft</span></div>'
@@ -3929,7 +4288,7 @@ function viewApprovals(){
                   : 'Not shot through guided capture — distance to the wall and camera squareness are unknown.')
               + '</div>' : '')
       + '</div>'
-      + '<div style="display:flex;flex-direction:column;gap:7px">'
+      + '<div class="apv-acts">'
       +   '<button class="btn primary" data-act="nav" data-v="review" data-id="'+t.id+'">Review</button>'
       +   '<button class="btn sm ghost" data-act="nav" data-v="task" data-id="'+t.id+'">Task detail</button>'
       + '</div>'
@@ -4150,32 +4509,125 @@ function doReject(id){
 /* ==========================================================
    13. Views — Merchandiser
    ========================================================== */
+/* ============================================================================
+   FIELD LANGUAGE
+   ----------------------------------------------------------------------------
+   Everything a merchandiser reads goes through here. Tier letters, capture
+   modes, focal sources, standoff tolerances, geofence radii and per-axis angle
+   errors are all still recorded — `placement`, `TIER_META` and the capture
+   pipeline are untouched — they are simply not shown to the person holding the
+   phone. That vocabulary exists for the manager's review screen and for the
+   audit trail, and it is useless to someone standing in a shop.
+   ============================================================================ */
+
+/* What the field sees instead of a status enum. */
+function fieldStatus(t){
+  switch(t.status){
+    case S.REWORK:    return { cls:"stop", text:"Needs fixing",   group:"now"  };
+    case S.ASSIGNED:  return { cls:"go",   text:"Not started",    group:"now"  };
+    case S.PROGRESS:  return t.submitting
+                           ? { cls:"warn", text:"Sending",        group:"now"  }
+                           : { cls:"warn", text:"In progress",    group:"now"  };
+    case S.SUBMITTED: return { cls:"wait", text:"Sent for check", group:"wait" };
+    case S.APPROVED:  return { cls:"ok",   text:"Approved",       group:"done" };
+    case S.CLOSED:    return { cls:"ok",   text:"Finished",       group:"done" };
+    default:          return { cls:"",     text:"Not ready yet",  group:"wait" };
+  }
+}
+/* The one obvious next action, in the imperative. */
+function fieldNext(t){
+  switch(t.status){
+    case S.ASSIGNED:  return { label:"Check in",  primary:true  };
+    case S.REWORK:    return { label:"Fix it",    primary:true  };
+    case S.PROGRESS:  return t.submitting
+                           ? { label:"Open",      primary:false }
+                           : { label:"Continue",  primary:true  };
+    default:          return { label:"Open",      primary:false };
+  }
+}
+/* A photo's verdict, in words a person can act on. Reads the recorded
+   measurement; changes nothing about how it was measured. */
+function fieldPhotoVerdict(im){
+  const p = im && im.placement;
+  if(p && p.pass)  return { cls:"ok",   text:"Photo accepted" };
+  if(p && !p.pass) return { cls:"warn", text:"Not lined up — your manager will look" };
+  return { cls:"", text:"Photo added" };
+}
+/* "Put up a 4 ft x 3 ft poster on the Gondola End Cap." */
+function fieldJobLine(t){
+  return '<b>'+esc(t.displayType)+'</b> · <span class="num">'+t.widthFt+' ft × '+t.heightFt+' ft</span> poster';
+}
+
 function viewMyTasks(){
   const mine = visibleTasks();
-  const order = [S.REWORK, S.ASSIGNED, S.PROGRESS, S.SUBMITTED, S.APPROVED, S.CLOSED, S.DRAFT];
+  const groups = [
+    { k:"now",  label:"Do these now",         cls:"now"  },
+    { k:"wait", label:"Waiting on your manager", cls:"wait" },
+    { k:"done", label:"Finished",             cls:"done" }
+  ];
+  const todo = mine.filter(t=>fieldStatus(t).group === "now").length;
+
   let html = '<div class="mobile">'
-    + '<div class="devicehd">'+icon("cam")+' NIVA Field · '+esc(me().name)+'</div>'
-    + '<div class="pagehd" style="margin-bottom:12px"><div><h1>My Tasks</h1>'
-    + '<p><span class="num">'+mine.length+'</span> store'+(mine.length===1?"":"s")+' assigned to you</p></div></div>';
+    + '<div class="pagehd" style="margin-bottom:12px"><div><h1>My jobs</h1>'
+    + '<p>'+(todo
+        ? '<span class="num">'+todo+'</span> job'+(todo===1?"":"s")+' need'+(todo===1?"s":"")+' you today'
+        : 'Nothing waiting on you right now')+'</p></div></div>';
 
-  if(!mine.length) html += '<div class="card"><div class="bd">'+emptyState("No tasks assigned to you yet.")+'</div></div>';
+  /* The notification bell used to live in the topbar, five controls deep.
+     Field updates belong where the field is already looking. */
+  html += fieldUpdatesStrip();
 
-  order.forEach(function(s){
-    const g = mine.filter(t=>t.status===s);
-    if(!g.length) return;
-    html += '<div class="sectlabel" style="margin-top:16px">'+esc(s)+' · <span class="num">'+g.length+'</span></div>';
-    html += g.map(function(t){
-      return '<button class="mtask" data-act="open" data-id="'+t.id+'">'
-        + '<div class="t">'+esc(t.storeName)+'</div>'
-        + '<div class="s mono">'+esc(t.storeCode)+' · '+esc(t.city)+', '+esc(t.stateCode)+'</div>'
-        + '<div class="r">'+chip(t.status) + taskSyncChip(t)
-        + '<span class="chip neutral plain">'+esc(t.displayType)+'</span>'
-        + '<span class="chip neutral plain num">'+t.widthFt+'×'+t.heightFt+' ft</span>'
-        + '<span style="margin-left:auto;font-size:11.5px;color:var(--text-3)" class="num">'+fmtD(t.execDate)+'</span>'
-        + '</div></button>';
-    }).join("");
+  if(!mine.length){
+    return { html: html + '<div class="card"><div class="bd">'+emptyState("No jobs assigned to you yet.")+'</div></div></div>' };
+  }
+
+  groups.forEach(function(g){
+    const list = mine.filter(t=>fieldStatus(t).group === g.k);
+    if(!list.length) return;
+    list.sort(function(a,b){ return String(a.execDate).localeCompare(String(b.execDate)) || a.storeName.localeCompare(b.storeName); });
+    html += '<div class="sectlabel" style="margin-top:16px">'+esc(g.label)+' · <span class="num">'+list.length+'</span></div>';
+    html += '<div class="joblist">' + list.map(jobCard).join("") + '</div>';
   });
   return { html: html + '</div>' };
+}
+
+/* One store, one job, one obvious action. Not a table row. */
+function jobCard(t){
+  const st  = fieldStatus(t);
+  const nxt = fieldNext(t);
+  const sync = taskSyncChip(t);
+  const edge = (t.status === S.REWORK) ? "fix" : st.group;   /* left stripe: now / fix / wait / done */
+  return '<div class="jobcard '+edge+'" data-act="open" data-id="'+t.id+'">'
+    + '<div class="jc-b">'
+    +   '<div class="jc-store">'+esc(t.storeName)+'</div>'
+    +   '<div class="jc-where">'+esc(t.city)+', '+esc(t.stateCode)+' · <span class="mono">'+esc(t.storeCode)+'</span></div>'
+    +   '<div class="jc-what">'+icon("poster")+'<div>'+fieldJobLine(t)+'</div></div>'
+    +   '<div class="jc-meta"><span class="plain '+st.cls+'">'+esc(st.text)+'</span>'+sync+'</div>'
+    + '</div>'
+    + '<div class="jc-act">'
+    +   '<span class="jc-when">Due '+esc(fmtD(t.execDate))+'</span>'
+    +   '<button class="btn '+(nxt.primary?"primary":"")+'" data-act="open" data-id="'+t.id+'">'
+    +     esc(nxt.label)+icon("fwd")+'</button>'
+    + '</div>'
+    + '</div>';
+}
+
+/* The bell, folded into the list. Unread first; nothing at all when there is
+   nothing to say. */
+function fieldUpdatesStrip(){
+  const all = myNotifs();
+  const unread = all.filter(n=>!n.read);
+  if(!unread.length) return "";
+  return '<div class="updates">'
+    + '<div class="uh">'+icon("bell")+'<span>'+unread.length+' update'+(unread.length===1?"":"s")+'</span>'
+    +   '<button class="btn sm ghost" data-act="markread">Clear</button></div>'
+    + unread.slice(0,4).map(function(n){
+        return '<button class="ur" data-act="opennotif" data-id="'+n.id+'">'
+          + '<div class="ut">'+esc(n.type)+'</div>'
+          + '<div class="ub">'+esc(n.body)+'</div>'
+          + '<div class="um">'+esc(ago(n.ts))+'</div></button>';
+      }).join("")
+    + '</div>';
 }
 
 /* per-task transient field workspace (not persisted until submit) */
@@ -4187,7 +4639,7 @@ function viewTask(p){
   if(!t) return { html: emptyState("Task not found.") };
   const merchView = myRole() === "Merchandiser";
   const body = merchView ? merchTaskDetail(t) : managerTaskDetail(t);
-  return { html: merchView ? '<div class="mobile">'+body+'</div>' : body,
+  return { html: merchView ? '<div class="mobile fieldscreen">'+body+'</div>' : body,
            post: function(){ bindTaskDetail(t); } };
 }
 
@@ -4360,155 +4812,390 @@ function checkinCard(t){
     + '</div></div>';
 }
 
-function merchTaskDetail(t){
+/* ============================================================================
+   THE FIELD SEQUENCE — the merchandiser's task detail.
+   ----------------------------------------------------------------------------
+   The old screen was one long scroll that showed every field at once: store
+   record, capture brief with standoff tolerances, BEFORE reference, check-in
+   block, upload block, remarks, submitted images and the full audit trail —
+   roughly nine cards deep on a 375px phone. A merchandiser has exactly one
+   question at a time, so this is four screens with one decision on each:
+
+       You're here  ->  Check in  ->  Photo  ->  Submit
+
+   Everything that matters only sometimes — the manager's written instructions,
+   the poster dimensions, what has happened so far — is behind a disclosure.
+   Nothing about capture internals is shown at all; the measurement is still
+   taken and still recorded, it is simply not this person's problem.
+   ============================================================================ */
+const FIELD_STEPS = [
+  { k:"here",  label:"Job"      },
+  { k:"check", label:"Check in" },
+  { k:"shoot", label:"Photo"    },
+  { k:"send",  label:"Submit"   }
+];
+/* Which step the user has clicked to, per task. Session-only and deliberately
+   NOT persisted: it is a scroll position, not a fact about the work. The
+   signature drops the override the moment the underlying work moves on, so
+   finishing a step advances the sequence by itself. */
+const fieldStep = {};
+
+/* The signature is deliberately COARSE: only a real lifecycle move (a status
+   change, a check-in, a submission starting) invalidates where the user is
+   standing. Adding or removing a photo must not: someone who has just taken
+   one shot is usually about to take another, and being thrown onto a different
+   screen mid-task is exactly the kind of thing that made the old build feel
+   complicated. */
+function fieldStepSig(t){
+  return [t.status, t.checkIn?1:0, t.submitting?1:0].join("|");
+}
+function fieldDone(t){
   const w = ws(t.id);
-  let html = '<button class="btn ghost sm" data-act="nav" data-v="mytasks" style="margin-bottom:10px">'+icon("back")+'My tasks</button>'
-    + '<div class="pagehd" style="margin-bottom:12px"><div><h1 style="font-size:18px">'+esc(t.storeName)+'</h1>'
-    + '<p><span class="mono">'+esc(t.storeCode)+'</span> · '+esc(t.city)+', '+esc(t.stateCode)+'</p></div>'
-    + '<div style="flex:1"></div>'+chip(t.status)+'</div>';
-
-  html += taskSyncBanner(t);
-
-  if(t.status === S.REWORK && t.reviewRemarks){
-    html += '<div class="banner"><div class="bt">Rework required — '+esc(userById(t.managerId).name)+'</div>'
-      + '<div class="bb">'+esc(t.reviewRemarks)+'</div></div>';
+  const open = (t.status === S.ASSIGNED || t.status === S.REWORK);
+  return {
+    here:  true,
+    check: !open,
+    shoot: !open && (w.after.length > 0 || t.afterImages.length > 0),
+    send:  [S.SUBMITTED, S.APPROVED, S.CLOSED].indexOf(t.status) >= 0
+  };
+}
+function fieldStepEnabled(t, i){
+  const done = fieldDone(t);
+  for(let j = 0; j < i; j++){ if(!done[FIELD_STEPS[j].k]) return false; }
+  return true;
+}
+function fieldStepIndex(t){
+  const rec = fieldStep[t.id];
+  if(rec && rec.sig === fieldStepSig(t) && fieldStepEnabled(t, rec.step)) return rec.step;
+  delete fieldStep[t.id];
+  /* A job that has not been started yet opens on "You're here": confirming the
+     shop and seeing what goes up is the first decision, before check-in.
+     A job sent back for a fix opens there too, so the reason is read first.
+     Once the visit is under way, land on whatever is still outstanding. */
+  let derived = FIELD_STEPS.length - 1;
+  if(t.status === S.ASSIGNED || t.status === S.REWORK){
+    derived = 0;
+  }else{
+    const done = fieldDone(t);
+    for(let i = 0; i < FIELD_STEPS.length; i++){
+      if(!done[FIELD_STEPS[i].k]){ derived = i; break; }
+    }
   }
-  if(t.status === S.CLOSED){
-    html += '<div class="card" style="margin-bottom:14px;border-left:3px solid '+STATUS_HEX[S.CLOSED]+'"><div class="bd">'
-      + '<div style="font-size:12px;color:var(--text-3);font-weight:700;letter-spacing:.06em;text-transform:uppercase">Closed</div>'
-      + '<div class="mono" style="margin-top:3px">'+esc(t.completionRef)+'</div></div></div>';
-  }
-  if(t.status === S.APPROVED){
-    html += '<div class="card" style="margin-bottom:14px;border-left:3px solid '+STATUS_HEX[S.APPROVED]+'"><div class="bd" style="font-size:13px">'
-      + 'Approved by '+esc(userById(t.managerId).name)+' on '+esc(fmtDT(t.approvedAt))+'.</div></div>';
-  }
-  if(t.status === S.SUBMITTED){
-    html += '<div class="card" style="margin-bottom:14px;border-left:3px solid '+STATUS_HEX[S.SUBMITTED]+'"><div class="bd" style="font-size:13px">'
-      + 'Submitted '+esc(fmtDT(t.submittedAt))+'. Awaiting manager approval.</div></div>';
-  }
-
-  html += storeInfoCard(t) + instructionsCard(t) + captureBriefCard(t);
-
-  html += '<div class="card" style="margin-bottom:14px"><div class="hd"><h3>BEFORE reference</h3></div><div class="bd">'
-    + shotHTML(t.beforeImage,"BEFORE") + '</div></div>';
-
-  // --- Check-in step ---
-  const needsCheckIn = (t.status === S.ASSIGNED || t.status === S.REWORK);
-  if(needsCheckIn){
-    html += '<div class="card" style="margin-bottom:14px"><div class="hd"><h3>Step 1 · Check in at store</h3></div><div class="bd">';
-    if(w.geo && w.geo.error){
-      html += '<div class="geobox no" style="margin-bottom:12px"><div style="font-weight:650">Location unavailable</div>'
-        + '<div style="font-size:12.5px;margin-top:3px">'+esc(w.geo.error)+'</div></div>';
-    } else if(w.geo){
-      const okg = w.geo.distance <= GEOFENCE_M;
-      html += '<div class="geobox '+(okg?"ok":"no")+'" style="margin-bottom:12px">'
-        + '<div style="display:flex;justify-content:space-between;align-items:center;gap:10px">'
-        +   '<div><div class="big num">'+Math.round(w.geo.distance)+' m</div>'
-        +     '<div style="font-size:11.5px;opacity:.85">from '+esc(t.storeName)+'</div></div>'
-        +   '<span class="chip '+(okg?"pass":"fail")+'">'+(okg?"WITHIN GEOFENCE":"OUTSIDE GEOFENCE")+'</span>'
+  /* Remember it, so the sequence holds still until the work actually moves. */
+  fieldStep[t.id] = { step: derived, sig: fieldStepSig(t) };
+  return derived;
+}
+function fieldRail(t, cur){
+  const done = fieldDone(t);
+  return '<div class="seqrail">' + FIELD_STEPS.map(function(s, i){
+    const on   = (i === cur);
+    const fin  = done[s.k] && !on;
+    const open = fieldStepEnabled(t, i);
+    return '<button class="sq'+(on?" on":"")+(fin?" done":"")+'"'
+      + (open ? '' : ' disabled')
+      + ' data-act="fstep" data-id="'+t.id+'" data-s="'+i+'"'
+      + ' aria-label="Step '+(i+1)+', '+esc(s.label)+'">'
+      + '<i>'+(fin ? icon("check") : (i+1))+'</i><span>'+esc(s.label)+'</span></button>';
+  }).join("") + '</div>';
+}
+/* Honest about what is still sitting on this phone, in words that do not
+   assume you know what an outbox is. */
+function fieldSyncBanner(t){
+  const s = taskSync(t);
+  if(!s) return "";
+  const detail = s.kind === "failed"
+    ? "The server refused part of this job. Nothing is lost — show this to your manager."
+    : s.kind === "submitting"
+      ? "Your photos are still going up from this phone. You can close the app; it carries on by itself."
+      : "Some of your work is still on this phone. It will send itself as soon as you have signal.";
+  return '<div class="readonly-note"'
+    + (s.kind === "failed" ? ' style="background:var(--st-rework-bg);color:var(--st-rework)"' : '')
+    + '><div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">'
+    + '<b>'+esc(s.label)+'</b>'
+    + '<span style="flex:1;min-width:170px">'+esc(detail)+'</span>'
+    + '<button class="btn sm" data-act="syncpanel">Details</button></div></div>';
+}
+function fieldReworkBanner(t){
+  if(t.status !== S.REWORK || !t.reviewRemarks) return "";
+  return '<div class="banner"><div class="bt">Sent back — please fix</div>'
+    + '<div class="bb">'+esc(t.reviewRemarks)+'</div>'
+    + '<div class="bb" style="color:var(--text-2);font-size:12.5px;margin-top:5px">'
+    +   'From '+esc(userById(t.managerId).name)+'</div></div>';
+}
+/* The history, stripped of the machine detail. The full audit trail with GPS,
+   device strings and per-event detail is still written and still shown on the
+   manager's screen; the field gets "who did what, when". */
+function fieldHistory(t){
+  const evs = t.audit.slice().sort(function(a,b){ return new Date(a.ts) - new Date(b.ts); });
+  if(!evs.length) return '<div class="dbd">Nothing yet.</div>';
+  return '<div class="dbd"><div class="tl">' + evs.map(function(a, i){
+      const unsent = !!(a.pending && Outbox.has(a.opId));
+      return '<div class="ev '+(i === evs.length-1 ? "hi" : "")+'">'
+        + '<div class="a">'+esc(a.action)
+        + (unsent ? ' <span class="chip queued" style="font-size:10.5px;padding:1px 7px">still on this phone</span>' : '')
         + '</div>'
-        + '<div style="font-size:12px;margin-top:8px;font-family:var(--mono)">'+esc(gps(w.geo.lat,w.geo.lng))
-        +   ' · ±'+Math.round(w.geo.accuracy)+' m · '+esc(w.geo.source==="device"?"device GPS":"simulated")+'</div>'
-        + (okg ? '' : '<div style="font-size:12.5px;margin-top:8px">You must be within '+GEOFENCE_M+' m of the store to check in. Move closer and retry.</div>')
+        + '<div class="m">'+esc(a.actor)+' · '+esc(fmtDT(a.ts))+'</div>'
         + '</div>';
-    } else {
-      html += '<div style="font-size:13px;color:var(--text-2);margin-bottom:12px">Capture your location to verify you are at '
-        + esc(t.storeName)+'. Check-in is allowed within <b class="num">'+GEOFENCE_M+' m</b> of the registered store coordinates.</div>';
-    }
-    html += '<div style="display:flex;gap:8px;flex-wrap:wrap">'
-      + '<button class="btn primary" data-act="checkin" data-id="'+t.id+'" '+(w.busy?"disabled":"")+'>'+icon("pin")+(w.geo?"Retry check-in":"Check In")+'</button>'
-      + '<button class="btn" data-act="simcheckin" data-id="'+t.id+'">Simulate arriving at store</button>'
-      + (w.geo && !w.geo.error && w.geo.distance <= GEOFENCE_M
-          ? '<button class="btn primary" data-act="startwork" data-id="'+t.id+'">'+icon("check")+'Confirm check-in &amp; start</button>' : '')
-      + '</div>'
-      + '<div class="hint">Demo note: browsers block precise geolocation on <span class="mono">file://</span> pages, so the simulated fallback is always available.</div>'
+    }).join("") + '</div></div>';
+}
+/* Instructions, dimensions and history: needed sometimes, not every time. */
+function fieldExtras(t){
+  const stand = Number(t.standoffFt);
+  const paces = isFinite(stand) ? Math.max(1, Math.round(stand / 2.5)) : 3;
+  let h = '';
+  if(t.instructions){
+    h += '<details class="disc"><summary>'+icon("info")+'What your manager asked for</summary>'
+      + '<div class="dbd">'+esc(t.instructions)+'</div></details>';
+  }
+  h += '<details class="disc"><summary>'+icon("poster")+'Size, and where to stand</summary>'
+    + '<div class="dbd">The poster is <b class="num">'+t.widthFt+' ft × '+t.heightFt+' ft</b>, going on the '
+    + esc(t.displayType)+'.<br><br>'
+    + 'When you take the photo, stand about <b class="num">'+(isFinite(stand)?stand.toFixed(0):"8")+' feet</b> back '
+    + '(roughly '+paces+' big steps) and hold the phone straight. The camera screen tells you when you are '
+    + 'in the right spot — you do not need to measure anything yourself.'
+    + '</div></details>';
+  h += '<details class="disc"><summary>'+icon("clock")+'What has happened so far</summary>'
+    + fieldHistory(t) + '</details>';
+  return h;
+}
+
+/* ---------- step 1: you're here ---------- */
+function fieldViewHere(t){
+  const camp = campaignById(t.campaignId);
+  let body = '<h2 class="steptitle">You\'re here</h2>'
+    + '<p class="stepsub">Check this is the right shop, and what goes up.</p>'
+    + '<div class="here">'
+    +   '<div class="hs">'+esc(t.storeName)+'</div>'
+    +   '<div class="hw">'+esc(t.city)+', '+esc(t.state)+' · <span class="mono">'+esc(t.storeCode)+'</span></div>'
+    +   '<div class="bigfact">'+icon("poster")
+    +     '<div><div class="bn">Put up a <span class="num">'+t.widthFt+' ft × '+t.heightFt+' ft</span> poster</div>'
+    +       '<div class="bs">On the '+esc(t.displayType)+' · '+esc(camp.name)+'</div></div>'
+    +   '</div>'
+    + '</div>'
+    + '<div class="card" style="margin-bottom:10px"><div class="hd"><h3>How the spot looks now</h3></div>'
+    +   '<div class="bd">'+shotHTML(t.beforeImage, "BEFORE")+'</div></div>'
+    + fieldExtras(t);
+
+  const done = fieldDone(t);
+  const next = done.check ? (done.shoot ? 3 : 2) : 1;
+  const label = done.check ? (done.shoot ? "Go to submit" : "Take the photo") : "I'm at the shop";
+  const actions = '<button class="btn back" data-act="nav" data-v="mytasks" aria-label="Back to my jobs">'+icon("back")+'</button>'
+    + '<button class="btn primary" data-act="fstep" data-id="'+t.id+'" data-s="'+next+'">'+esc(label)+icon("fwd")+'</button>';
+  return { body: body, actions: actions };
+}
+
+/* ---------- step 2: check in ---------- */
+function fieldViewCheck(t){
+  const w = ws(t.id);
+  const fence = t.geofenceM || GEOFENCE_M;
+
+  if(fieldDone(t).check){
+    const ci = t.checkIn;
+    let body = '<h2 class="steptitle">Check in</h2>'
+      + '<p class="stepsub">Already done for this visit.</p>'
+      + '<div class="outcome ok"><div class="ot">You checked in</div><div class="ob">'
+      + (ci ? esc(fmtDT(ci.ts)) + ' · <span class="num">' + ci.distance + ' m</span> from the shop.'
+            : 'Recorded on this device.')
       + '</div></div>';
+    const done = fieldDone(t);
+    const next = done.shoot ? 3 : 2;
+    return { body: body,
+      actions: '<button class="btn back" data-act="fstep" data-id="'+t.id+'" data-s="0" aria-label="Back">'+icon("back")+'</button>'
+        + '<button class="btn primary" data-act="fstep" data-id="'+t.id+'" data-s="'+next+'">'
+        + (done.shoot ? "Go to submit" : "Take the photo") + icon("fwd") + '</button>' };
   }
 
-  /* --- Submission in flight ---
-     The task is still In Progress on the server, which is the truth, so the
-     capture form would otherwise stay live. It must not: removing an image
-     whose upload op is already queued deletes the bytes the outbox is about to
-     send, and the op then fails permanently. So while a submission is draining,
-     the workspace is read-only and says exactly what is left to do. */
-  if(t.status === S.PROGRESS && t.submitting){
-    const left = Outbox.groupPending(t.submitting.group);
-    html += checkinCard(t);
-    html += '<div class="card" style="margin-bottom:14px;border-left:3px solid var(--st-progress)">'
-      + '<div class="hd"><h3>Step 2 · Submission queued on this device</h3></div><div class="bd">'
-      + '<div style="font-size:13px;color:var(--text-2);margin-bottom:12px">'
-      +   'Queued ' + esc(fmtDT(t.submitting.at)) + '. '
-      +   '<b>' + t.submitting.bytes + ' upload' + (t.submitting.bytes===1?'':'s') + '</b> and the status change '
-      +   'are waiting to reach the server' + (netUp() ? '' : ' — this device is offline') + '. '
-      +   (left ? ('<b class="num">' + left + '</b> step' + (left===1?'':'s') + ' remaining.')
-              : 'The last step is being applied now.')
+  let body = '<h2 class="steptitle">Check in</h2>'
+    + '<p class="stepsub">This records that you were at '+esc(t.storeName)+'. You need to be inside the shop, '
+    + 'or right outside it.</p>';
+
+  let ready = false;
+  if(w.geo && w.geo.error){
+    body += '<div class="geobox no" style="margin-bottom:12px">'
+      + '<div style="font-weight:680;font-size:15px">Could not get your location</div>'
+      + '<div style="font-size:13px;margin-top:4px;line-height:1.5">'+esc(w.geo.error)+'</div></div>';
+  } else if(w.geo){
+    ready = w.geo.distance <= fence;
+    body += '<div class="geobox '+(ready?"ok":"no")+'" style="margin-bottom:12px">'
+      + '<div style="display:flex;justify-content:space-between;align-items:center;gap:10px">'
+      +   '<div><div class="big num">'+Math.round(w.geo.distance)+' m</div>'
+      +     '<div style="font-size:12.5px;opacity:.9">from '+esc(t.storeName)+'</div></div>'
+      +   '<span class="plain '+(ready?"ok":"stop")+'">'+(ready?"Close enough":"Too far away")+'</span>'
       + '</div>'
-      + '<div class="banner" style="margin:0 0 12px"><div class="bt">This is not submitted yet</div>'
-      +   '<div class="bb">The task stays <b>In Progress</b> until every photograph has landed in storage '
-      +   'and the server has accepted the status change. Closing the app is safe — it resumes on its own.</div></div>'
-      + (w.after.length
-          ? '<div class="shots">' + w.after.map(function(im,i){
-              const tm = tierMeta(im.placement ? im.placement.tier : "C");
-              return '<div>' + shotHTML(im, "AFTER " + (i+1))
-                + '<div style="margin-top:6px"><span class="tierbadge '+tm.cls+'">'
-                + esc(im.placement ? ((im.placement.pass?"":"gates failed · ")+(im.placement.tierLabel||tm.label)) : "unverified placement")
-                + '</span></div></div>';
-            }).join("") + '</div>'
+      + '<div style="font-size:13px;margin-top:9px;line-height:1.5">'
+      +   (ready ? 'Good. Tap <b>Check in here</b> to start the job.'
+                 : 'You need to be within <b class="num">'+fence+' m</b> of the shop. Walk closer, then try again.')
+      + '</div></div>';
+  } else {
+    body += '<div class="geobox" style="margin-bottom:12px;font-size:13.5px;line-height:1.55">'
+      + 'Tap <b>Find me</b> and your phone will confirm you are at the shop. It takes a few seconds.'
+      + '</div>';
+  }
+
+  /* Once the position is good enough, "try again" stops being worth a slot in
+     the action bar — it drops into the body so the bar holds exactly one
+     primary action. */
+  const find = '<button class="btn'+(ready?"":" primary")+'" data-act="checkin" data-id="'+t.id+'"'
+    + (w.busy ? ' disabled' : '') + '>' + icon("pin") + (w.busy ? "Finding…" : (w.geo ? "Try again" : "Find me")) + '</button>';
+  if(ready) body += '<div style="margin:0 0 12px">'+find+'</div>';
+
+  body += '<details class="disc"><summary>'+icon("info")+'Location not working?</summary>'
+    + '<div class="dbd">Some phones and some browsers will not give the app a location — indoors, with the '
+    + 'setting switched off, or on a page opened from a file. You can carry on with a stand-in position so the '
+    + 'job is not blocked; it is recorded as a stand-in, not as a real reading.'
+    + '<div style="margin-top:10px"><button class="btn sm" data-act="simcheckin" data-id="'+t.id+'">'
+    + 'Use a stand-in position</button></div></div></details>';
+
+  const actions = '<button class="btn back" data-act="fstep" data-id="'+t.id+'" data-s="0" aria-label="Back">'+icon("back")+'</button>'
+    + (ready
+        ? '<button class="btn primary" data-act="startwork" data-id="'+t.id+'">'+icon("check")+'Check in here</button>'
+        : find);
+  return { body: body, actions: actions };
+}
+
+/* ---------- step 3: photo ---------- */
+function fieldViewShoot(t){
+  const w = ws(t.id);
+  const shots = w.after;
+
+  let body = '<h2 class="steptitle">Take the photo</h2>';
+
+  if(t.submitting){
+    body += '<p class="stepsub">This job is being sent. You cannot change the photos now.</p>';
+    body += fieldPhotoGrid(t, shots, false);
+    return { body: body,
+      actions: '<button class="btn back" data-act="fstep" data-id="'+t.id+'" data-s="1" aria-label="Back">'+icon("back")+'</button>'
+        + '<button class="btn primary" data-act="fstep" data-id="'+t.id+'" data-s="3">See status'+icon("fwd")+'</button>' };
+  }
+
+  body += '<p class="stepsub">Stand in front of the finished display. The camera tells you when to move back, '
+    + 'move closer or hold steady — take the shot when it says you are ready.</p>';
+
+  if(shots.length){
+    body += fieldPhotoGrid(t, shots, true);
+    /* "Take another" is a secondary thought once there is a photo, so it moves
+       out of the action bar and leaves one obvious primary there. */
+    body += '<div style="margin:0 0 12px"><button class="btn" data-act="arcapture" data-id="'+t.id+'">'
+      + icon("cam")+'Take another photo</button></div>';
+  }
+
+  body += '<details class="disc"><summary>'+icon("info")+'Camera not working?</summary>'
+    + '<div class="dbd">Use a photo already on the phone, or a stand-in picture if you are only trying the app out. '
+    + 'Photos that do not go through the camera guide are still accepted — your manager just checks them by hand.'
+    + '<div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap">'
+    +   '<label class="btn sm" style="cursor:pointer">'+icon("cam")+'Choose from phone'
+    +     '<input type="file" id="afterFile" accept="image/*" multiple style="display:none"></label>'
+    +   '<button class="btn sm" data-act="simafter" data-id="'+t.id+'">Use a stand-in photo</button>'
+    + '</div></div></details>';
+
+  const actions = '<button class="btn back" data-act="fstep" data-id="'+t.id+'" data-s="1" aria-label="Back">'+icon("back")+'</button>'
+    + (shots.length
+        ? '<button class="btn primary" data-act="fstep" data-id="'+t.id+'" data-s="3">Next'+icon("fwd")+'</button>'
+        : '<button class="btn primary" data-act="arcapture" data-id="'+t.id+'">'+icon("cam")+'Open camera</button>');
+  return { body: body, actions: actions };
+}
+function fieldPhotoGrid(t, shots, editable){
+  if(!shots.length) return '';
+  return '<div class="photogrid" style="margin-bottom:12px">' + shots.map(function(im, i){
+    const v = fieldPhotoVerdict(im);
+    return '<div class="photocell">' + shotHTML(im, "PHOTO " + (i+1))
+      + (editable
+          ? '<button class="btn sm rm" data-act="rmafter" data-id="'+t.id+'" data-i="'+i+'">Remove</button>'
           : '')
-      + (w.remarks ? '<div style="margin-top:12px;font-size:13px;color:var(--text-2)"><b>Your remarks:</b> '+esc(w.remarks)+'</div>' : '')
-      + '<div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap">'
-      +   '<button class="btn sm" data-act="syncpanel">Sync status</button>'
-      +   (netUp() ? '<button class="btn sm primary" data-act="syncnow">Try now</button>' : '')
-      + '</div>'
-      + '</div></div>';
-  }
+      + '<div style="margin-top:6px"><span class="plain '+v.cls+'">'+esc(v.text)+'</span></div></div>';
+  }).join("") + '</div>';
+}
 
-  // --- Execution upload step ---
-  if(t.status === S.PROGRESS && !t.submitting){
-    html += checkinCard(t);
-    html += '<div class="card" style="margin-bottom:14px"><div class="hd"><h3>Step 2 · Upload execution proof</h3></div><div class="bd">';
-    html += '<div class="field" id="f_after"><label class="fl">AFTER images <span class="req">*</span></label>';
-    if(w.after.length){
-      html += '<div class="shots" style="margin-bottom:10px">' + w.after.map(function(im,i){
-        const tm = tierMeta(im.placement ? im.placement.tier : "C");
-        return '<div style="position:relative">'+shotHTML(im,"AFTER "+(i+1))
-          + '<button class="btn sm ghost" data-act="rmafter" data-id="'+t.id+'" data-i="'+i+'" '
-          + 'style="position:absolute;top:5px;right:5px;background:rgba(4,10,18,.7);color:#fff">Remove</button>'
-          + '<div style="margin-top:6px"><span class="tierbadge '+tm.cls+'">'
-          + esc(im.placement ? ((im.placement.pass?"":"gates failed · ")+(im.placement.tierLabel||tm.label)) : "unverified placement")
-          + '</span></div></div>';
-      }).join("") + '</div>';
+/* ---------- step 4: submit ---------- */
+function fieldViewSend(t){
+  const w = ws(t.id);
+  const back = '<button class="btn back" data-act="fstep" data-id="'+t.id+'" data-s="2" aria-label="Back">'+icon("back")+'</button>';
+
+  /* Already gone in, one way or another. */
+  if(t.status === S.SUBMITTED || t.status === S.APPROVED || t.status === S.CLOSED){
+    let body = '<h2 class="steptitle">'+(t.status === S.SUBMITTED ? "Sent" : "Finished")+'</h2>';
+    if(t.status === S.SUBMITTED){
+      body += '<div class="outcome wait"><div class="ot">With your manager</div>'
+        + '<div class="ob">Sent '+esc(fmtDT(t.submittedAt))+'. Nothing more to do — you will get an update '
+        + 'when it is approved, or if something needs fixing.</div></div>';
+    } else if(t.status === S.APPROVED){
+      body += '<div class="outcome ok"><div class="ot">Approved</div>'
+        + '<div class="ob">'+esc(userById(t.managerId).name)+' approved this on '+esc(fmtDT(t.approvedAt))+'.</div></div>';
+    } else {
+      body += '<div class="outcome ok"><div class="ot">Job closed</div>'
+        + '<div class="ob">Reference <span class="mono">'+esc(t.completionRef)+'</span>'
+        + (t.closedAt ? ' · '+esc(fmtDT(t.closedAt)) : '')+'.</div></div>';
     }
-    html += '<div class="dropzone">'
-      + '<div style="color:var(--text-2);font-size:12.5px">Attach at least one photo of the completed display</div>'
-      + '<div class="btnrow">'
-      + '<button class="btn sm primary" data-act="arcapture" data-id="'+t.id+'">'+icon("cam")+'Guided poster capture</button>'
-      + '<label class="btn sm" style="cursor:pointer">'+icon("cam")+'Choose files<input type="file" id="afterFile" accept="image/*" multiple style="display:none"></label>'
-      + '<button class="btn sm" data-act="simafter" data-id="'+t.id+'">Simulate photo capture</button>'
-      + '</div>'
-      + '<div class="hint" style="margin-top:8px">Guided capture measures your distance and squareness, superimposes the poster at true '
-      + 'scale, and only then unlocks the shutter. Plain uploads are recorded as <b>unverified placement</b>.</div>'
-      + '</div>'
-      + '<div class="err">At least one AFTER image is required.</div></div>';
-
-    html += '<div class="field" id="f_remarks"><label class="fl" for="m_remarks">Remarks <span class="req">*</span></label>'
-      + '<textarea id="m_remarks" placeholder="Confirm what you installed, any deviations, and store sign-off.">'+esc(w.remarks)+'</textarea>'
-      + '<div class="err">Remarks are required before submitting.</div></div>';
-
-    html += '<button class="btn primary" data-act="submitexec" data-id="'+t.id+'">'+icon("check")+'Submit for approval</button>'
-      + '<div class="hint">Submission stamps your user id, check-in GPS, an ISO timestamp and your device string.</div>'
-      + '</div></div>';
+    body += fieldPhotoGrid(t, t.afterImages, false);
+    if(t.merchRemarks){
+      body += '<div class="card" style="margin-bottom:10px"><div class="hd"><h3>What you wrote</h3></div>'
+        + '<div class="bd" style="font-size:13.5px;color:var(--text-2)">'+esc(t.merchRemarks)+'</div></div>';
+    }
+    body += '<details class="disc"><summary>'+icon("clock")+'What has happened so far</summary>'+fieldHistory(t)+'</details>';
+    return { body: body,
+      actions: back + '<button class="btn primary" data-act="nav" data-v="mytasks">Back to my jobs</button>' };
   }
 
-  if(t.afterImages.length){
-    html += '<div class="card" style="margin-bottom:14px"><div class="hd"><h3>Submitted AFTER images</h3></div><div class="bd">'
-      + '<div style="display:flex;flex-direction:column;gap:10px">'+t.afterImages.map((im,i)=>shotHTML(im,"AFTER "+(i+1))).join("")+'</div>'
-      + (t.merchRemarks ? '<div style="margin-top:12px;font-size:13px;color:var(--text-2)"><b>Your remarks:</b> '+esc(t.merchRemarks)+'</div>':'')
-      + '</div></div>';
+  /* Draining. Deliberately read-only: pulling an image out from under an
+     upload that is already queued would destroy the bytes the queue is about
+     to send. */
+  if(t.submitting){
+    const left = Outbox.groupPending(t.submitting.group);
+    let body = '<h2 class="steptitle">Sending</h2>'
+      + '<div class="readonly-note"><b>Not sent yet.</b> Your '
+      +   t.submitting.bytes + ' photo upload' + (t.submitting.bytes === 1 ? '' : 's')
+      +   ' and the status change are still on this phone'
+      +   (netUp() ? '' : ' — and this phone has no signal right now') + '. '
+      +   (left ? 'About <b class="num">'+left+'</b> step'+(left===1?'':'s')+' left. ' : 'Finishing the last step. ')
+      +   'It is safe to close the app: it picks up where it left off.'
+      + '</div>'
+      + fieldPhotoGrid(t, w.after, false);
+    if(w.remarks){
+      body += '<div class="card" style="margin-bottom:10px"><div class="hd"><h3>What you wrote</h3></div>'
+        + '<div class="bd" style="font-size:13.5px;color:var(--text-2)">'+esc(w.remarks)+'</div></div>';
+    }
+    return { body: body,
+      actions: back
+        + '<button class="btn" data-act="syncpanel">See what is left</button>'
+        + (netUp() ? '<button class="btn primary" data-act="syncnow">Try now</button>' : '') };
   }
-  if(t.checkIn && t.status !== S.PROGRESS) html += checkinCard(t);
-  html += timelineCard(t);
-  return html;
+
+  const n = w.after.length;
+  let body = '<h2 class="steptitle">Send it in</h2>'
+    + '<p class="stepsub">Your manager checks the photo and either approves it or asks for a fix.</p>';
+
+  body += '<div class="field" id="f_after">'
+    + (n
+        ? '<div class="outcome ok" style="margin-bottom:10px"><div class="ot">'
+          + n + ' photo' + (n === 1 ? '' : 's') + ' ready</div>'
+          + '<div class="ob">Taken at this shop and held on this phone until you send.</div></div>'
+          + fieldPhotoGrid(t, w.after, false)
+        : '<div class="outcome fix" style="margin-bottom:10px"><div class="ot">No photo yet</div>'
+          + '<div class="ob">Go back a step and photograph the finished display.</div></div>')
+    + '<div class="err">You need at least one photo before you can send this.</div></div>';
+
+  body += '<div class="field" id="f_remarks"><label class="fl" for="m_remarks">Anything to say about this job?'
+    + ' <span class="req">*</span></label>'
+    + '<textarea id="m_remarks" placeholder="What you put up, anything that was different, and who at the shop signed off.">'
+    + esc(w.remarks)+'</textarea>'
+    + '<div class="err">Write a short note before you send.</div></div>';
+
+  body += '<div class="stepnote">Sending records your name, your check-in location, the time, and the phone you '
+    + 'used. If you have no signal it waits on the phone and goes as soon as you do.</div>';
+
+  return { body: body,
+    actions: back + '<button class="btn primary" data-act="submitexec" data-id="'+t.id+'">'+icon("check")+'Send to manager</button>' };
+}
+
+function merchTaskDetail(t){
+  const cur  = fieldStepIndex(t);
+  const step = [fieldViewHere, fieldViewCheck, fieldViewShoot, fieldViewSend][cur](t);
+
+  return fieldReworkBanner(t)
+    + fieldSyncBanner(t)
+    + fieldRail(t, cur)
+    + step.body
+    + '<div class="actionbar">' + step.actions + '</div>';
 }
 
 function bindTaskDetail(t){
@@ -7831,6 +8518,35 @@ function renderNav(){
         + '</button>';
     }).join("");
 }
+/* ---------- bottom bar ----------
+   On a phone the sidebar is gone and this is the whole navigation. Bottom, not
+   top: a thumb does not reach the top of a phone. A merchandiser gets two
+   targets — their jobs, and one control holding everything else. A manager
+   gets their real destinations, scrollable. */
+function botNavItems(){
+  const role = myRole();
+  if(role === "Merchandiser") return [ {v:"mytasks", label:"My jobs", i:"list"} ];
+  return navFor(role).slice(0, 4);
+}
+function renderBotNav(){
+  const el = $("#botnav"); if(!el) return;
+  if(!signedIn()){ el.innerHTML = ""; el.classList.remove("many"); return; }
+  const items = botNavItems();
+  const alias = { campaign:"campaigns", review:"approvals",
+                  task: myRole()==="Merchandiser" ? "mytasks" : "tasks" };
+  const on = alias[view.name] || view.name;
+  el.classList.toggle("many", items.length > 2);
+  el.innerHTML = '<div class="row">'
+    + items.map(function(it){
+        return '<button class="botitem'+(on===it.v?" on":"")+'" data-act="nav" data-v="'+it.v+'">'
+          + icon(it.i) + '<span>'+esc(it.label)+'</span>'
+          + (it.count ? '<span class="cnt num">'+it.count+'</span>' : '')
+          + '</button>';
+      }).join("")
+    + '<button class="botitem" data-act="botmore" aria-label="More">'+icon("dots")+'<span>More</span></button>'
+    + '</div>';
+}
+
 function renderChrome(){
   const u = me();
   const role = myRole();
@@ -7860,11 +8576,26 @@ function renderChrome(){
   const titles = {
     dashboard:"Dashboard", campaigns:"Campaigns", campaign:"Campaigns", tasks:"All Tasks",
     create:"Create Task", approvals:"Approvals", review:"Approvals › Review",
-    mytasks:"My Tasks", task:"Task detail", users:"Users & Roles", audit:"Audit Trail"
+    mytasks: myRole()==="Merchandiser" ? "My jobs" : "My Tasks",
+    task: myRole()==="Merchandiser" ? "Job" : "Task detail",
+    users:"Users & Roles", audit:"Audit Trail"
   };
+  /* Two halves. Desktop shows both; the phone shows only the second one —
+     "where am I" is the only thing worth the width up there, and on a task
+     screen that is the shop's name, not the words "Task detail". */
+  const here = (function(){
+    if(view.name === "task"){
+      const t = view.params && taskById(view.params.id);
+      if(t) return t.storeName;
+    }
+    return titles[view.name] || view.name;
+  })();
   $("#crumb").innerHTML = signedIn()
-    ? '<b>'+esc(u.name)+'</b> · '+esc(role)+' &nbsp;›&nbsp; '+esc(titles[view.name]||view.name)
+    ? '<span class="cwho"><b>'+esc(u.name)+'</b> · '+esc(role)+' &nbsp;›&nbsp; </span>'
+      + '<span class="cnow">'+esc(here)+'</span>'
     : 'NIVA Field Ops';
+
+  renderBotNav();
 }
 
 /* ---------- sync status: honest about what has and has not reached the server ---------- */
@@ -7976,14 +8707,21 @@ function toggleMenu(){
   if(ui.popOpen === "gear"){ closePops(); return; }
   closePops(); ui.popOpen = "gear";
   const s = syncStatus();
+  /* The engineering shelf — local state, geometry self-test, AR diagnostics,
+     capability report — is for whoever is debugging a build, not for someone
+     holding the phone in a shop. Same actions, same handlers; a merchandiser
+     is simply not offered them. */
+  const tools = myRole() !== "Merchandiser"
+    ? '<button class="menuitem" data-act="statemodal">Inspect local state</button>'
+      + '<button class="menuitem" data-act="clearlocal">Clear local cache</button>'
+      + '<button class="menuitem" data-act="selftest">Run geometry self-test</button>'
+      + '<button class="menuitem" data-act="diagnostics">AR capture diagnostics</button>'
+      + '<button class="menuitem" data-act="capsmodal">Capture capability report</button>'
+    : '';
   $("#pops").innerHTML = '<div class="pop" style="width:268px"><div class="ph">Menu</div>'
     + '<button class="menuitem" data-act="syncpanel">Sync status — '+esc(s.label)+'</button>'
     + '<button class="menuitem" data-act="resyncnow">Refresh from server</button>'
-    + '<button class="menuitem" data-act="statemodal">Inspect local state</button>'
-    + '<button class="menuitem" data-act="clearlocal">Clear local cache</button>'
-    + '<button class="menuitem" data-act="selftest">Run geometry self-test</button>'
-    + '<button class="menuitem" data-act="diagnostics">AR capture diagnostics</button>'
-    + '<button class="menuitem" data-act="capsmodal">Capture capability report</button>'
+    + tools
     + '<button class="menuitem" data-act="signout">Sign out</button>'
     + '<div style="padding:10px 12px;border-top:1px solid var(--border);font-size:11.5px;color:var(--text-3)">'
     + 'Signed in as <b>'+esc(me().name)+'</b> ('+esc(myRole()||"—")+'). Role comes from your profile on the server '
@@ -8082,6 +8820,22 @@ document.addEventListener("click", function(e){
   switch(act){
     case "nav":        go(el.dataset.v, id ? {id:id} : {}); break;
     case "open":       go("task", {id:id}); break;
+    case "botmore":    toggleMenu(); break;
+    case "fstep":      {
+      /* Move through the field sequence. Stored against a signature of the
+         work's state, so completing a step drops the override and the
+         sequence advances on its own. */
+      const t = taskById(id);
+      if(t){
+        const s = parseInt(el.dataset.s, 10) || 0;
+        if(fieldStepEnabled(t, s)){
+          fieldStep[t.id] = { step:s, sig: fieldStepSig(t) };
+          window.scrollTo(0,0);
+          render();
+        }
+      }
+      break;
+    }
     case "back":       history.length>1 ? go(myRole()==="Merchandiser"?"mytasks":"tasks",{}) : go("dashboard",{}); break;
     case "gran":       ui.granularity = el.dataset.g; render(); break;
     case "createtask": doCreateTask(el.dataset.mode); break;
