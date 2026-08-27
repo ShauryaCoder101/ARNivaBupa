@@ -978,6 +978,68 @@ const SIGNED_URL_REFRESH_S = 660;   // re-sign once 11 minutes have passed
 const POLL_INTERVAL_MS     = 45000;
 
 /* ==========================================================
+   0b. APP MODE  —  poster mockup (site survey)  vs  installation verification
+   ------------------------------------------------------------
+   There are two products in this file, and this one constant decides which of
+   them ships.
+
+     "mockup"        SITE SURVEY. The poster is a FILE and is never installed.
+                     A manager uploads the artwork with its true size in feet
+                     and assigns stores. A merchandiser visits an assigned
+                     store, finds an EMPTY WALL that could hold it, and the app
+                     superimposes the artwork on that wall at true scale. The
+                     manager later browses those mockups and shortlists which
+                     walls are suitable. There is no "before", no proof of
+                     installation and no rework cycle.
+
+     "verification"  INSTALLATION VERIFICATION — the original product. A poster
+                     is physically installed, photographed from spec, and the
+                     capture is the evidence that it happened: before/after
+                     comparison, verification tiers, placement-verified KPIs,
+                     completion records, and a rework loop when a manager
+                     rejects the work.
+
+   NOTHING IS DELETED FOR "mockup". Every line of the verification product is
+   still here and still RUNS: placements are still measured, tiers are still
+   assigned, the same audit events are still written, the same rows still reach
+   the same tables, the AR engine is untouched. What the mode changes is what is
+   SHOWN and how it is WORDED. Set APP_MODE = "verification" and today's build
+   comes back whole, with no other edit anywhere in the file.
+
+   THE DATABASE KNOWS NOTHING ABOUT THIS FLAG, and must not. `task_status`
+   keeps its own names — Draft / Assigned / In Progress / Submitted /
+   Rework Required / Approved / Closed — niva_tasks_transition_guard keeps
+   enforcing the same edges, and RLS keeps keying off them. Mockup mode
+   relabels them for humans only, in statusLabel():
+
+       Draft            ->  "Draft"
+       Assigned         ->  "To visit"
+       In Progress      ->  "On site"
+       Submitted        ->  "Mockup captured"
+       Approved         ->  "Wall suitable"
+       Rework Required  ->  "Wall not suitable"
+       Closed           ->  "Done"
+
+   So the manager's two decisions read as a shortlist — "Wall suitable" and
+   "Not suitable" — while travelling down the existing Approve / Reject edges.
+   Rejecting still demands a reason and still routes through doReject(); it
+   simply stops being phrased as a demand to redo the work.
+
+   `notification_kind` is a Postgres ENUM, so those strings are never rewritten
+   either: they are relabelled on the way out by notifLabel(). Audit action text
+   is likewise stored verbatim and relabelled by auditActionLabel(), so an event
+   row is byte-identical in both modes and rows written before a flip still read
+   correctly after it.
+
+   Grep for MOCKUP to find every gate.
+   ========================================================== */
+const APP_MODE = "mockup";                    // "mockup" | "verification"
+const MOCKUP   = (APP_MODE === "mockup");
+/* Choose between two literals by mode. Reads at the call site as
+   byMode(what the survey says, what the verifier says). */
+function byMode(mockup, verification){ return MOCKUP ? mockup : verification; }
+
+/* ==========================================================
    1. Constants & domain model
    ========================================================== */
 const LS_KEY = "niva.state.v2";              // legacy prototype blob (detected once, for the migration notice)
@@ -1047,6 +1109,26 @@ const REF_PRESETS = [
                  auto:true, tolMm:2},
   {key:"custom", label:"Custom…",               mm:0,     quad:false, tolPct:0.005}
 ];
+/* THE EMPTY-WALL PROBLEM.
+
+   In MOCKUP MODE the poster is a file and is never installed, so the
+   merchandiser is always pointing the camera at a BARE wall. That kills the
+   poster-as-reference source outright: there is no poster in the frame to scale
+   from, and offering it would be offering something that cannot occur.
+
+   What is left, in order:
+     · ARCore (Android Chrome) — the hit-test measures the wall plane itself.
+       No reference of any kind is needed. This is the primary path.
+     · No ARCore (iOS, older Android) — a blank wall gives the camera nothing
+       whose size it knows, so a printed A4 sheet taped flat to the wall is the
+       ONLY way to get a scale. It is not a fallback here, it is the method.
+     · Manual entry — a typed guess, and genuinely the last resort.
+
+   The preset stays in REF_PRESETS so verification mode is untouched; it is
+   simply not offered while APP_MODE is "mockup". */
+function refPresets(){
+  return MOCKUP ? REF_PRESETS.filter(function(p){ return p.key !== "poster"; }) : REF_PRESETS;
+}
 /* Verification tiers, strongest first. The "s" suffix means the photo was read
    back out of the SAME XR frame that produced the measurement (raw camera
    access); without it the photo came from the session-handover fallback. */
@@ -1067,6 +1149,16 @@ const TIER_META = {
   B:   {cls:"tier-ref", label:"Reference-scaled", rank:2, verified:true},
   Be:  {cls:"tier-est", label:"Estimated",        rank:1, verified:false},
   C:   {cls:"tier-unv", label:"Unverified",       rank:0, verified:false}
+};
+/* The same eight tiers, said in words a person holding the phone can act on.
+   This is a DISPLAY map only: `tier`, `rank` and `verified` are untouched, the
+   tier letter still lands on the placement row, and the manager's review screen
+   and the diagnostics panel still print TIER_META.label. */
+const TIER_FIELD_LABEL = {
+  Asd:"Phone is measuring the wall", As:"Phone is measuring the wall",
+  Ad: "Phone is measuring the wall", A: "Phone is measuring the wall",
+  Bq: "Measuring from the sheet",    B: "Measuring from the sheet",
+  Be: "Rough size only",             C: "Typed in by hand"
 };
 const tierMeta = k => TIER_META[k] || TIER_META.C;
 const isARTier = k => k === "As" || k === "Asd" || k === "A" || k === "Ad";
@@ -1099,6 +1191,63 @@ const STATUS_HEX = {
   [S.DRAFT]:"#8a95a3", [S.ASSIGNED]:"#2563eb", [S.PROGRESS]:"#e0930f",
   [S.SUBMITTED]:"#7c3aed", [S.REWORK]:"#e11d48", [S.APPROVED]:"#16a34a", [S.CLOSED]:"#0d9488"
 };
+
+/* ---- mockup-mode relabelling ----
+   The KEYS below are the database's own enum values and are never rewritten;
+   only the words a human reads change. Everything that prints a status goes
+   through statusLabel(), so there is exactly one place to look. */
+const MOCKUP_STATUS_LABEL = {
+  [S.DRAFT]:"Draft",           [S.ASSIGNED]:"To visit",
+  [S.PROGRESS]:"On site",      [S.SUBMITTED]:"Mockup captured",
+  [S.REWORK]:"Wall not suitable", [S.APPROVED]:"Wall suitable",
+  [S.CLOSED]:"Done"
+};
+function statusLabel(s){ return (MOCKUP && MOCKUP_STATUS_LABEL[s]) || s; }
+
+/* notification_kind is a Postgres enum — the stored value is never changed,
+   it is only read differently. */
+const MOCKUP_NOTIF_LABEL = {
+  "Task Assigned":"Store assigned",     "Task Submitted":"Mockup received",
+  "Approval Required":"Wall to shortlist", "Task Approved":"Wall suitable",
+  "Rework Required":"Wall not suitable", "Task Closed":"Survey closed",
+  "Placement Verified":"Mockup captured","Unverified Capture":"Mockup captured"
+};
+function notifLabel(k){ return (MOCKUP && MOCKUP_NOTIF_LABEL[k]) || k; }
+
+/* Audit ACTION strings are free text written by this app. They are stored
+   exactly as they always were — an audit row is byte-identical in both modes,
+   which is precisely what makes this flag reversible — and relabelled on the
+   way OUT, so rows written before a flip read correctly after it. */
+const MOCKUP_AUDIT_LABEL = {
+  "Task assigned":"Store assigned",
+  "Capture brief set":"Poster brief set",
+  "Before image attached":"Reference photo attached",
+  "Checked in at store":"Checked in at store",
+  "Execution started":"Visit started",
+  "Guided capture recorded":"Mockup captured",
+  "Execution submitted":"Mockup sent for shortlisting",
+  "Execution approved":"Wall marked suitable",
+  "Rework required":"Wall marked not suitable",
+  "Task closed":"Survey closed"
+};
+function auditActionLabel(a){
+  if(!MOCKUP) return a;
+  if(MOCKUP_AUDIT_LABEL[a]) return MOCKUP_AUDIT_LABEL[a];
+  const m = /^Status → (.+)$/.exec(a || "");
+  return m ? ("Status → " + statusLabel(m[1])) : a;
+}
+/* Audit DETAIL is the recorded measurement narrative and is likewise kept
+   verbatim in the row. Mockup mode only drops the verification vocabulary from
+   it on the way out — the numbers, the gates and the GPS all still print. */
+function auditDetailLabel(d){
+  if(!MOCKUP || !d) return d || "";
+  return String(d)
+    .replace(/\s*·\s*placement (?:VERIFIED|NOT VERIFIED|UNVERIFIED)[^·]*/i, "")
+    .replace(/imagery verified against brief/i, "mockup reviewed")
+    .replace(/Completion record generated by the server on close/i, "Survey closed on the server")
+    .replace(/Status moved to In Progress/i, "Status moved to On site");
+}
+
 const DISPLAY_TYPES = ["In-shop Branding","Gondola End Cap","Window Display","Floor Stack","Shelf Strip","Standee"];
 const REGIONS = ["North","South","East","West"];
 
@@ -4148,7 +4297,7 @@ function canTransition(from,to){ return (TRANSITIONS[from]||[]).indexOf(to) >= 0
 function transition(task, to, opts){
   opts = opts || {};
   if(!canTransition(task.status, to)){
-    toast("Illegal transition: "+task.status+" → "+to, true);
+    toast("Illegal transition: "+statusLabel(task.status)+" → "+statusLabel(to), true);
     return false;
   }
   const group = opts.group || uuid4();
@@ -4363,7 +4512,7 @@ const ICONS = {
   info:'<circle cx="12" cy="12" r="9"/><path d="M12 16v-4M12 8h.01"/>'
 };
 const icon = (k, cls)=> '<svg class="'+(cls||"")+'" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">'+ICONS[k]+'</svg>';
-const chip = s => '<span class="chip '+STATUS_CLASS[s]+'">'+esc(s)+'</span>';
+const chip = s => '<span class="chip '+STATUS_CLASS[s]+'">'+esc(statusLabel(s))+'</span>';
 
 /* ---------- per-task sync state ----------
    The status chip says what the SERVER believes. This says what this device is
@@ -4420,13 +4569,13 @@ function progressBarC(c, total){
   let html = '<div class="bar">';
   ALL_STATUS.forEach(function(s){
     if(!c[s]) return;
-    html += '<span style="width:'+(c[s]/n*100).toFixed(2)+'%;background:'+STATUS_HEX[s]+'" title="'+esc(s)+': '+c[s]+'"></span>';
+    html += '<span style="width:'+(c[s]/n*100).toFixed(2)+'%;background:'+STATUS_HEX[s]+'" title="'+esc(statusLabel(s))+': '+c[s]+'"></span>';
   });
   return html + '</div>';
 }
 function barLegendC(c){
   return '<div class="barlegend">' + ALL_STATUS.filter(s=>c[s]).map(function(s){
-    return '<span><i style="background:'+STATUS_HEX[s]+'"></i>'+esc(s)+' <b class="num">'+c[s]+'</b></span>';
+    return '<span><i style="background:'+STATUS_HEX[s]+'"></i>'+esc(statusLabel(s))+' <b class="num">'+c[s]+'</b></span>';
   }).join("") + '</div>';
 }
 function progressBar(tasks){ return progressBarC(counts(tasks), tasks.length); }
@@ -4499,7 +4648,23 @@ function viewDashboard(){
   const vPct  = k.submissions ? Math.round(k.verified/k.submissions*100) : 0;
   const sPct  = k.submissions ? Math.round(k.sameFrame/k.submissions*100) : 0;
 
-  const tiles = [
+  /* MOCKUP MODE: the three verification tiles measure something this product
+     does not claim — that a poster really is on a wall. They are replaced by
+     the four numbers a survey actually turns on: how many stores are still to
+     visit, how many mockups have come back, and how the shortlist is going.
+     The underlying counts are unchanged and still come from the same server
+     rollup; `verified` / `sameFrame` / `unverified` are still computed above
+     and still written to the database, they are simply not displayed. */
+  const tiles = MOCKUP ? [
+    ["Stores planned", k.total, "across "+CAMPAIGNS.length+" campaign"+(CAMPAIGNS.length===1?"":"s"), ""],
+    ["Stores to visit", k.c[S.ASSIGNED], "assigned, not started", ""],
+    ["On site now", k.c[S.PROGRESS], "merchandiser has checked in", ""],
+    ["Mockups captured", k.submissions, "walls photographed with the poster overlaid", "accent"],
+    ["Awaiting shortlist", k.c[S.SUBMITTED], "waiting on a manager's decision", ""],
+    ["Walls suitable", k.completed, "shortlisted for this poster", "accent"],
+    ["Walls rejected", k.rework, "not suitable for this poster", ""],
+    ["% stores surveyed", k.pct+"%", "of planned stores decided", "accent"]
+  ] : [
     ["Total Stores Planned", k.total, "across "+CAMPAIGNS.length+" campaigns", ""],
     ["Completed", k.completed, "approved + closed", ""],
     ["Pending", k.pending, "draft + assigned", ""],
@@ -4515,7 +4680,7 @@ function viewDashboard(){
     ["Unverified captures", k.unverified,
      k.unverified ? "no distance or angle measurement" : "every submission was measured", ""]
   ];
-  let html = '<div class="pagehd"><div><h1>Execution Dashboard</h1>'
+  let html = '<div class="pagehd"><div><h1>'+byMode("Site Survey Dashboard","Execution Dashboard")+'</h1>'
     + '<p>' + esc(src.why) + '</p></div>'
     + '<div class="spacer" style="flex:1"></div>'
     + '<span class="chip ' + (src.kind === "server" ? "pass plain" : "queued") + '">'
@@ -4555,14 +4720,14 @@ function viewDashboard(){
   html += '</div></div>';
 
   // donut
-  html += '<div class="card"><div class="hd"><h3>Status Breakdown</h3></div>'
+  html += '<div class="card"><div class="hd"><h3>'+byMode("Where the stores stand","Status Breakdown")+'</h3></div>'
     + '<div class="bd" style="display:flex;gap:18px;align-items:center;flex-wrap:wrap">'
     + '<div style="color:var(--text)">'+donut(k.c, k.total)+'</div>'
     + '<div style="flex:1;min-width:150px">'
     + ALL_STATUS.map(function(s){
         return '<div style="display:flex;align-items:center;gap:8px;padding:3px 0;font-size:12.5px">'
           + '<i style="width:9px;height:9px;border-radius:2px;background:'+STATUS_HEX[s]+';display:inline-block"></i>'
-          + '<span style="flex:1">'+esc(s)+'</span>'
+          + '<span style="flex:1">'+esc(statusLabel(s))+'</span>'
           + '<b class="num">'+k.c[s]+'</b>'
           + '<span class="num" style="color:var(--text-3);width:38px;text-align:right">'+(k.total?Math.round(k.c[s]/k.total*100):0)+'%</span>'
           + '</div>';
@@ -4578,10 +4743,10 @@ function viewDashboard(){
   html += '<div class="sectlabel">Recent activity</div><div class="card"><div class="bd">'
     + '<div class="tl">'
     + feed.slice(0,14).map(function(f){
-        return '<div class="ev"><div class="a">'+esc(f.a.action)
+        return '<div class="ev"><div class="a">'+esc(auditActionLabel(f.a.action))
           + ' <span style="color:var(--text-3);font-weight:400">— '+esc(f.t.storeName)+'</span></div>'
           + '<div class="m">'+esc(f.a.actor)+' · '+esc(f.a.role)+' · '+esc(fmtDT(f.a.ts))+' · '+esc(ago(f.a.ts))+'</div>'
-          + (f.a.detail ? '<div class="d">'+esc(f.a.detail)+'</div>' : "")
+          + (f.a.detail ? '<div class="d">'+esc(auditDetailLabel(f.a.detail))+'</div>' : "")
           + '</div>';
       }).join("")
     + '</div></div></div>';
@@ -4593,7 +4758,9 @@ function viewDashboard(){
    9. Views — Campaigns
    ========================================================== */
 function viewCampaigns(){
-  let html = '<div class="pagehd"><div><h1>Campaigns</h1><p>Each campaign bundles the store-level execution tasks for a brand cycle.</p></div>'
+  let html = '<div class="pagehd"><div><h1>Campaigns</h1><p>'
+    + byMode("Each campaign bundles the stores to be surveyed for one poster.",
+             "Each campaign bundles the store-level execution tasks for a brand cycle.")+'</p></div>'
     + '<div class="spacer" style="flex:1"></div>'
     + (myRole()==="Manager" ? '<button class="btn primary" data-act="nav" data-v="create">'+icon("plus")+'New task</button>' : '')
     + '</div>';
@@ -4623,7 +4790,7 @@ function viewCampaigns(){
       +   '<div style="font-size:12.5px;color:var(--text-3);margin-top:6px;max-width:62ch">'+esc(c.note)+'</div>'
       + '</div>'
       + '<div style="text-align:right"><div class="num" style="font-size:26px;font-weight:660;letter-spacing:-.02em">'+k.pct+'%</div>'
-      +   '<div style="font-size:11.5px;color:var(--text-3)"><span class="num">'+k.completed+'</span> of <span class="num">'+k.total+'</span> stores done</div>'
+      +   '<div style="font-size:11.5px;color:var(--text-3)"><span class="num">'+k.completed+'</span> of <span class="num">'+k.total+'</span> '+byMode("walls shortlisted","stores done")+'</div>'
       +   '<button class="btn sm" style="margin-top:8px" data-act="nav" data-v="campaign" data-id="'+c.id+'">Open campaign</button>'
       + '</div></div>'
       + '<div style="margin-top:14px">'+progressBar(ts)+barLegend(ts)+'</div>'
@@ -4661,7 +4828,7 @@ function taskTable(tasks, title, withFilters){
     if(f.campaign) list = list.filter(t=>t.campaignId===f.campaign);
     filterHTML = '<div class="filters">'
       + '<input id="fq" placeholder="Search store, code, city…" value="'+esc(f.q)+'">'
-      + '<select id="fstatus"><option value="">All statuses</option>'+ALL_STATUS.map(s=>'<option '+(f.status===s?"selected":"")+'>'+esc(s)+'</option>').join("")+'</select>'
+      + '<select id="fstatus"><option value="">All statuses</option>'+ALL_STATUS.map(s=>'<option value="'+esc(s)+'" '+(f.status===s?"selected":"")+'>'+esc(statusLabel(s))+'</option>').join("")+'</select>'
       + '<select id="fregion"><option value="">All regions</option>'+REGIONS.map(s=>'<option '+(f.region===s?"selected":"")+'>'+esc(s)+'</option>').join("")+'</select>'
       + '<select id="fcamp"><option value="">All campaigns</option>'+CAMPAIGNS.map(c=>'<option value="'+c.id+'" '+(f.campaign===c.id?"selected":"")+'>'+esc(c.name)+'</option>').join("")+'</select>'
       + '<span style="color:var(--text-3);font-size:12px" class="num">'+list.length+' of '+tasks.length+'</span>'
@@ -4690,8 +4857,10 @@ function taskTable(tasks, title, withFilters){
 }
 
 function viewTasks(){
-  const html = '<div class="pagehd"><div><h1>All Tasks</h1><p>Every store-level execution task across the programme.</p></div></div>'
-    + taskTable(state.tasks, "Task register", true);
+  const html = '<div class="pagehd"><div><h1>'+byMode("All Stores","All Tasks")+'</h1><p>'
+    + byMode("Every store on the survey list, and where each one has got to.",
+             "Every store-level execution task across the programme.")+'</p></div></div>'
+    + taskTable(state.tasks, byMode("Store register","Task register"), true);
   return { html: html, post: bindFilters };
 }
 function bindFilters(){
@@ -4736,8 +4905,10 @@ function viewCreate(){
     '<option value="'+t.id+'">'+esc(t.storeName)+' — '+esc(t.storeCode)+'</option>').join("");
   const today = new Date(Date.now()+2*86400000).toISOString().slice(0,10);
 
-  let html = '<div class="pagehd"><div><h1>Create Task</h1>'
-    + '<p>Define one store-level execution. The merchandiser sees this brief on their device.</p></div></div>';
+  let html = '<div class="pagehd"><div><h1>'+byMode("Add a store to survey","Create Task")+'</h1>'
+    + '<p>'+byMode("One store, one poster. The merchandiser sees this brief on their phone and goes looking for a wall.",
+                   "Define one store-level execution. The merchandiser sees this brief on their device.")
+    + '</p></div></div>';
 
   html += '<div class="split"><div class="card"><div class="hd"><h3>Task brief</h3></div><div class="bd">'
     + '<form id="ctf" novalidate>'
@@ -4762,11 +4933,12 @@ function viewCreate(){
     + '</div>'
 
     + '<div class="grid2">'
-    + fField("c_date","Execution date",'<input id="c_date" type="date" value="'+today+'">',true)
+    + fField("c_date",byMode("Visit date","Execution date"),'<input id="c_date" type="date" value="'+today+'">',true)
     + fField("c_type","Display type",'<select id="c_type"><option value="">Select…</option>'+DISPLAY_TYPES.map(d=>'<option>'+esc(d)+'</option>').join("")+'</select>',true)
     + '</div>'
 
-    + '<div class="sectlabel" style="margin-top:4px">Poster &amp; guided capture</div>'
+    + '<div class="sectlabel" style="margin-top:4px">'
+    + byMode("Poster &amp; mockup settings","Poster &amp; guided capture")+'</div>'
     + '<div class="grid2">'
     + fField("c_w","Poster width (ft)",'<input id="c_w" type="number" min="0.5" step="0.5" placeholder="4">',true)
     + fField("c_h","Poster height (ft)",'<input id="c_h" type="number" min="0.5" step="0.5" placeholder="3">',true)
@@ -4781,6 +4953,7 @@ function viewCreate(){
     + '</div>'
     + '<div class="hint" style="margin:-6px 0 14px">The shutter stays locked until the merchandiser is '
     + '<b class="num">' + STANDOFF_FT.toFixed(1) + ' ft</b> (default) from the wall, within tolerance, and square to it on every axis. '
+    + byMode("That is what lets the poster be drawn at its real size. ","")
     + '<button type="button" class="btn sm ghost" data-act="posterdefaults" style="padding:2px 7px">Use campaign defaults</button></div>'
 
     + '<div class="grid2">'
@@ -4789,28 +4962,36 @@ function viewCreate(){
     + '</div>'
     + '<div class="hint" style="margin:-6px 0 14px">Auto-filled when you pick a store above. Editable — the 150 m geofence is measured from these coordinates.</div>'
 
-    + fField("c_instr","Execution instructions",'<textarea id="c_instr" placeholder="What exactly should the merchandiser do on site?"></textarea>',true)
+    + fField("c_instr", byMode("What to tell the merchandiser","Execution instructions"),
+        '<textarea id="c_instr" placeholder="'
+        + byMode("What kind of wall are you after, and anywhere in the shop worth trying first?",
+                 "What exactly should the merchandiser do on site?")+'"></textarea>',true)
     + '</form>'
     + '</div></div>';
 
-  // before image panel
-  html += '<div><div class="card"><div class="hd"><h3>BEFORE image <span class="chip fail plain" style="margin-left:4px">required</span></h3></div><div class="bd">'
-    + '<div id="beforeSlot">'+ (draftBefore ? shotHTML(draftBefore,"BEFORE") : '') +'</div>'
-    + '<div class="field" id="f_before" style="margin-top:'+(draftBefore?"12px":"0")+'">'
-    + '<div class="dropzone">'
-    + '<div style="color:var(--text-2);font-size:12.5px">Attach the store baseline photo</div>'
-    + '<div class="btnrow">'
-    + '<label class="btn sm" style="cursor:pointer">'+icon("cam")+'Choose file<input type="file" id="c_file" accept="image/*" style="display:none"></label>'
-    + '<button type="button" class="btn sm" data-act="simbefore">Simulate photo capture</button>'
-    + (draftBefore ? '<button type="button" class="btn sm ghost" data-act="clearbefore">Remove</button>' : '')
-    + '</div></div>'
-    + '<div class="err">A BEFORE image is required before this task can be created.</div>'
-    + '</div>'
-    + '<div class="hint">Images are geo-tagged with the store coordinates and stamped with an ISO timestamp on upload.</div>'
-    + '</div></div>'
+  /* BEFORE-image panel — VERIFICATION MODE ONLY. A mockup has no "before":
+     the wall has not been chosen yet, and nothing is going to be installed on
+     it. The whole panel, its file input and its required-field validation are
+     gated together so there is nothing left to trip over. */
+  html += '<div>'
+    + (MOCKUP ? '' :
+      '<div class="card"><div class="hd"><h3>BEFORE image <span class="chip fail plain" style="margin-left:4px">required</span></h3></div><div class="bd">'
+      + '<div id="beforeSlot">'+ (draftBefore ? shotHTML(draftBefore,"BEFORE") : '') +'</div>'
+      + '<div class="field" id="f_before" style="margin-top:'+(draftBefore?"12px":"0")+'">'
+      + '<div class="dropzone">'
+      + '<div style="color:var(--text-2);font-size:12.5px">Attach the store baseline photo</div>'
+      + '<div class="btnrow">'
+      + '<label class="btn sm" style="cursor:pointer">'+icon("cam")+'Choose file<input type="file" id="c_file" accept="image/*" style="display:none"></label>'
+      + '<button type="button" class="btn sm" data-act="simbefore">Simulate photo capture</button>'
+      + (draftBefore ? '<button type="button" class="btn sm ghost" data-act="clearbefore">Remove</button>' : '')
+      + '</div></div>'
+      + '<div class="err">A BEFORE image is required before this task can be created.</div>'
+      + '</div>'
+      + '<div class="hint">Images are geo-tagged with the store coordinates and stamped with an ISO timestamp on upload.</div>'
+      + '</div></div>')
 
     // poster artwork panel
-    + '<div class="card" style="margin-top:14px"><div class="hd"><h3>Poster artwork '
+    + '<div class="card"'+(MOCKUP?'':' style="margin-top:14px"')+'><div class="hd"><h3>Poster artwork '
     + '<span class="chip fail plain" style="margin-left:4px">required</span></h3></div><div class="bd">'
     + '<div id="posterSlot">' + (draftPoster
         ? '<div class="posterthumb" style="max-width:100%"><img alt="poster artwork" src="'+resolveImg(draftPoster.src)+'"></div>'
@@ -4818,7 +4999,9 @@ function viewCreate(){
         : '') + '</div>'
     + '<div class="field" id="f_poster" style="margin-top:'+(draftPoster?"12px":"0")+'">'
     + '<div class="dropzone">'
-    + '<div style="color:var(--text-2);font-size:12.5px">The image superimposed on the wall at true scale</div>'
+    + '<div style="color:var(--text-2);font-size:12.5px">'
+    + byMode("The JPEG or PNG that gets superimposed on the wall at true scale",
+             "The image superimposed on the wall at true scale")+'</div>'
     + '<div class="btnrow">'
     + '<label class="btn sm" style="cursor:pointer">'+icon("cam")+'Choose file<input type="file" id="c_poster" accept="image/*" style="display:none"></label>'
     + '<button type="button" class="btn sm" data-act="simposter">Simulate artwork</button>'
@@ -4826,8 +5009,13 @@ function viewCreate(){
     + '</div></div>'
     + '<div class="err">Poster artwork is required — it is what the merchandiser aligns to.</div>'
     + '</div>'
-    + '<div class="hint">Upload the print-ready key visual. The merchandiser never gets to rescale it: '
-    + 'its on-screen size is derived from the measured distance, so the overlay is the verification.</div>'
+    + '<div class="hint">'
+    + byMode('Upload the artwork exactly as it would print. The merchandiser never gets to rescale it — '
+             + 'its on-screen size comes from the measured distance to the wall, so what they photograph is '
+             + 'what the poster would really look like there.',
+             'Upload the print-ready key visual. The merchandiser never gets to rescale it: '
+             + 'its on-screen size is derived from the measured distance, so the overlay is the verification.')
+    + '</div>'
     + '</div></div>'
 
     + '<div class="card" style="margin-top:14px"><div class="bd">'
@@ -4835,7 +5023,9 @@ function viewCreate(){
     + '<button class="btn primary" data-act="createtask" data-mode="assign">'+icon("check")+'Create &amp; assign</button>'
     + '<button class="btn" data-act="createtask" data-mode="draft">Save as draft</button>'
     + '</div>'
-    + '<div class="hint" style="margin-top:9px">“Create &amp; assign” moves the task Draft → Assigned and notifies the merchandiser.</div>'
+    + '<div class="hint" style="margin-top:9px">'
+    + byMode('“Create &amp; assign” moves the store from <b>Draft</b> to <b>To visit</b> and tells the merchandiser.',
+             '“Create &amp; assign” moves the task Draft → Assigned and notifies the merchandiser.')+'</div>'
     + '</div></div></div>';
 
   html += '</div>';
@@ -4917,8 +5107,9 @@ function doCreateTask(mode){
       bad++;
     }
   });
+  /* Absent entirely in mockup mode — see the panel gate in viewCreate(). */
   const fb = $("#f_before");
-  if(!draftBefore){ fb.classList.add("bad"); bad++; } else { fb.classList.remove("bad"); }
+  if(fb){ if(!draftBefore){ fb.classList.add("bad"); bad++; } else { fb.classList.remove("bad"); } }
   const fp = $("#f_poster");
   if(fp){ if(!draftPoster){ fp.classList.add("bad"); bad++; } else { fp.classList.remove("bad"); } }
 
@@ -5045,25 +5236,38 @@ function doCreateTask(mode){
 function viewApprovals(){
   const q = state.tasks.filter(t=>t.status===S.SUBMITTED)
     .sort((a,b)=> new Date(a.submittedAt||0) - new Date(b.submittedAt||0));
-  let html = '<div class="pagehd"><div><h1>Approvals Queue</h1>'
-    + '<p><span class="num">'+q.length+'</span> submission'+(q.length===1?"":"s")+' awaiting manager review.</p></div></div>';
-  if(!q.length) return { html: html + '<div class="card"><div class="bd">'+emptyState("Queue is clear. Nothing awaiting approval.")+'</div></div>' };
+  let html = '<div class="pagehd"><div><h1>'+byMode("Walls to shortlist","Approvals Queue")+'</h1>'
+    + '<p><span class="num">'+q.length+'</span> '
+    + byMode('mockup'+(q.length===1?"":"s")+' waiting for a suitable / not-suitable decision.',
+             'submission'+(q.length===1?"":"s")+' awaiting manager review.')+'</p></div></div>';
+  if(!q.length) return { html: html + '<div class="card"><div class="bd">'
+    + emptyState(byMode("Nothing to shortlist right now.","Queue is clear. Nothing awaiting approval."))+'</div></div>' };
 
   html += q.map(function(t){
     const d = t.checkIn ? t.checkIn.distance : null;
     const pass = t.checkIn ? t.checkIn.pass : false;
     const pl = t.placement;
     const tm = tierMeta(pl ? pl.tier : "C");
-    const placeChip = placementUnverified(pl)
+    /* MOCKUP MODE: the tier badge answers "how good is this evidence?", which is
+       not a question a site survey asks — nothing is being proven. What the
+       manager needs to know is how far back the wall was shot from, because
+       that is what the overlay scale depends on. The tier is still recorded on
+       the placement row; it is just not the headline. */
+    const placeChip = MOCKUP
+      ? ((pl && pl.distanceFt != null)
+          ? '<span class="chip neutral plain" title="The poster is drawn at true scale for this measured distance">'
+            + 'Poster at true scale · '+Number(pl.distanceFt).toFixed(1)+' ft from the wall</span>'
+          : '<span class="chip neutral plain">Wall distance not measured</span>')
+      : (placementUnverified(pl)
       ? '<span class="tierbadge tier-unv" title="Distance and squareness were never measured">⚠ UNVERIFIED PLACEMENT</span>'
       : '<span class="tierbadge '+tm.cls+'">'+esc(tm.label)+' · '+Number(pl.distanceFt).toFixed(1)+' ft'
         +(pl.errorPct != null ? ' ± '+pl.errorPct.toFixed(1)+'%' : '')
         +(pl.pass?'':' · GATES FAILED')+'</span>'
         + (placementVerified(pl) && !placementAR(pl)
             ? '<span class="chip pass plain" title="Distance measured against a reference of known size with a calibrated focal length">VERIFIED · REFERENCE</span>'
-            : '');
+            : ''));
     return '<div class="card" style="margin-bottom:12px'
-      + (placementUnverified(pl) ? ';border-left:3px solid var(--st-rework)' : '')+'"><div class="bd">'
+      + ((!MOCKUP && placementUnverified(pl)) ? ';border-left:3px solid var(--st-rework)' : '')+'"><div class="bd">'
       + '<div class="apv">'
       + '<div class="apv-thumb">'
       +   '<div class="shot">'+(t.afterImages[0]
@@ -5080,10 +5284,11 @@ function viewApprovals(){
       +   '<div style="margin-top:8px;display:flex;gap:7px;flex-wrap:wrap">'
       +     '<span class="chip '+(pass?"pass":"fail")+'">Geofence '+(pass?"PASS":"FAIL")+' · '+(d==null?"—":d+" m")+'</span>'
       +     placeChip
-      +     '<span class="chip neutral plain">'+t.afterImages.length+' after image'+(t.afterImages.length>1?"s":"")+'</span>'
+      +     '<span class="chip neutral plain">'+t.afterImages.length+' '
+      +       byMode('mockup'+(t.afterImages.length>1?"s":""), 'after image'+(t.afterImages.length>1?"s":""))+'</span>'
       +     '<span class="chip neutral plain">'+esc(campaignById(t.campaignId).name)+'</span>'
       +   '</div>'
-      +   (placementUnverified(t.placement)
+      +   ((!MOCKUP && placementUnverified(t.placement))
             ? '<div style="margin-top:7px;font-size:12px;color:var(--st-rework)">'
               + (t.placement
                   ? 'Distance and angles were typed in by hand, not measured — treat this evidence as unverified.'
@@ -5091,8 +5296,10 @@ function viewApprovals(){
               + '</div>' : '')
       + '</div>'
       + '<div class="apv-acts">'
-      +   '<button class="btn primary" data-act="nav" data-v="review" data-id="'+t.id+'">Review</button>'
-      +   '<button class="btn sm ghost" data-act="nav" data-v="task" data-id="'+t.id+'">Task detail</button>'
+      +   '<button class="btn primary" data-act="nav" data-v="review" data-id="'+t.id+'">'
+      +     byMode("Look at it","Review")+'</button>'
+      +   '<button class="btn sm ghost" data-act="nav" data-v="task" data-id="'+t.id+'">'
+      +     byMode("Store detail","Task detail")+'</button>'
       + '</div>'
       + '</div></div></div>';
   }).join("");
@@ -5106,22 +5313,29 @@ function viewReview(p){
   const dist = ci ? ci.distance : null;
   const pass = ci ? ci.pass : false;
 
-  let html = '<button class="btn ghost sm" data-act="nav" data-v="approvals" style="margin-bottom:10px">'+icon("back")+'Approvals queue</button>'
-    + '<div class="pagehd"><div><h1>Review — '+esc(t.storeName)+'</h1>'
+  let html = '<button class="btn ghost sm" data-act="nav" data-v="approvals" style="margin-bottom:10px">'+icon("back")
+    + byMode("Walls to shortlist","Approvals queue")+'</button>'
+    + '<div class="pagehd"><div><h1>'+byMode("Wall — ","Review — ")+esc(t.storeName)+'</h1>'
     + '<p><span class="mono">'+esc(t.storeCode)+'</span> · '+esc(t.city)+', '+esc(t.state)+' · '+esc(t.displayType)+' · <span class="num">'+t.widthFt+' × '+t.heightFt+' ft</span></p></div>'
     + '<div class="spacer" style="flex:1"></div>'+chip(t.status)+'</div>';
 
   if(t.status !== S.SUBMITTED){
     html += '<div class="card" style="margin-bottom:16px"><div class="bd" style="color:var(--text-2);font-size:13px">'
-      + 'This task is no longer in the approvals queue (current status: <b>'+esc(t.status)+'</b>). '
-      + 'The evidence below is read-only.</div></div>';
+      + byMode('This wall has already been decided (current status: <b>'+esc(statusLabel(t.status))+'</b>). '
+               + 'What follows is read-only.',
+               'This task is no longer in the approvals queue (current status: <b>'+esc(statusLabel(t.status))+'</b>). '
+               + 'The evidence below is read-only.')
+      + '</div></div>';
   }
 
   html += '<div class="split">';
 
   // Left: imagery
   html += '<div>';
-  if(t.beforeImage && t.afterImages.length){
+  /* MOCKUP MODE: there is no "before". The wall was empty and the mockup shows
+     what the poster would look like on it — a slider between two states would
+     be comparing a photograph with itself. */
+  if(!MOCKUP && t.beforeImage && t.afterImages.length){
     // prefer the footer-free composite so the comparison is not covered by the metadata strip
     const afterCmp = t.afterImages[0].cleanSrc || t.afterImages[0].src;
     html += '<div class="card" style="margin-bottom:14px"><div class="hd"><h3>Before / After comparison</h3>'
@@ -5139,29 +5353,41 @@ function viewReview(p){
       + '</div></div></div>';
   }
   html += '<div class="split3">'
-    + '<div class="card"><div class="hd"><h3>Before</h3></div><div class="bd">'+shotHTML(t.beforeImage,"BEFORE")+'</div></div>'
-    + '<div class="card"><div class="hd"><h3>After ('+t.afterImages.length+')</h3></div><div class="bd">'
+    + (MOCKUP ? '' : '<div class="card"><div class="hd"><h3>Before</h3></div><div class="bd">'+shotHTML(t.beforeImage,"BEFORE")+'</div></div>')
+    + '<div class="card"><div class="hd"><h3>'+byMode("Mockup","After")+' ('+t.afterImages.length+')</h3></div><div class="bd">'
     + (t.afterImages.length
-        ? '<div style="display:flex;flex-direction:column;gap:10px">'+t.afterImages.map((im,i)=>shotHTML(im,"AFTER "+(i+1))).join("")+'</div>'
-        : emptyState("No after images."))
+        ? '<div style="display:flex;flex-direction:column;gap:10px">'
+          + t.afterImages.map((im,i)=>shotHTML(im, byMode("MOCKUP ","AFTER ")+(i+1))).join("")+'</div>'
+        : emptyState(byMode("No mockup was captured.","No after images.")))
     + '</div></div></div>';
   html += '</div>';
 
   // Right: verification + decision
   html += '<div>';
-  html += '<div class="card" style="margin-bottom:14px"><div class="hd"><h3>Placement verification</h3>'
-    + '<div style="flex:1"></div>'
-    + '<span class="chip '+(placementVerified(t.placement)?"pass":"fail")+'">'
-    + (placementVerified(t.placement) ? "SHOT FROM SPEC" : "NOT VERIFIED")+'</span>'
+  /* MOCKUP MODE: the placement read-out is a verification instrument — tier,
+     gates, error budget, same-frame provenance. All of it is still measured and
+     still written to `placements`; the manager is simply shown the two facts
+     that bear on whether the mockup is believable (how far back it was shot,
+     and how big the poster is) instead of a certificate. */
+  html += '<div class="card" style="margin-bottom:14px"><div class="hd"><h3>'
+    + byMode("Poster &amp; wall","Placement verification")+'</h3>'
+    + (MOCKUP ? '' :
+        '<div style="flex:1"></div>'
+        + '<span class="chip '+(placementVerified(t.placement)?"pass":"fail")+'">'
+        + (placementVerified(t.placement) ? "SHOT FROM SPEC" : "NOT VERIFIED")+'</span>')
     + '</div><div class="bd">'
-    + placementBlock(t.placement, t)
-    + '<dl class="kv" style="margin-top:12px">'
-    +   '<dt>Poster brief</dt><dd class="num">'+t.widthFt+' × '+t.heightFt+' ft</dd>'
-    +   '<dt>Target standoff</dt><dd class="num">'+Number(t.standoffFt).toFixed(1)+' ft ± '+t.standoffTolFt+' ft</dd>'
+    + (MOCKUP ? '' : placementBlock(t.placement, t))
+    + '<dl class="kv" style="margin-top:'+(MOCKUP?"0":"12px")+'">'
+    +   '<dt>'+byMode("Poster size","Poster brief")+'</dt><dd class="num">'+t.widthFt+' × '+t.heightFt+' ft</dd>'
+    + (MOCKUP && t.placement && t.placement.distanceFt != null
+        ? '<dt>Shot from</dt><dd class="num">'+Number(t.placement.distanceFt).toFixed(1)+' ft from the wall</dd>'
+        : '')
+    +   '<dt>'+byMode("Asked to stand","Target standoff")+'</dt><dd class="num">'+Number(t.standoffFt).toFixed(1)+' ft ± '+t.standoffTolFt+' ft</dd>'
     +   '<dt>Angle tolerance</dt><dd class="num">± '+t.angleTolDeg+'°</dd>'
     + '</dl></div></div>';
 
-  html += '<div class="card" style="margin-bottom:14px"><div class="hd"><h3>Geo &amp; device verification</h3></div><div class="bd">'
+  html += '<div class="card" style="margin-bottom:14px"><div class="hd"><h3>'
+    + byMode("Where and when","Geo &amp; device verification")+'</h3></div><div class="bd">'
     + '<div class="geobox '+(pass?"ok":"no")+'" style="margin-bottom:12px">'
     +   '<div style="display:flex;align-items:center;justify-content:space-between;gap:10px">'
     +     '<div><div class="big num">'+(dist==null?"—":dist+" m")+'</div>'
@@ -5179,28 +5405,43 @@ function viewReview(p){
     +   '<dt>Merchandiser</dt><dd>'+esc(userById(t.assigneeId).name)+'</dd>'
     + '</dl></div></div>';
 
-  html += '<div class="card" style="margin-bottom:14px"><div class="hd"><h3>Merchandiser remarks</h3></div>'
+  html += '<div class="card" style="margin-bottom:14px"><div class="hd"><h3>'
+    + byMode("What the merchandiser said","Merchandiser remarks")+'</h3></div>'
     + '<div class="bd" style="font-size:13.5px;color:var(--text-2)">'+(t.merchRemarks?esc(t.merchRemarks):'<span style="color:var(--text-3)">None provided.</span>')+'</div></div>';
 
   if(t.status === S.SUBMITTED){
-    html += '<div class="card"><div class="hd"><h3>Decision</h3></div><div class="bd">'
-      + '<div class="field" id="f_rev"><label class="fl" for="rev_remarks">Review remarks <span class="hint" style="display:inline">(required to reject)</span></label>'
-      + '<textarea id="rev_remarks" placeholder="What is wrong, and what should the merchandiser redo?"></textarea>'
-      + '<div class="err">Remarks are required when sending a task back for rework.</div></div>'
+    /* MOCKUP MODE: the same two transitions, worded as a shortlist decision.
+       "Not suitable" still travels the Submitted -> Rework Required edge and
+       still demands a reason — it just is not a demand to redo the work. */
+    html += '<div class="card"><div class="hd"><h3>'+byMode("Is this wall suitable?","Decision")+'</h3></div><div class="bd">'
+      + '<div class="field" id="f_rev"><label class="fl" for="rev_remarks">'
+      + byMode('Notes <span class="hint" style="display:inline">(required if not suitable)</span>',
+               'Review remarks <span class="hint" style="display:inline">(required to reject)</span>')+'</label>'
+      + '<textarea id="rev_remarks" placeholder="'
+      + byMode("Why this wall works, or why it does not.",
+               "What is wrong, and what should the merchandiser redo?")+'"></textarea>'
+      + '<div class="err">'+byMode("Say why this wall is not suitable.",
+                                   "Remarks are required when sending a task back for rework.")+'</div></div>'
       + '<div style="display:flex;gap:8px;flex-wrap:wrap">'
-      + '<button class="btn primary" data-act="approve" data-id="'+t.id+'">'+icon("check")+'Approve</button>'
-      + '<button class="btn danger" data-act="reject" data-id="'+t.id+'">Reject / Rework</button>'
+      + '<button class="btn primary" data-act="approve" data-id="'+t.id+'">'+icon("check")+byMode("Wall suitable","Approve")+'</button>'
+      + '<button class="btn danger" data-act="reject" data-id="'+t.id+'">'+byMode("Not suitable","Reject / Rework")+'</button>'
       + '</div>'
-      + '<div class="hint" style="margin-top:9px">Approving moves the task to <b>Approved</b>, then offers the completion-record step that closes it.</div>'
+      + '<div class="hint" style="margin-top:9px">'
+      + byMode('Shortlisting marks this store <b>Wall suitable</b>, then offers to close the survey off.',
+               'Approving moves the task to <b>Approved</b>, then offers the completion-record step that closes it.')
+      + '</div>'
       + '</div></div>';
   } else if(t.status === S.APPROVED){
-    html += '<div class="card"><div class="hd"><h3>Completion record</h3></div><div class="bd">'
-      + '<div style="font-size:13px;color:var(--text-2);margin-bottom:10px">This execution is approved. Generate the completion record to close it out.</div>'
-      + '<button class="btn primary" data-act="close" data-id="'+t.id+'">Generate completion record</button>'
+    html += '<div class="card"><div class="hd"><h3>'+byMode("Shortlisted","Completion record")+'</h3></div><div class="bd">'
+      + '<div style="font-size:13px;color:var(--text-2);margin-bottom:10px">'
+      + byMode("This wall is on the shortlist. Mark the survey done to close this store out.",
+               "This execution is approved. Generate the completion record to close it out.")+'</div>'
+      + '<button class="btn primary" data-act="close" data-id="'+t.id+'">'
+      + byMode("Mark survey done","Generate completion record")+'</button>'
       + '</div></div>';
   } else if(t.status === S.CLOSED){
-    html += '<div class="card"><div class="hd"><h3>Completion record</h3></div><div class="bd">'
-      + '<dl class="kv"><dt>Record</dt><dd class="mono">'+esc(t.completionRef)+'</dd>'
+    html += '<div class="card"><div class="hd"><h3>'+byMode("Survey closed","Completion record")+'</h3></div><div class="bd">'
+      + '<dl class="kv"><dt>'+byMode("Reference","Record")+'</dt><dd class="mono">'+esc(t.completionRef)+'</dd>'
       + '<dt>Closed</dt><dd>'+esc(fmtDT(t.closedAt))+'</dd></dl></div></div>';
   }
   html += '</div></div>';
@@ -5255,16 +5496,24 @@ function doApprove(id){
       action:"Execution approved",
       detail: remarks || "Geofence "+((t.checkIn&&t.checkIn.pass)?"PASS":"FAIL")+" · imagery verified against brief"
   })) return;
-  notify("Task Approved","Merchandiser", t.assigneeId, t.id, t.storeName+" was approved by "+me().name, group);
+  /* notification_kind is a database enum: the stored value stays "Task
+     Approved" in both modes and is relabelled by notifLabel() on the way out. */
+  notify("Task Approved","Merchandiser", t.assigneeId, t.id,
+    byMode(t.storeName+" — this wall is suitable ("+me().name+")",
+           t.storeName+" was approved by "+me().name), group);
   save(); render();
   openModal({
-    title:"Execution approved",
-    body:'<p style="margin:0 0 10px;color:var(--text-2)">'+esc(t.storeName)+' ('+esc(t.storeCode)+') is approved.</p>'
-      + '<p style="margin:0;color:var(--text-2)">Generate the completion record to move this task to <b>Closed</b>. '
-      + 'The record captures the geo-verified before/after evidence, timestamps and the approving manager.</p>',
+    title: byMode("Wall shortlisted","Execution approved"),
+    body:'<p style="margin:0 0 10px;color:var(--text-2)">'+esc(t.storeName)+' ('+esc(t.storeCode)+') '
+      + byMode('is on the shortlist.','is approved.')+'</p>'
+      + '<p style="margin:0;color:var(--text-2)">'
+      + byMode('Mark the survey done to move this store to <b>Done</b>. Nothing further is needed from the field.',
+               'Generate the completion record to move this task to <b>Closed</b>. '
+               + 'The record captures the geo-verified before/after evidence, timestamps and the approving manager.')
+      + '</p>',
     actions:[
       {label:"Later", cls:"btn"},
-      {label:"Generate completion record", cls:"btn primary", act:function(){ doClose(id); }}
+      {label: byMode("Mark survey done","Generate completion record"), cls:"btn primary", act:function(){ doClose(id); }}
     ]
   });
 }
@@ -5280,10 +5529,13 @@ function doClose(id){
       action:"Task closed",
       detail:"Completion record generated by the server on close"
   })) return;
-  notify("Task Closed","Manager", t.managerId, t.id, t.storeName+" closed", group);
+  notify("Task Closed","Manager", t.managerId, t.id,
+    byMode(t.storeName+" survey closed", t.storeName+" closed"), group);
   save(); closeModal(); go("task",{id:t.id});
-  toast(netUp() ? "Closing — the completion record is generated by the server."
-                : "Close queued. The completion record is issued when this device reconnects.");
+  toast(netUp() ? byMode("Closing — the server issues the reference.",
+                         "Closing — the completion record is generated by the server.")
+                : byMode("Close queued. It finishes when this device reconnects.",
+                         "Close queued. The completion record is issued when this device reconnects."));
 }
 function doReject(id){
   const t = taskById(id); if(!t) return;
@@ -5293,7 +5545,7 @@ function doReject(id){
   if(!remarks){
     if(f) f.classList.add("bad");
     if(el) el.focus();
-    toast("Rejection remarks are required.", true);
+    toast(byMode("Say why this wall is not suitable.","Rejection remarks are required."), true);
     return;
   }
   if(f) f.classList.remove("bad");
@@ -5303,9 +5555,14 @@ function doReject(id){
       patch: { review_remarks: remarks },
       localFields: { reviewRemarks: remarks },
       action:"Rework required", detail:remarks })) return;
-  notify("Rework Required","Merchandiser", t.assigneeId, t.id, t.storeName+" was returned for rework", group);
+  /* Still the Submitted -> Rework Required edge, still the "Rework Required"
+     notification_kind enum value. In mockup mode both simply read as a
+     shortlist decision rather than as a demand to redo the work. */
+  notify("Rework Required","Merchandiser", t.assigneeId, t.id,
+    byMode(t.storeName+" — this wall was not suitable",
+           t.storeName+" was returned for rework"), group);
   save(); go("approvals",{});
-  toast("Task returned for rework.");
+  toast(byMode("Wall marked not suitable.","Task returned for rework."));
 }
 
 /* ==========================================================
@@ -5325,14 +5582,18 @@ function doReject(id){
 /* What the field sees instead of a status enum. */
 function fieldStatus(t){
   switch(t.status){
-    case S.REWORK:    return { cls:"stop", text:"Needs fixing",   group:"now"  };
+    /* MOCKUP MODE: "Rework Required" is the manager saying this WALL does not
+       work, not that the merchandiser did the job wrong. It stays actionable —
+       the Rework Required -> In Progress edge is how a second wall in the same
+       shop gets mocked up — but it is never phrased as a reprimand. */
+    case S.REWORK:    return { cls:"stop", text:byMode("Wall not suitable","Needs fixing"), group:"now"  };
     case S.ASSIGNED:  return { cls:"go",   text:"Not started",    group:"now"  };
     case S.PROGRESS:  return t.submitting
                            ? { cls:"warn", text:"Sending",        group:"now"  }
                            : { cls:"warn", text:"In progress",    group:"now"  };
-    case S.SUBMITTED: return { cls:"wait", text:"Sent for check", group:"wait" };
-    case S.APPROVED:  return { cls:"ok",   text:"Approved",       group:"done" };
-    case S.CLOSED:    return { cls:"ok",   text:"Finished",       group:"done" };
+    case S.SUBMITTED: return { cls:"wait", text:byMode("With your manager","Sent for check"), group:"wait" };
+    case S.APPROVED:  return { cls:"ok",   text:byMode("Wall suitable","Approved"), group:"done" };
+    case S.CLOSED:    return { cls:"ok",   text:byMode("Done","Finished"), group:"done" };
     default:          return { cls:"",     text:"Not ready yet",  group:"wait" };
   }
 }
@@ -5340,7 +5601,7 @@ function fieldStatus(t){
 function fieldNext(t){
   switch(t.status){
     case S.ASSIGNED:  return { label:"Check in",  primary:true  };
-    case S.REWORK:    return { label:"Fix it",    primary:true  };
+    case S.REWORK:    return { label:byMode("Try another wall","Fix it"), primary:true };
     case S.PROGRESS:  return t.submitting
                            ? { label:"Open",      primary:false }
                            : { label:"Continue",  primary:true  };
@@ -5351,21 +5612,25 @@ function fieldNext(t){
    measurement; changes nothing about how it was measured. */
 function fieldPhotoVerdict(im){
   const p = im && im.placement;
-  if(p && p.pass)  return { cls:"ok",   text:"Photo accepted" };
-  if(p && !p.pass) return { cls:"warn", text:"Not lined up — your manager will look" };
-  return { cls:"", text:"Photo added" };
+  if(p && p.pass)  return { cls:"ok",   text:byMode("Mockup ready","Photo accepted") };
+  if(p && !p.pass) return { cls:"warn", text:byMode("Not square to the wall — your manager will still see it",
+                                                    "Not lined up — your manager will look") };
+  return { cls:"", text:byMode("Photo added — poster not drawn to scale","Photo added") };
 }
-/* "Put up a 4 ft x 3 ft poster on the Gondola End Cap." */
+/* Verification: "Put up a 4 ft x 3 ft poster on the Gondola End Cap."
+   Mockup:       "Find a wall for a 4 ft x 3 ft poster."                     */
 function fieldJobLine(t){
-  return '<b>'+esc(t.displayType)+'</b> · <span class="num">'+t.widthFt+' ft × '+t.heightFt+' ft</span> poster';
+  return byMode('Wall for a <span class="num">'+t.widthFt+' ft × '+t.heightFt+' ft</span> poster'
+                + ' · <b>'+esc(t.displayType)+'</b>',
+                '<b>'+esc(t.displayType)+'</b> · <span class="num">'+t.widthFt+' ft × '+t.heightFt+' ft</span> poster');
 }
 
 function viewMyTasks(){
   const mine = visibleTasks();
   const groups = [
-    { k:"now",  label:"Do these now",         cls:"now"  },
+    { k:"now",  label:byMode("Shops to visit","Do these now"), cls:"now"  },
     { k:"wait", label:"Waiting on your manager", cls:"wait" },
-    { k:"done", label:"Finished",             cls:"done" }
+    { k:"done", label:byMode("Decided","Finished"), cls:"done" }
   ];
   const todo = mine.filter(t=>fieldStatus(t).group === "now").length;
 
@@ -5425,7 +5690,7 @@ function fieldUpdatesStrip(){
     +   '<button class="btn sm ghost" data-act="markread">Clear</button></div>'
     + unread.slice(0,4).map(function(n){
         return '<button class="ur" data-act="opennotif" data-id="'+n.id+'">'
-          + '<div class="ut">'+esc(n.type)+'</div>'
+          + '<div class="ut">'+esc(notifLabel(n.type))+'</div>'
           + '<div class="ub">'+esc(n.body)+'</div>'
           + '<div class="um">'+esc(ago(n.ts))+'</div></button>';
       }).join("")
@@ -5454,7 +5719,7 @@ function storeInfoCard(t){
     + '<dt>Campaign</dt><dd>'+esc(campaignById(t.campaignId).name)+'</dd>'
     + '<dt>Display type</dt><dd>'+esc(t.displayType)+'</dd>'
     + '<dt>Poster size</dt><dd class="num">'+t.widthFt+' ft × '+t.heightFt+' ft <span style="color:var(--text-3)">('+(t.widthFt*t.heightFt).toFixed(1)+' sq ft)</span></dd>'
-    + '<dt>Execution date</dt><dd class="num">'+fmtD(t.execDate)+'</dd>'
+    + '<dt>'+byMode("Visit date","Execution date")+'</dt><dd class="num">'+fmtD(t.execDate)+'</dd>'
     + '<dt>Merchandiser</dt><dd>'+esc(userById(t.assigneeId).name)+'</dd>'
     + '<dt>Manager</dt><dd>'+esc(userById(t.managerId).name)+'</dd>'
     + '</dl></div></div>';
@@ -5462,7 +5727,8 @@ function storeInfoCard(t){
 /* The manager-authored capture spec, as the merchandiser sees it. */
 function captureBriefCard(t){
   const art = t.posterArt && t.posterArt.src ? resolveImg(t.posterArt.src) : "";
-  return '<div class="card" style="margin-bottom:14px"><div class="hd"><h3>Guided capture brief</h3>'
+  return '<div class="card" style="margin-bottom:14px"><div class="hd"><h3>'
+    + byMode("What is being mocked up","Guided capture brief")+'</h3>'
     + '<div style="flex:1"></div><span class="hint" style="margin:0">set by '+esc(userById(t.managerId).name)+'</span></div>'
     + '<div class="bd"><div class="postercard">'
     + (art ? '<div class="posterthumb"><img alt="poster artwork" src="'+art+'"></div>' : '')
@@ -5472,8 +5738,14 @@ function captureBriefCard(t){
     +   '<dt>Squareness</dt><dd class="num">± '+t.angleTolDeg+'° on tilt, roll and yaw</dd>'
     +   '<dt>Hold steady</dt><dd class="num">'+(ARM_MS/1000).toFixed(1)+' s before the shutter arms</dd>'
     + '</dl></div></div>'
-    + '<div class="hint" style="margin-top:10px">Open <b>Guided poster capture</b> in step 2. The artwork is drawn on the '
-    + 'live camera at its true size for the measured distance — if it does not fit the wall space, the placement is wrong, not the overlay.</div>'
+    + '<div class="hint" style="margin-top:10px">'
+    + byMode('The merchandiser points the camera at an <b>empty wall</b>. The artwork is drawn on the live '
+             + 'camera at its true size for the measured distance — if it does not fit, the wall is too small, '
+             + 'not the overlay.',
+             'Open <b>Guided poster capture</b> in step 2. The artwork is drawn on the '
+             + 'live camera at its true size for the measured distance — if it does not fit the wall space, '
+             + 'the placement is wrong, not the overlay.')
+    + '</div>'
     + '</div></div>';
 }
 
@@ -5555,11 +5827,12 @@ function placementBlock(p, t){
     + '</div></div>';
 }
 function instructionsCard(t){
-  return '<div class="card" style="margin-bottom:14px"><div class="hd"><h3>Execution guidelines</h3></div>'
+  return '<div class="card" style="margin-bottom:14px"><div class="hd"><h3>'
+    + byMode("What to look for","Execution guidelines")+'</h3></div>'
     + '<div class="bd" style="font-size:13.5px;color:var(--text-2);line-height:1.6">'+esc(t.instructions)+'</div></div>';
 }
 function timelineCard(t){
-  return '<div class="card" style="margin-bottom:14px"><div class="hd"><h3>Audit trail</h3>'
+  return '<div class="card" style="margin-bottom:14px"><div class="hd"><h3>'+byMode("Visit history","Audit trail")+'</h3>'
     + '<div style="flex:1"></div><span class="hint" style="margin:0">'+t.audit.length+' events</span></div><div class="bd"><div class="tl">'
     + t.audit.slice().sort((a,b)=> new Date(a.ts)-new Date(b.ts)).map(function(a,i,arr){
         /* An entry this device wrote but the server has not accepted yet is
@@ -5567,12 +5840,12 @@ function timelineCard(t){
            — but it is labelled, never passed off as recorded. */
         const unsent = !!(a.pending && Outbox.has(a.opId));
         return '<div class="ev '+(i===arr.length-1?"hi":"")+'">'
-          + '<div class="a">'+esc(a.action)
+          + '<div class="a">'+esc(auditActionLabel(a.action))
           + (unsent ? ' <span class="chip queued" style="font-size:10.5px;padding:1px 7px">not yet on the server</span>' : '')
           + '</div>'
           + '<div class="m">'+esc(a.actor)+' · '+esc(a.role)+' · '+esc(fmtDT(a.ts))
           + (a.gps ? ' · '+esc(gps(a.gps.lat,a.gps.lng)) : '')+'</div>'
-          + (a.detail ? '<div class="d">'+esc(a.detail)+'</div>' : '')
+          + (a.detail ? '<div class="d">'+esc(auditDetailLabel(a.detail))+'</div>' : '')
           + '</div>';
       }).join("")
     + '</div></div></div>';
@@ -5585,17 +5858,20 @@ function managerTaskDetail(t){
     + '<div style="flex:1"></div>'+chip(t.status);
   if(t.status===S.SUBMITTED) html += ' <button class="btn primary sm" style="margin-left:8px" data-act="nav" data-v="review" data-id="'+t.id+'">Open review</button>';
   if(t.status===S.DRAFT && myRole()!=="Merchandiser") html += ' <button class="btn primary sm" style="margin-left:8px" data-act="assign" data-id="'+t.id+'">Assign to '+esc(userById(t.assigneeId).name)+'</button>';
-  if(t.status===S.APPROVED) html += ' <button class="btn primary sm" style="margin-left:8px" data-act="close" data-id="'+t.id+'">Generate completion record</button>';
+  if(t.status===S.APPROVED) html += ' <button class="btn primary sm" style="margin-left:8px" data-act="close" data-id="'+t.id+'">'
+    + byMode("Mark survey done","Generate completion record")+'</button>';
   html += '</div>';
 
   html += taskSyncBanner(t);
 
   if(t.status === S.REWORK && t.reviewRemarks){
-    html += '<div class="banner"><div class="bt">Rework required</div><div class="bb">'+esc(t.reviewRemarks)+'</div></div>';
+    html += '<div class="banner"><div class="bt">'+byMode("Wall not suitable","Rework required")+'</div>'
+      + '<div class="bb">'+esc(t.reviewRemarks)+'</div></div>';
   }
   if(t.status === S.CLOSED){
     html += '<div class="card" style="margin-bottom:14px;border-left:3px solid '+STATUS_HEX[S.CLOSED]+'"><div class="bd" style="display:flex;gap:18px;flex-wrap:wrap;align-items:center">'
-      + '<div><div class="k" style="font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--text-3);font-weight:700">Completion record</div>'
+      + '<div><div class="k" style="font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--text-3);font-weight:700">'
+      + byMode("Survey reference","Completion record")+'</div>'
       + '<div class="mono" style="font-size:15px;font-weight:650;margin-top:2px">'+esc(t.completionRef)+'</div></div>'
       + '<div><div class="k" style="font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--text-3);font-weight:700">Closed</div>'
       + '<div style="margin-top:2px">'+esc(fmtDT(t.closedAt))+'</div></div>'
@@ -5605,18 +5881,23 @@ function managerTaskDetail(t){
   }
 
   html += '<div class="split"><div>';
-  html += '<div class="card" style="margin-bottom:14px"><div class="hd"><h3>Evidence</h3></div><div class="bd">'
+  html += '<div class="card" style="margin-bottom:14px"><div class="hd"><h3>'+byMode("Mockups","Evidence")+'</h3></div><div class="bd">'
     + '<div class="split3">'
-    + '<div>'+shotHTML(t.beforeImage,"BEFORE")+'</div>'
+    + (MOCKUP ? '' : '<div>'+shotHTML(t.beforeImage,"BEFORE")+'</div>')
     + '<div>'+(t.afterImages.length
-        ? '<div style="display:flex;flex-direction:column;gap:10px">'+t.afterImages.map((im,i)=>shotHTML(im,"AFTER "+(i+1))).join("")+'</div>'
-        : '<div class="shot" style="padding:28px;text-align:center;color:var(--text-3);font-size:12px">Awaiting execution</div>')+'</div>'
+        ? '<div style="display:flex;flex-direction:column;gap:10px">'
+          + t.afterImages.map((im,i)=>shotHTML(im, byMode("MOCKUP ","AFTER ")+(i+1))).join("")+'</div>'
+        : '<div class="shot" style="padding:28px;text-align:center;color:var(--text-3);font-size:12px">'
+          + byMode("No mockup yet","Awaiting execution")+'</div>')+'</div>'
     + '</div>'
-    + (t.merchRemarks ? '<div style="margin-top:14px"><div class="sectlabel" style="margin:0 0 4px">Merchandiser remarks</div>'
+    + (t.merchRemarks ? '<div style="margin-top:14px"><div class="sectlabel" style="margin:0 0 4px">'
+      + byMode("What the merchandiser said","Merchandiser remarks")+'</div>'
         + '<div style="font-size:13.5px;color:var(--text-2)">'+esc(t.merchRemarks)+'</div></div>' : '')
     + '</div></div>';
   html += timelineCard(t);
-  const plCard = (t.placement || [S.SUBMITTED,S.REWORK,S.APPROVED,S.CLOSED].indexOf(t.status) >= 0)
+  /* MOCKUP MODE: still measured, still written to `placements`, still readable
+     from the AR diagnostics panel — just not presented as a verdict. */
+  const plCard = (!MOCKUP && (t.placement || [S.SUBMITTED,S.REWORK,S.APPROVED,S.CLOSED].indexOf(t.status) >= 0))
     ? '<div class="card" style="margin-bottom:14px"><div class="hd"><h3>Placement verification</h3></div>'
       + '<div class="bd">'+placementBlock(t.placement, t)+'</div></div>'
     : '';
@@ -5657,8 +5938,8 @@ function checkinCard(t){
 const FIELD_STEPS = [
   { k:"here",  label:"Job"      },
   { k:"check", label:"Check in" },
-  { k:"shoot", label:"Photo"    },
-  { k:"send",  label:"Submit"   }
+  { k:"shoot", label:byMode("Mockup","Photo") },
+  { k:"send",  label:byMode("Send","Submit")  }
 ];
 /* Which step the user has clicked to, per task. Session-only and deliberately
    NOT persisted: it is a scroll position, not a fact about the work. The
@@ -5743,7 +6024,8 @@ function fieldSyncBanner(t){
 }
 function fieldReworkBanner(t){
   if(t.status !== S.REWORK || !t.reviewRemarks) return "";
-  return '<div class="banner"><div class="bt">Sent back — please fix</div>'
+  return '<div class="banner"><div class="bt">'
+    + byMode("That wall was not suitable","Sent back — please fix")+'</div>'
     + '<div class="bb">'+esc(t.reviewRemarks)+'</div>'
     + '<div class="bb" style="color:var(--text-2);font-size:12.5px;margin-top:5px">'
     +   'From '+esc(userById(t.managerId).name)+'</div></div>';
@@ -5757,7 +6039,7 @@ function fieldHistory(t){
   return '<div class="dbd"><div class="tl">' + evs.map(function(a, i){
       const unsent = !!(a.pending && Outbox.has(a.opId));
       return '<div class="ev '+(i === evs.length-1 ? "hi" : "")+'">'
-        + '<div class="a">'+esc(a.action)
+        + '<div class="a">'+esc(auditActionLabel(a.action))
         + (unsent ? ' <span class="chip queued" style="font-size:10.5px;padding:1px 7px">still on this phone</span>' : '')
         + '</div>'
         + '<div class="m">'+esc(a.actor)+' · '+esc(fmtDT(a.ts))+'</div>'
@@ -5774,8 +6056,12 @@ function fieldExtras(t){
       + '<div class="dbd">'+esc(t.instructions)+'</div></details>';
   }
   h += '<details class="disc"><summary>'+icon("poster")+'Size, and where to stand</summary>'
-    + '<div class="dbd">The poster is <b class="num">'+t.widthFt+' ft × '+t.heightFt+' ft</b>, going on the '
-    + esc(t.displayType)+'.<br><br>'
+    + '<div class="dbd">'
+    + byMode('The poster is <b class="num">'+t.widthFt+' ft × '+t.heightFt+' ft</b>. You are looking for an '
+             + 'empty wall big enough to hold it — the sort of spot a '+esc(t.displayType).toLowerCase()
+             + ' would go.<br><br>',
+             'The poster is <b class="num">'+t.widthFt+' ft × '+t.heightFt+' ft</b>, going on the '
+             + esc(t.displayType)+'.<br><br>')
     + 'When you take the photo, stand about <b class="num">'+(isFinite(stand)?stand.toFixed(0):"8")+' feet</b> back '
     + '(roughly '+paces+' big steps) and hold the phone straight. The camera screen tells you when you are '
     + 'in the right spot — you do not need to measure anything yourself.'
@@ -5789,22 +6075,32 @@ function fieldExtras(t){
 function fieldViewHere(t){
   const camp = campaignById(t.campaignId);
   let body = '<h2 class="steptitle">You\'re here</h2>'
-    + '<p class="stepsub">Check this is the right shop, and what goes up.</p>'
+    + '<p class="stepsub">'+byMode("Check this is the right shop, and what you are looking for.",
+                                   "Check this is the right shop, and what goes up.")+'</p>'
     + '<div class="here">'
     +   '<div class="hs">'+esc(t.storeName)+'</div>'
     +   '<div class="hw">'+esc(t.city)+', '+esc(t.state)+' · <span class="mono">'+esc(t.storeCode)+'</span></div>'
     +   '<div class="bigfact">'+icon("poster")
-    +     '<div><div class="bn">Put up a <span class="num">'+t.widthFt+' ft × '+t.heightFt+' ft</span> poster</div>'
-    +       '<div class="bs">On the '+esc(t.displayType)+' · '+esc(camp.name)+'</div></div>'
+    +     '<div><div class="bn">'
+    +       byMode('Find an empty wall for a <span class="num">'+t.widthFt+' ft × '+t.heightFt+' ft</span> poster',
+                   'Put up a <span class="num">'+t.widthFt+' ft × '+t.heightFt+' ft</span> poster')
+    +     '</div>'
+    +       '<div class="bs">'+byMode('Somewhere a ','On the ')+esc(t.displayType)
+    +         byMode(' would go · ',' · ')+esc(camp.name)+'</div></div>'
     +   '</div>'
     + '</div>'
-    + '<div class="card" style="margin-bottom:10px"><div class="hd"><h3>How the spot looks now</h3></div>'
-    +   '<div class="bd">'+shotHTML(t.beforeImage, "BEFORE")+'</div></div>'
+    /* MOCKUP MODE: there is no baseline photo of a spot that has not been chosen
+       yet — the merchandiser is the one choosing it. */
+    + (MOCKUP ? '' :
+       '<div class="card" style="margin-bottom:10px"><div class="hd"><h3>How the spot looks now</h3></div>'
+       + '<div class="bd">'+shotHTML(t.beforeImage, "BEFORE")+'</div></div>')
     + fieldExtras(t);
 
   const done = fieldDone(t);
   const next = done.check ? (done.shoot ? 3 : 2) : 1;
-  const label = done.check ? (done.shoot ? "Go to submit" : "Take the photo") : "I'm at the shop";
+  const label = done.check
+    ? (done.shoot ? byMode("Go to send","Go to submit") : byMode("Find a wall","Take the photo"))
+    : "I'm at the shop";
   const actions = '<button class="btn back" data-act="nav" data-v="mytasks" aria-label="Back to my jobs">'+icon("back")+'</button>'
     + '<button class="btn primary" data-act="fstep" data-id="'+t.id+'" data-s="'+next+'">'+esc(label)+icon("fwd")+'</button>';
   return { body: body, actions: actions };
@@ -5828,7 +6124,8 @@ function fieldViewCheck(t){
     return { body: body,
       actions: '<button class="btn back" data-act="fstep" data-id="'+t.id+'" data-s="0" aria-label="Back">'+icon("back")+'</button>'
         + '<button class="btn primary" data-act="fstep" data-id="'+t.id+'" data-s="'+next+'">'
-        + (done.shoot ? "Go to submit" : "Take the photo") + icon("fwd") + '</button>' };
+        + (done.shoot ? byMode("Go to send","Go to submit") : byMode("Find a wall","Take the photo"))
+        + icon("fwd") + '</button>' };
   }
 
   let body = '<h2 class="steptitle">Check in</h2>'
@@ -5884,7 +6181,7 @@ function fieldViewShoot(t){
   const w = ws(t.id);
   const shots = w.after;
 
-  let body = '<h2 class="steptitle">Take the photo</h2>';
+  let body = '<h2 class="steptitle">'+byMode("Mock it up","Take the photo")+'</h2>';
 
   if(t.submitting){
     body += '<p class="stepsub">This job is being sent. You cannot change the photos now.</p>';
@@ -5894,20 +6191,27 @@ function fieldViewShoot(t){
         + '<button class="btn primary" data-act="fstep" data-id="'+t.id+'" data-s="3">See status'+icon("fwd")+'</button>' };
   }
 
-  body += '<p class="stepsub">Stand in front of the finished display. The camera tells you when to move back, '
-    + 'move closer or hold steady — take the shot when it says you are ready.</p>';
+  body += '<p class="stepsub">'
+    + byMode('Point the camera at an empty wall that could take the poster. It tells you when to move back, '
+             + 'move closer or hold steady — then it draws the poster on that wall at its real size. '
+             + 'Take the shot when it says you are ready.',
+             'Stand in front of the finished display. The camera tells you when to move back, '
+             + 'move closer or hold steady — take the shot when it says you are ready.')
+    + '</p>';
 
   if(shots.length){
     body += fieldPhotoGrid(t, shots, true);
     /* "Take another" is a secondary thought once there is a photo, so it moves
        out of the action bar and leaves one obvious primary there. */
     body += '<div style="margin:0 0 12px"><button class="btn" data-act="arcapture" data-id="'+t.id+'">'
-      + icon("cam")+'Take another photo</button></div>';
+      + icon("cam")+byMode("Try another wall","Take another photo")+'</button></div>';
   }
 
   body += '<details class="disc"><summary>'+icon("info")+'Camera not working?</summary>'
     + '<div class="dbd">Use a photo already on the phone, or a stand-in picture if you are only trying the app out. '
-    + 'Photos that do not go through the camera guide are still accepted — your manager just checks them by hand.'
+    + byMode('These will not have the poster drawn on them, so your manager sees the bare wall — still useful, '
+             + 'just harder to judge.',
+             'Photos that do not go through the camera guide are still accepted — your manager just checks them by hand.')
     + '<div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap">'
     +   '<label class="btn sm" style="cursor:pointer">'+icon("cam")+'Choose from phone'
     +     '<input type="file" id="afterFile" accept="image/*" multiple style="display:none"></label>'
@@ -5917,14 +6221,15 @@ function fieldViewShoot(t){
   const actions = '<button class="btn back" data-act="fstep" data-id="'+t.id+'" data-s="1" aria-label="Back">'+icon("back")+'</button>'
     + (shots.length
         ? '<button class="btn primary" data-act="fstep" data-id="'+t.id+'" data-s="3">Next'+icon("fwd")+'</button>'
-        : '<button class="btn primary" data-act="arcapture" data-id="'+t.id+'">'+icon("cam")+'Open camera</button>');
+        : '<button class="btn primary" data-act="arcapture" data-id="'+t.id+'">'+icon("cam")
+          + byMode("Open the camera","Open camera")+'</button>');
   return { body: body, actions: actions };
 }
 function fieldPhotoGrid(t, shots, editable){
   if(!shots.length) return '';
   return '<div class="photogrid" style="margin-bottom:12px">' + shots.map(function(im, i){
     const v = fieldPhotoVerdict(im);
-    return '<div class="photocell">' + shotHTML(im, "PHOTO " + (i+1))
+    return '<div class="photocell">' + shotHTML(im, byMode("MOCKUP ","PHOTO ") + (i+1))
       + (editable
           ? '<button class="btn sm rm" data-act="rmafter" data-id="'+t.id+'" data-i="'+i+'">Remove</button>'
           : '')
@@ -5939,16 +6244,19 @@ function fieldViewSend(t){
 
   /* Already gone in, one way or another. */
   if(t.status === S.SUBMITTED || t.status === S.APPROVED || t.status === S.CLOSED){
-    let body = '<h2 class="steptitle">'+(t.status === S.SUBMITTED ? "Sent" : "Finished")+'</h2>';
+    let body = '<h2 class="steptitle">'+(t.status === S.SUBMITTED ? "Sent" : byMode("Done","Finished"))+'</h2>';
     if(t.status === S.SUBMITTED){
       body += '<div class="outcome wait"><div class="ot">With your manager</div>'
-        + '<div class="ob">Sent '+esc(fmtDT(t.submittedAt))+'. Nothing more to do — you will get an update '
-        + 'when it is approved, or if something needs fixing.</div></div>';
+        + '<div class="ob">Sent '+esc(fmtDT(t.submittedAt))+'. '
+        + byMode('Nothing more to do — you will hear back whether this wall is being used.',
+                 'Nothing more to do — you will get an update when it is approved, or if something needs fixing.')
+        + '</div></div>';
     } else if(t.status === S.APPROVED){
-      body += '<div class="outcome ok"><div class="ot">Approved</div>'
-        + '<div class="ob">'+esc(userById(t.managerId).name)+' approved this on '+esc(fmtDT(t.approvedAt))+'.</div></div>';
+      body += '<div class="outcome ok"><div class="ot">'+byMode("Wall suitable","Approved")+'</div>'
+        + '<div class="ob">'+esc(userById(t.managerId).name)
+        + byMode(' picked this wall on ',' approved this on ')+esc(fmtDT(t.approvedAt))+'.</div></div>';
     } else {
-      body += '<div class="outcome ok"><div class="ot">Job closed</div>'
+      body += '<div class="outcome ok"><div class="ot">'+byMode("Survey closed","Job closed")+'</div>'
         + '<div class="ob">Reference <span class="mono">'+esc(t.completionRef)+'</span>'
         + (t.closedAt ? ' · '+esc(fmtDT(t.closedAt)) : '')+'.</div></div>';
     }
@@ -5987,22 +6295,30 @@ function fieldViewSend(t){
   }
 
   const n = w.after.length;
-  let body = '<h2 class="steptitle">Send it in</h2>'
-    + '<p class="stepsub">Your manager checks the photo and either approves it or asks for a fix.</p>';
+  let body = '<h2 class="steptitle">'+byMode("Send it over","Send it in")+'</h2>'
+    + '<p class="stepsub">'
+    + byMode("Your manager looks at the mockup and decides whether this wall works for the poster.",
+             "Your manager checks the photo and either approves it or asks for a fix.")+'</p>';
 
   body += '<div class="field" id="f_after">'
     + (n
         ? '<div class="outcome ok" style="margin-bottom:10px"><div class="ot">'
-          + n + ' photo' + (n === 1 ? '' : 's') + ' ready</div>'
+          + n + ' ' + byMode('mockup'+(n === 1 ? '' : 's'), 'photo'+(n === 1 ? '' : 's')) + ' ready</div>'
           + '<div class="ob">Taken at this shop and held on this phone until you send.</div></div>'
           + fieldPhotoGrid(t, w.after, false)
-        : '<div class="outcome fix" style="margin-bottom:10px"><div class="ot">No photo yet</div>'
-          + '<div class="ob">Go back a step and photograph the finished display.</div></div>')
-    + '<div class="err">You need at least one photo before you can send this.</div></div>';
+        : '<div class="outcome fix" style="margin-bottom:10px"><div class="ot">'
+          + byMode("No mockup yet","No photo yet")+'</div>'
+          + '<div class="ob">'+byMode("Go back a step and photograph the wall you found.",
+                                      "Go back a step and photograph the finished display.")+'</div></div>')
+    + '<div class="err">'+byMode("You need at least one mockup before you can send this.",
+                                 "You need at least one photo before you can send this.")+'</div></div>';
 
-  body += '<div class="field" id="f_remarks"><label class="fl" for="m_remarks">Anything to say about this job?'
+  body += '<div class="field" id="f_remarks"><label class="fl" for="m_remarks">'
+    + byMode("Anything to say about this wall?","Anything to say about this job?")
     + ' <span class="req">*</span></label>'
-    + '<textarea id="m_remarks" placeholder="What you put up, anything that was different, and who at the shop signed off.">'
+    + '<textarea id="m_remarks" placeholder="'
+    + byMode("Where in the shop the wall is, how clear it is, and anything that might get in the way.",
+             "What you put up, anything that was different, and who at the shop signed off.")+'">'
     + esc(w.remarks)+'</textarea>'
     + '<div class="err">Write a short note before you send.</div></div>';
 
@@ -6179,8 +6495,9 @@ function doStartWork(id){
       action:"Execution started", detail:"Status moved to In Progress" })) return;
   save(); render();
   toast(Outbox.pending() > 0
-    ? "Checked in. Task is In Progress locally — the check-in will sync when there is a connection."
-    : "Checked in. Task is now In Progress.");
+    ? byMode("Checked in. Marked on site on this phone — it syncs when there is a connection.",
+             "Checked in. Task is In Progress locally — the check-in will sync when there is a connection.")
+    : byMode("Checked in. You are marked on site.","Checked in. Task is now In Progress."));
 }
 function doSimAfter(id){
   const t = taskById(id); if(!t) return;
@@ -6215,7 +6532,8 @@ function doSubmitExec(id){
   const fa = $("#f_after"), fr = $("#f_remarks");
   if(!w.after.length){ if(fa) fa.classList.add("bad"); bad++; } else if(fa) fa.classList.remove("bad");
   if(!w.remarks.trim()){ if(fr) fr.classList.add("bad"); bad++; } else if(fr) fr.classList.remove("bad");
-  if(bad){ toast("Add at least one after image and your remarks.", true); return; }
+  if(bad){ toast(byMode("Add at least one mockup and a short note.",
+                        "Add at least one after image and your remarks."), true); return; }
 
   const group   = uuid4();
   const remarks = w.remarks.trim();
@@ -6289,7 +6607,7 @@ function doRemoveAfter(id, i){
 }
 function doAssign(id){
   const t = taskById(id); if(!t) return;
-  if(!t.beforeImage){ toast("Attach a BEFORE image before assigning.", true); return; }
+  if(!MOCKUP && !t.beforeImage){ toast("Attach a BEFORE image before assigning.", true); return; }
   if(!t.assigneeId){ toast("This task has no merchandiser assigned. The server refuses to let a task leave Draft without one.", true); return; }
   const group = uuid4();
   if(!transition(t, S.ASSIGNED, {
@@ -6801,39 +7119,117 @@ function arcPanel(html){
   p.innerHTML = '<div class="pnl">' + html + '</div>';
   p.classList.add("on");
 }
+/* ---------- preflight ----------
+   TWO AUDIENCES, ONE PANEL.
+
+   A merchandiser is standing in a shop holding a phone and needs one thing from
+   this screen: what to do next. "WebXR immersive-ar + hit-test — NO" tells them
+   nothing they can act on, "reference scaling will be estimated" reads like an
+   accusation, and "Manual entry (unverified)" is a label written for an auditor.
+   They get plain sentences and at most three buttons.
+
+   A manager or an admin is the person who has to work out why one handset in a
+   fleet behaves badly, so they keep the capability matrix verbatim. The AR
+   diagnostics panel behind the gear menu keeps every number for everybody, and
+   NOTHING about what is measured or recorded changes either way.
+
+   THE EMPTY WALL (mockup mode). The poster is a file; the wall is bare. With
+   ARCore the hit-test measures that bare wall directly and no reference is
+   needed at all — the primary path, and the panel says so. Without ARCore the
+   wall offers nothing to scale from, so a printed A4 sheet taped flat is the
+   method, not a consolation prize, and it is spelled out in those words before
+   the button is pressed. Typing the numbers is last, and is described as a
+   guess because that is what it is.                                          */
 function arcStartPanel(caps){
   const t = ARC.task;
   const cal = arcCalibGet();
-  let rows = "";
-  const line = (ok, label, note) =>
-    '<div class="prow" style="display:flex;justify-content:space-between;gap:10px;padding:4px 0;font-size:12.5px">'
-    + '<span style="color:var(--text-2)">'+esc(label)+'</span>'
-    + '<span><span class="chip '+(ok?"pass":"fail")+'">'+(ok?"YES":"NO")+'</span>'
-    + (note?' <span style="font-size:11px;color:var(--text-3)">'+esc(note)+'</span>':'')+'</span></div>';
-  rows += line(caps.secure, "Secure context (https / localhost)", caps.secure?"":"camera + sensors blocked");
-  rows += line(caps.media,  "Camera (getUserMedia)");
-  rows += line(caps.xr,     "WebXR immersive-ar + hit-test", caps.xr?"":"Android Chrome + ARCore only");
-  rows += line(caps.ori,    "Motion / orientation sensors", caps.oriGate?"iOS asks for permission":"");
-  rows += line(!!cal,       "This device is calibrated", cal?(Math.round(cal.f)+" px @ "+cal.vw+"w"):"reference scaling will be estimated");
+  const plain = (myRole() === "Merchandiser");
 
+  /* ---- the technical read-out: managers and admins only ---- */
+  let rows = "";
+  if(!plain){
+    const line = (ok, label, note) =>
+      '<div class="prow" style="display:flex;justify-content:space-between;gap:10px;padding:4px 0;font-size:12.5px">'
+      + '<span style="color:var(--text-2)">'+esc(label)+'</span>'
+      + '<span><span class="chip '+(ok?"pass":"fail")+'">'+(ok?"YES":"NO")+'</span>'
+      + (note?' <span style="font-size:11px;color:var(--text-3)">'+esc(note)+'</span>':'')+'</span></div>';
+    rows += line(caps.secure, "Secure context (https / localhost)", caps.secure?"":"camera + sensors blocked");
+    rows += line(caps.media,  "Camera (getUserMedia)");
+    rows += line(caps.xr,     "WebXR immersive-ar + hit-test", caps.xr?"":"Android Chrome + ARCore only");
+    rows += line(caps.ori,    "Motion / orientation sensors", caps.oriGate?"iOS asks for permission":"");
+    rows += line(!!cal,       "This device is calibrated",
+                 cal?(Math.round(cal.f)+" px @ "+cal.vw+"w")
+                    :byMode("reference scaling from the A4 sheet will be estimated",
+                            "reference scaling will be estimated"));
+    rows = '<div style="margin:12px 0;border-top:1px solid var(--border);border-bottom:1px solid var(--border);padding:6px 0">'
+         + rows + '</div>';
+  }
+
+  /* ---- what is actually going to happen, in one paragraph ---- */
+  let how = "";
+  if(!caps.secure){
+    how = plain
+      ? '<div class="banner" style="margin:0 0 12px"><div class="bt">The camera is not available here</div>'
+        + '<div class="bb">This page was not opened over a secure connection, so the phone will not let it use '
+        + 'the camera or your location. Show this to your manager. You can still type the numbers in below.</div></div>'
+      : '<div class="banner" style="margin:0 0 12px"><div class="bt">Camera unavailable</div><div class="bb">'
+        + 'This page is not a secure context, so the browser will not hand out the camera, GPS or motion sensors. '
+        + 'Serve it over <span class="mono">https</span> or from <span class="mono">http://localhost</span> — see <span class="mono">RUN.md</span>. '
+        + 'Manual entry still works and is recorded as unverified.</div></div>';
+  } else if(caps.xr && plain){
+    how = '<div class="hint" style="margin:0 0 12px;font-size:13px;line-height:1.55">'
+      + '<b>This phone can measure the wall by itself.</b> Nothing to tape up and nothing to carry — '
+      + byMode('point it at the empty wall, walk to where it tells you, and the poster appears on the wall '
+               + 'at its real size.',
+               'point it at the wall, walk to where it tells you, and the poster is drawn at its real size.')
+      + '</div>';
+  } else if(caps.media && plain){
+    how = '<div class="hint" style="margin:0 0 12px;font-size:13px;line-height:1.55">'
+      + '<b>This phone cannot work out distance on its own,</b> so it needs something of a known size in the '
+      + 'picture to measure against. '
+      + byMode('A bare wall gives it nothing, so: <b>tape one sheet of A4 printer paper flat on the wall</b> '
+               + '(any plain sheet will do) and keep it in shot. The camera finds it by itself and works out '
+               + 'the rest.',
+               '<b>Tape one sheet of A4 printer paper flat on the wall</b> and keep it in shot; the camera '
+               + 'finds it by itself.')
+      + '</div>';
+  } else if(!caps.media && plain){
+    how = '<div class="hint" style="margin:0 0 12px;font-size:13px;line-height:1.55">'
+      + 'This device has no camera the app can use. You can still type the measurements in — it will be '
+      + 'obvious to your manager that they were typed, not measured.</div>';
+  }
+
+  /* ---- the buttons ---- */
   let btns = '';
-  if(caps.xr)   btns += '<button class="btn primary" data-arc="tierA">Start AR measurement</button>';
-  if(caps.media)btns += '<button class="btn'+(caps.xr?'':' primary')+'" data-arc="tierB">Camera + reference scale</button>';
-  btns += '<button class="btn" data-arc="tierC">Manual entry (unverified)</button>';
-  if(caps.media)btns += '<button class="btn ghost" data-arc="calib">Calibrate this device…</button>';
+  if(caps.xr)    btns += '<button class="btn primary" data-arc="tierA">'
+                       + (plain ? byMode("Point at the wall","Start") : "Start AR measurement")+'</button>';
+  if(caps.media) btns += '<button class="btn'+(caps.xr?'':' primary')+'" data-arc="tierB">'
+                       + (plain ? (caps.xr ? "Use the A4 sheet instead" : "Use the camera")
+                                : "Camera + reference scale")+'</button>';
+  btns += '<button class="btn'+((!caps.xr && !caps.media)?' primary':'')+'" data-arc="tierC">'
+        + (plain ? "Type the numbers in" : "Manual entry (unverified)")+'</button>';
+  /* Calibration costs a tape measure and five minutes. It only pays for itself
+     on the camera path, so it is not put in front of someone who is about to
+     use AR and will never touch a reference. */
+  if(caps.media && (!plain || !caps.xr))
+    btns += '<button class="btn ghost" data-arc="calib">'
+          + (plain ? "Set this phone up once (needs a tape measure)" : "Calibrate this device…")+'</button>';
   btns += '<button class="btn ghost" data-arc="close">Cancel</button>';
 
-  arcPanel('<h2>Guided poster capture</h2>'
+  arcPanel('<h2>'+(plain ? byMode("Mock the poster up","Take the photo") : "Guided poster capture")+'</h2>'
     + '<p>'+esc(t.storeName)+' · <span class="mono">'+esc(t.storeCode)+'</span><br>'
-    + 'Poster <b class="num">'+t.widthFt+' × '+t.heightFt+' ft</b>, shot from <b class="num">'
-    + Number(t.standoffFt).toFixed(1)+' ± '+t.standoffTolFt+' ft</b>, square within <b class="num">± '+t.angleTolDeg+'°</b>.</p>'
-    + '<div style="margin:12px 0;border-top:1px solid var(--border);border-bottom:1px solid var(--border);padding:6px 0">'+rows+'</div>'
-    + (!caps.secure
-        ? '<div class="banner" style="margin:0 0 12px"><div class="bt">Camera unavailable</div><div class="bb">'
-          + 'This page is not a secure context, so the browser will not hand out the camera, GPS or motion sensors. '
-          + 'Serve it over <span class="mono">https</span> or from <span class="mono">http://localhost</span> — see <span class="mono">RUN.md</span>. '
-          + 'Manual entry still works and is recorded as unverified.</div></div>'
-        : '')
+    + (plain
+        ? byMode('Poster <b class="num">'+t.widthFt+' × '+t.heightFt+' ft</b>. Find an empty wall big enough '
+                 + 'for it, then stand about <b class="num">'+Number(t.standoffFt).toFixed(1)+' ft</b> back '
+                 + 'and hold the phone straight. The screen tells you when you are in the right spot.',
+                 'Poster <b class="num">'+t.widthFt+' × '+t.heightFt+' ft</b>. Stand about '
+                 + '<b class="num">'+Number(t.standoffFt).toFixed(1)+' ft</b> back and hold the phone straight. '
+                 + 'The screen tells you when you are in the right spot.')
+        : 'Poster <b class="num">'+t.widthFt+' × '+t.heightFt+' ft</b>, shot from <b class="num">'
+          + Number(t.standoffFt).toFixed(1)+' ± '+t.standoffTolFt+' ft</b>, square within <b class="num">± '+t.angleTolDeg+'°</b>.')
+    + '</p>'
+    + rows
+    + how
     + '<div class="pfoot">'+btns+'</div>');
   ARC.panel = "start";
 }
@@ -6858,8 +7254,12 @@ function arcOpen(taskId, phase){
   ARC.nudge = {x:0, y:0}; ARC.capture = null; ARC.busy = false;
   ARC.meas = { distFt:null, yawDeg:null, yawVerified:false, distSrc:"", depthUsed:false, wallSeen:false };
   ARC.mode = "two"; ARC.handles = []; ARC.quad = [];
-  ARC.refPhase = (phase === "before") ? "before" : "after";
-  ARC.refPreset = (ARC.refPhase === "before") ? "a4q" : "poster";
+  /* MOCKUP MODE: the wall is empty by definition, so there is never a poster in
+     frame to scale from — the A4 sheet is the reference whenever a reference is
+     needed at all. Verification mode keeps the phase rule: an after-shot has
+     the installed poster in it, and that is the best reference available.     */
+  ARC.refPhase = MOCKUP ? "before" : ((phase === "before") ? "before" : "after");
+  ARC.refPreset = MOCKUP ? "a4q" : ((ARC.refPhase === "before") ? "a4q" : "poster");
   ARC.refWmm = 210; ARC.refHmm = 297;
   arcDetRelease();
   ARC.assumeLevel = false; ARC.pendingCalib = false;
@@ -6965,9 +7365,13 @@ function arcShell(t){
 function arcTierC(){
   const t = ARC.task;
   ARC.tier = "C";
-  arcPanel('<h2>Manual entry — unverified</h2>'
-    + '<p>Nothing is being measured here. Enter what you know and the capture will be recorded and flagged as '
-    + '<b>unverified placement</b> so the approver can see it was not sensor-checked.</p>'
+  const plainC = (myRole() === "Merchandiser");
+  arcPanel('<h2>'+(plainC ? "Type the numbers in" : "Manual entry — unverified")+'</h2>'
+    + '<p>'+(plainC
+        ? 'Nothing is being measured here, so the poster will only be roughly the right size. Put in your best '
+          + 'guess at how far you are from the wall — your manager can see these were typed, not measured.'
+        : 'Nothing is being measured here. Enter what you know and the capture will be recorded and flagged as '
+          + '<b>unverified placement</b> so the approver can see it was not sensor-checked.')+'</p>'
     + '<div class="grid2">'
     + '<div class="field"><label class="fl" for="mc_d">Distance to wall (ft)</label>'
     +   '<input id="mc_d" type="number" step="0.1" min="0.5" max="80" value="'+Number(t.standoffFt).toFixed(1)+'"></div>'
@@ -6990,8 +7394,11 @@ function arcTierB(){
   const t = ARC.task;
   if(!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia)){
     arcErrorPanel("No camera API",
-      "This browser does not expose <span class=\"mono\">navigator.mediaDevices.getUserMedia</span>. "
-      + "Use manual entry, or open the page on a phone over https.", null);
+      (myRole() === "Merchandiser")
+        ? "This browser will not let the app use a camera at all. Type the numbers in instead, or open the "
+          + "link on a phone."
+        : "This browser does not expose <span class=\"mono\">navigator.mediaDevices.getUserMedia</span>. "
+          + "Use manual entry, or open the page on a phone over https.", null);
     return;
   }
   ARC.tier = "B";
@@ -7227,7 +7634,11 @@ function arcTierA(){
     } else {
       msg = "The AR session could not start (<span class=\"mono\">"+esc(name || (err && err.message) || "unknown")+"</span>). ";
     }
-    arcErrorPanel("AR unavailable", msg + "Camera + reference scale still measures distance, just less precisely.", "tierB");
+    arcErrorPanel("AR unavailable",
+      msg + ((myRole() === "Merchandiser")
+        ? byMode("You can still do this with the camera — tape a plain A4 sheet flat on the wall and keep it in shot.",
+                 "You can still use the camera; it measures a little less precisely.")
+        : "Camera + reference scale still measures distance, just less precisely."), "tierB");
   });
 }
 
@@ -7818,7 +8229,15 @@ function arcRenderHud(g, prog){
   const tierKey = arcTierKey();
   const tm = tierMeta(tierKey);
   const badge = arcEl("arTier");
-  if(badge){ badge.className = "tierbadge " + tm.cls; badge.textContent = tm.label; }
+  if(badge){
+    badge.className = "tierbadge " + tm.cls;
+    /* Tier letters are a reviewer's vocabulary. The person holding the phone is
+       told what the phone is doing instead. The tier itself is unchanged and
+       still lands on the placement row. */
+    badge.textContent = (myRole() === "Merchandiser")
+      ? (TIER_FIELD_LABEL[tierKey] || TIER_FIELD_LABEL.C)
+      : tm.label;
+  }
 
   // distance
   const dEl = arcEl("arDist");
@@ -7881,10 +8300,15 @@ function arcRenderHud(g, prog){
   else if(g.rollOk)  setStat("arRoll", true, "ROLL " + n1(g.roll) + "°");
   else setStat("arRoll", false, "ROLLED " + Math.abs(g.roll).toFixed(0) + "° — level the phone");
 
-  if(!g.yawVerified) setStat("arYaw", null, "YAW UNVERIFIED",
-    ARC.tier === "B" ? "switch to 4-handle quad mode to check" : "no wall plane yet");
-  else if(g.yawOk)   setStat("arYaw", true, "SQUARE " + n1(g.yaw) + "°");
-  else setStat("arYaw", false, "OFF-AXIS " + Math.abs(g.yaw).toFixed(0) + "° — move square to the wall");
+  const pfy = (myRole() === "Merchandiser");
+  if(!g.yawVerified) setStat("arYaw", null,
+    pfy ? "CAN'T TELL IF YOU'RE SQUARE ON" : "YAW UNVERIFIED",
+    ARC.tier === "B"
+      ? (pfy ? "mark all 4 corners and it can" : "switch to 4-handle quad mode to check")
+      : (pfy ? "still looking for the wall"    : "no wall plane yet"));
+  else if(g.yawOk)   setStat("arYaw", true, (pfy ? "STRAIGHT ON " : "SQUARE ") + n1(g.yaw) + "°");
+  else setStat("arYaw", false, (pfy ? "AT AN ANGLE " : "OFF-AXIS ") + Math.abs(g.yaw).toFixed(0)
+    + "° — move round so you face the wall");
 
   // bubble level
   const bub = arcEl("arBubble");
@@ -7936,15 +8360,23 @@ function arcRenderHud(g, prog){
   if(tools && tools.dataset.tier !== key){
     tools.dataset.tier = key;
     let h = "";
+    /* Same controls, same handlers; only the words change for the field. */
+    const pf = (myRole() === "Merchandiser");
     if(!ARC.sensors.on && ARC.tier !== "A") h += '<button class="arbtn pe" data-arc="sensors">Enable motion sensors</button>';
-    if(!attitudeLive) h += '<button class="arbtn pe'+(ARC.assumeLevel?" on":"")+'" data-arc="assume">Assume level (not verified)</button>';
+    if(!attitudeLive) h += '<button class="arbtn pe'+(ARC.assumeLevel?" on":"")+'" data-arc="assume">'
+      + (pf ? "I am holding it straight" : "Assume level (not verified)") + '</button>';
     if(ARC.tier === "B"){
-      h += '<button class="arbtn pe'+(ARC.mode==="auto"?" on":"")+'" data-arc="modeauto">Auto-detect</button>';
-      h += '<button class="arbtn pe'+(ARC.mode==="two"?" on":"")+'" data-arc="mode2">2-handle</button>';
-      h += '<button class="arbtn pe'+(ARC.mode==="quad"?" on":"")+'" data-arc="mode4">4-handle quad</button>';
-      h += '<button class="arbtn pe" data-arc="refpick">Reference…</button>';
+      h += '<button class="arbtn pe'+(ARC.mode==="auto"?" on":"")+'" data-arc="modeauto">'
+        + (pf ? "Find it for me" : "Auto-detect") + '</button>';
+      h += '<button class="arbtn pe'+(ARC.mode==="two"?" on":"")+'" data-arc="mode2">'
+        + (pf ? "Mark 2 points" : "2-handle") + '</button>';
+      h += '<button class="arbtn pe'+(ARC.mode==="quad"?" on":"")+'" data-arc="mode4">'
+        + (pf ? "Mark 4 corners" : "4-handle quad") + '</button>';
+      h += '<button class="arbtn pe" data-arc="refpick">'
+        + (pf ? "Change what I am using" : "Reference…") + '</button>';
       h += '<button class="arbtn pe" data-arc="calib">'
-        + (ARC.focal.estimated ? "Calibrate — readings are estimated" : "Re-calibrate") + '</button>';
+        + (pf ? (ARC.focal.estimated ? "Set this phone up — sizes are rough" : "Set this phone up again")
+              : (ARC.focal.estimated ? "Calibrate — readings are estimated" : "Re-calibrate")) + '</button>';
     }
     h += '<button class="arbtn pe" data-arc="recentre">Re-centre poster</button>';
     tools.innerHTML = h;
@@ -8097,12 +8529,16 @@ function arcRenderDetBar(){
     const meter = '<span class="conf'+(d.conf >= DET_LOCK_CONF ? ' hi' : '')+'">'
       + '<i style="width:'+clamp(pct,0,100)+'%"></i></span>';
     const barrel = (d.radial > BARREL_WARN_R);
+    const pd = (myRole() === "Merchandiser");
     if(d.locked){
       html = '<div class="detrow">'+meter
-        + '<span class="detmsg"><b>Reference locked</b> · '+pct+'% · corners ± '
-        + (d.cornerSigmaPx == null ? '—' : d.cornerSigmaPx.toFixed(2)+' px')+'</span>'
+        + '<span class="detmsg">'
+        + (pd ? '<b>Locked on</b> · '+pct+'% sure'
+              : '<b>Reference locked</b> · '+pct+'% · corners ± '
+                + (d.cornerSigmaPx == null ? '—' : d.cornerSigmaPx.toFixed(2)+' px'))
+        + '</span>'
         + '<button class="arbtn pe" data-arc="detmanual">Adjust by hand</button>'
-        + '<button class="arbtn pe" data-arc="detdrop">Re-detect</button></div>';
+        + '<button class="arbtn pe" data-arc="detdrop">'+(pd?"Look again":"Re-detect")+'</button></div>';
       if(barrel) html += '<div class="detrow"><span class="detmsg warn">'
         + '<b>Off-centre</b> — the reference is '+Math.round(d.radial*100)
         + '% of the way to the frame corner, where lens distortion adds error. '
@@ -8227,7 +8663,9 @@ function arcDrawOverlay(g){
     ctx.save();
     ctx.font = "700 12px ui-monospace, Menlo, monospace"; ctx.textAlign = "center";
     ctx.fillStyle = "rgba(255,255,255,.7)";
-    ctx.fillText("poster unlocks when all gates pass", ccx, ccy + 26);
+    ctx.fillText((myRole() === "Merchandiser")
+      ? "the poster appears once you are in the right spot"
+      : "poster unlocks when all gates pass", ccx, ccy + 26);
     ctx.restore();
   }
 }
@@ -8330,17 +8768,30 @@ function arcCalibSave(){
 /* ---------- reference picker ---------- */
 function arcRefPanel(){
   const t = ARC.task;
-  arcPanel('<h2>Scale reference</h2>'
-    + '<p>Pick something on the wall whose real size you know. Rectangular references are found '
-    + '<b>automatically</b> and also recover yaw obliqueness from the keystone; width-only ones '
-    + 'need two handles and cannot see yaw.</p>'
-    + (t ? '<div class="hint" style="margin:0 0 10px">For an <b>after</b> shot the poster itself is the '
-        + 'best reference — it is already on the wall at a known <b class="num">'+t.widthFt+' × '+t.heightFt
-        + ' ft</b> and needs nothing carried to site. Before the poster is up, tape a plain <b>A4 sheet</b> '
-        + '(210 × 297 mm) flat to the wall.</div>' : '')
+  const plainR = (myRole() === "Merchandiser");
+  arcPanel('<h2>'+(plainR ? "What am I measuring against?" : "Scale reference")+'</h2>'
+    + '<p>'+(plainR
+        ? 'The camera needs one thing in the picture whose real size it already knows. A whole rectangle '
+          + '(like a sheet of paper) is best — it is found for you, and it also tells the app whether you are '
+          + 'standing square to the wall.'
+        : 'Pick something on the wall whose real size you know. Rectangular references are found '
+          + '<b>automatically</b> and also recover yaw obliqueness from the keystone; width-only ones '
+          + 'need two handles and cannot see yaw.')+'</p>'
+    /* MOCKUP MODE: the wall is bare, so the A4 sheet IS the method — not the
+       thing you fall back to once the poster is up. */
+    + (MOCKUP
+        ? '<div class="hint" style="margin:0 0 10px">The wall is empty, so there is nothing on it whose size '
+          + 'the app knows. <b>Tape one plain A4 sheet</b> (210 × 297 mm — ordinary printer paper) flat on the '
+          + 'wall and keep it in the picture. Everything else here is for the rare wall that already has '
+          + 'something of a known size on it.</div>'
+        : (t ? '<div class="hint" style="margin:0 0 10px">For an <b>after</b> shot the poster itself is the '
+            + 'best reference — it is already on the wall at a known <b class="num">'+t.widthFt+' × '+t.heightFt
+            + ' ft</b> and needs nothing carried to site. Before the poster is up, tape a plain <b>A4 sheet</b> '
+            + '(210 × 297 mm) flat to the wall.</div>' : ''))
     + '<div class="field"><label class="fl" for="ref_sel">Reference</label><select id="ref_sel">'
-    + REF_PRESETS.map(p=>'<option value="'+p.key+'"'+(p.key===ARC.refPreset?" selected":"")+'>'+esc(p.label)
-        + (p.auto ? " · auto" : p.quad ? " · 4-handle" : " · 2-handle") + '</option>').join("")
+    + refPresets().map(p=>'<option value="'+p.key+'"'+(p.key===ARC.refPreset?" selected":"")+'>'+esc(p.label)
+        + (plainR ? (p.auto ? " · found for you" : p.quad ? " · mark 4 corners" : " · mark 2 points")
+                  : (p.auto ? " · auto" : p.quad ? " · 4-handle" : " · 2-handle")) + '</option>').join("")
     + '</select></div>'
     + '<div class="grid2">'
     + '<div class="field"><label class="fl" for="ref_w">Width (mm)</label><input id="ref_w" type="number" step="1" min="5" value="'+ARC.refWmm+'"></div>'
@@ -8425,9 +8876,15 @@ function arcComposite(source, srcW, srcH, intr, g, tierKey, geo, nudgeNorm, capt
 
   const tm = tierMeta(tierKey);
   const n1 = v => (v==null||!isFinite(v)) ? "—" : Number(v).toFixed(1);
+  /* MOCKUP MODE: this photograph shows a poster on a wall where no poster
+     exists. The stamp has to say so — burned into the pixels, not merely
+     implied by the screen it was viewed on — or the image becomes exactly the
+     thing the verification product was built to prevent. */
   arcFooter(x, d.w, d.h, [
-    "NIVA PLACEMENT VERIFIED CAPTURE — " + tm.label.toUpperCase()
-      + (captureMode === "single-frame" ? "  [SAME-FRAME]" : captureMode === "handover" ? "  [HANDOVER]" : ""),
+    MOCKUP
+      ? "NIVA POSTER MOCKUP — ARTWORK SUPERIMPOSED, NOT INSTALLED"
+      : "NIVA PLACEMENT VERIFIED CAPTURE — " + tm.label.toUpperCase()
+        + (captureMode === "single-frame" ? "  [SAME-FRAME]" : captureMode === "handover" ? "  [HANDOVER]" : ""),
     t.storeCode + "  " + t.storeName + "  ·  " + t.city + ", " + t.state,
     new Date().toISOString() + "   GPS " + gps(geo.lat, geo.lng) + "  ±" + Math.round(geo.accuracy||0) + " m"
       + "   geofence " + (geo.pass ? "PASS" : "FAIL") + " " + Math.round(geo.distance||0) + " m",
@@ -8791,13 +9248,22 @@ function arcAttach(){
     + " · geofence " + (p.geofencePass?"PASS":"FAIL") + " " + p.geofenceM + " m"
     + " · overall " + (p.pass ? "VERIFIED" : "NOT VERIFIED"),
     { lat:c.geo.lat, lng:c.geo.lng });
+  /* notification_kind is a database enum, so the stored value stays exactly
+     what it always was; notifLabel() reads it differently in mockup mode. Only
+     the free-text BODY drops the tier vocabulary. */
   notify(p.pass ? "Placement Verified" : "Unverified Capture", "Manager", t.managerId, t.id,
-    t.storeName + " — guided capture at " + n1(p.distanceFt) + " ft (" + p.tierLabel + ")"
-    + (p.pass ? "" : " · gates not met"));
+    MOCKUP
+      ? (t.storeName + " — wall mocked up at " + n1(p.distanceFt) + " ft"
+         + (p.pass ? "" : " · not fully square, scale is approximate"))
+      : (t.storeName + " — guided capture at " + n1(p.distanceFt) + " ft (" + p.tierLabel + ")"
+         + (p.pass ? "" : " · gates not met")));
   save();
   arcClose();
   render();
-  toast(p.pass ? "Placement-verified capture attached." : "Capture attached and flagged unverified.");
+  toast(MOCKUP
+    ? (p.pass ? "Mockup added — the poster is drawn to scale."
+              : "Mockup added. It was not fully square to the wall, so the scale is approximate.")
+    : (p.pass ? "Placement-verified capture attached." : "Capture attached and flagged unverified."));
 }
 
 /* ==========================================================
@@ -9417,7 +9883,8 @@ function viewUsers(){
       + emptyState("No profiles are visible to your account.") + '</div></div>' };
   }
   html += '<div class="card"><div class="bd tight"><div class="tblwrap"><table class="tbl"><thead><tr>'
-    + '<th>Name</th><th>Role</th><th>Title</th><th>Open tasks</th><th>Completed</th></tr></thead><tbody>';
+    + '<th>Name</th><th>Role</th><th>Title</th><th>'+byMode("Open stores","Open tasks")+'</th>'
+    + '<th>'+byMode("Decided","Completed")+'</th></tr></thead><tbody>';
   html += USERS.map(function(u){
     const mine = state.tasks.filter(t=>t.assigneeId===u.id || t.managerId===u.id);
     const open = mine.filter(t=>[S.CLOSED,S.APPROVED].indexOf(t.status)<0).length;
@@ -9433,7 +9900,8 @@ function viewAudit(){
   const feed = [];
   state.tasks.forEach(function(t){ t.audit.forEach(function(a){ feed.push({t:t,a:a}); }); });
   feed.sort((x,y)=> new Date(y.a.ts) - new Date(x.a.ts));
-  let html = '<div class="pagehd"><div><h1>Audit Trail</h1><p>Every state change across the programme, newest first. '
+  let html = '<div class="pagehd"><div><h1>Audit Trail</h1><p>Every state change across the programme, newest first, '
+    + 'with the recorded detail unabridged. '
     + '<span class="num">'+feed.length+'</span> events.</p></div></div>';
   html += '<div class="card"><div class="bd tight"><div class="tblwrap"><table class="tbl"><thead><tr>'
     + '<th>When</th><th>Actor</th><th>Action</th><th>Store</th><th>Detail</th><th>GPS</th></tr></thead><tbody>';
@@ -9441,7 +9909,7 @@ function viewAudit(){
     return '<tr class="clickable" data-act="open" data-id="'+f.t.id+'">'
       + '<td class="num" style="white-space:nowrap">'+esc(fmtDT(f.a.ts))+'</td>'
       + '<td><div class="stack">'+esc(f.a.actor)+'<span class="sub">'+esc(f.a.role)+'</span></div></td>'
-      + '<td><b>'+esc(f.a.action)+'</b>'
+      + '<td><b>'+esc(auditActionLabel(f.a.action))+'</b>'
       + ((f.a.pending && Outbox.has(f.a.opId))
           ? '<div><span class="chip queued" style="font-size:10.5px;padding:1px 7px">queued on a device</span></div>' : '')
       + '</td>'
@@ -10362,11 +10830,11 @@ function navFor(role){
   const base = [
     {v:"dashboard", label:"Dashboard", i:"dash"},
     {v:"campaigns", label:"Campaigns", i:"camp"},
-    {v:"tasks",     label:"All Tasks", i:"list"}
+    {v:"tasks",     label:byMode("All Stores","All Tasks"), i:"list"}
   ];
   if(role === "Manager"){
-    base.splice(2,0,{v:"approvals", label:"Approvals", i:"check", count:pending});
-    base.push({v:"create", label:"Create Task", i:"plus"});
+    base.splice(2,0,{v:"approvals", label:byMode("Shortlist","Approvals"), i:"check", count:pending});
+    base.push({v:"create", label:byMode("Add store","Create Task"), i:"plus"});
   }
   if(role === "Admin"){
     base.push({v:"users", label:"Users & Roles", i:"users"});
@@ -10445,10 +10913,13 @@ function renderChrome(){
   }
 
   const titles = {
-    dashboard:"Dashboard", campaigns:"Campaigns", campaign:"Campaigns", tasks:"All Tasks",
-    create:"Create Task", approvals:"Approvals", review:"Approvals › Review",
+    dashboard:"Dashboard", campaigns:"Campaigns", campaign:"Campaigns",
+    tasks: byMode("All Stores","All Tasks"),
+    create: byMode("Add store","Create Task"),
+    approvals: byMode("Shortlist","Approvals"),
+    review: byMode("Shortlist › Wall","Approvals › Review"),
     mytasks: myRole()==="Merchandiser" ? "My jobs" : "My Tasks",
-    task: myRole()==="Merchandiser" ? "Job" : "Task detail",
+    task: myRole()==="Merchandiser" ? "Job" : byMode("Store detail","Task detail"),
     users:"Users & Roles", audit:"Audit Trail"
   };
   /* Two halves. Desktop shows both; the phone shows only the second one —
@@ -10565,7 +11036,7 @@ function toggleNotifs(){
   html += list.length ? list.slice(0,30).map(function(n){
       return '<div class="nrow '+(n.read?"":"unread")+'" data-act="opennotif" data-id="'+n.id+'">'
         + '<span class="ni"></span><div style="min-width:0">'
-        + '<div class="nt">'+esc(n.type)+'</div>'
+        + '<div class="nt">'+esc(notifLabel(n.type))+'</div>'
         + '<div class="nb">'+esc(n.body)+'</div>'
         + '<div class="nm">'+esc(fmtDT(n.ts))+' · '+esc(ago(n.ts))+'</div>'
         + '</div></div>';
