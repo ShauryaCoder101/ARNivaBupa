@@ -130,8 +130,9 @@ the server. See §3.
 ### The AR capture engine
 
 Untouched. `GEO.*`, `arc*`, the XR frame loop and the single-frame readback are
-byte-for-byte what they were, and still pass **107/107** assertions. Only the
-handoff changed: `arcAttach()` stages `c.imgs.stamped` / `c.imgs.clean` into
+byte-for-byte what they were, and still pass their assertions (**180/180** now —
+see "Automatic reference detection" below for the ones that were added). Only
+the handoff changed: `arcAttach()` stages `c.imgs.stamped` / `c.imgs.clean` into
 IndexedDB against their Storage paths instead of stuffing data URLs into a
 localStorage blob. `c.rec` becomes a `placements` row through `placementRow()`.
 
@@ -139,7 +140,85 @@ The one edit inside `runSelfTest()` is a bug fix, not a behaviour change: the
 "gate arithmetic on a real task" block indexed `state.tasks[0]` blindly, which
 threw against a real backend whenever the cache was legitimately empty (fresh
 device, RLS visibility of zero rows, offline first run). It now falls back to
-`normalizeTask()`'s own defaults. The assertion count is unchanged at 107.
+`normalizeTask()`'s own defaults.
+
+---
+
+## Automatic reference detection, and the re-tiering that follows
+
+ARCore excludes a large slice of the budget and older Android fleet, and iOS has
+no WebXR at all, so reference scaling — not AR — is the path most devices will
+actually use. It used to demand that a merchandiser find a known-width object
+and drag handles on *every* capture, which is why it mostly did not get used.
+
+`DET` (section 2b-bis) now finds the reference rectangle on its own: downscale to
+a work plane, halve again for detection, blur, Sobel, a percentile threshold,
+one dilation to close the outline, Moore-neighbourhood border following,
+Douglas–Peucker at three tolerances, and a score based on how well each
+candidate fits a rectangle **of the known aspect ratio under the known
+intrinsics**. The winner's corners are then re-derived at work resolution by
+fitting a line to sub-pixel edge crossings along each side and intersecting
+adjacent lines — corner localisation is a direct term in the distance error
+budget, and that step is worth several percent on obliquely-viewed references.
+
+Two reference sources matter in the field:
+
+* **the installed poster itself**, for after-shots. Its true size is already on
+  the task, it needs no extra kit, and it is centred in frame by construction.
+  This is the default.
+* **a printed A4 sheet** (210 × 297 mm) taped flat, for before-shots.
+
+Manual 2-handle and 4-handle modes remain, and a failed or rejected detection
+hands its corners straight to the 4 handles rather than resetting.
+
+Nothing is accepted silently. The outline is drawn with a confidence figure and
+the merchandiser confirms it once; the lock then survives only while the
+detection keeps agreeing with itself, and a jump large enough to be a different
+object breaks it and asks again.
+
+**Every capture now carries a derived error bar**, not a constant:
+`sqrt(focal² + refDim² + corner² + barrel²)`, where the focal term comes from
+whatever produced the focal length (a device calibration records its own
+tape-measure and handle uncertainty when it is saved), `refDim` is the
+reference's own dimensional tolerance, `corner` is the measured line-fit
+residual, and `barrel` is uncorrected radial distortion growing as r² from the
+optical centre — which is also why the HUD nudges an off-centre reference back
+toward the middle.
+
+### The re-tiering
+
+A **calibrated** reference-scale capture that passes every gate now counts as
+VERIFIED, equal to AR for the placement KPI. `TIER_META[*].verified` is the
+single definition, and `placementVerified()` reads it. AR remains the strongest
+tier: `rank` is untouched, so `bestPlacement()` still prefers it, and it keeps
+its own badge and the same-frame provenance chip. Tier `Be` (assumed focal
+length, worth roughly ±12 %) and tier `C` (typed by hand) stay unverified.
+
+**This disagrees with the database as shipped.** `0001_schema.sql` defines
+`placements.is_verified` as `passed and tier in ('Asd','As','Ad','A')`.
+`supabase/migrations/0005_retier_reference_scale.sql` corrects it, and until it
+is applied the server rollup will under-count placement-verified relative to
+what the client shows. The migration is a table rewrite (a stored generated
+column's expression cannot be altered in place) and it re-classifies historical
+passing `Bq`/`B` rows by design, so the KPI steps up the moment it lands.
+
+`is_same_frame` deliberately does **not** widen: same-frame provenance means the
+photograph was read back out of the XR frame that produced the measurement, and
+no camera-tier path can do that. The client had exactly this bug for one commit
+— `placementSingleFrame()` was derived from `placementVerified()` and silently
+inherited the reference tiers the moment they became verified — and a self-test
+assertion now pins it.
+
+### What the new assertions cover
+
+The suite went from 107 to **180**. The additions pin the detector primitives
+(corner ordering, convexity, area, the rectangularity residual, contour
+following, polygon approximation, workspace buffer reuse), the error algebra
+against hand-computed arithmetic, the degradation ladder, the re-tiering
+bookkeeping, the `[ref …]` note round-trip, and — the ones that would actually
+catch a sign error — three **end-to-end** cases that render a rectangle at a
+known pose and assert that the whole detect → refine → homography → pose chain
+recovers the distance and yaw that went in.
 
 ---
 
@@ -412,11 +491,19 @@ parses the right responses. It cannot prove the server agrees.
    synthetically.
 8. **The AR capture path on device.** WebXR `immersive-ar`, `camera-access`, the
    opaque camera texture and the single-frame readback cannot run in a desktop
-   browser at all. The 107 geometry assertions cover the *maths* and the WebGL
+   browser at all. The 180 geometry assertions cover the *maths* and the WebGL
    readback/Y-flip pipeline against a texture we control; they do not cover a
    real phone. Use the on-device diagnostics panel (⋮ → Diagnostics) for that.
-9. **Real geolocation.** Desktop runs use the simulated fallback.
-10. **IndexedDB eviction under real storage pressure.** `navigator.storage
+9. **The reference detector against real optics and real lighting.** Its accuracy
+   and timing are measured against synthetic frames rendered through the same
+   pinhole model the app uses, so they exercise the geometry and the code but not
+   rolling shutter, motion blur, autofocus hunting, JPEG/ISP sharpening halos,
+   glare on a laminated poster, or a badly lit aisle. Nor do they exercise the
+   real cost of `drawImage` from a live camera texture on a budget SoC. Use
+   ⋮ → Diagnostics → **Benchmark detector** on the target handset, and treat the
+   degradation ladder as the safety net it is.
+10. **Real geolocation.** Desktop runs use the simulated fallback.
+11. **IndexedDB eviction under real storage pressure.** `navigator.storage
     .persist()` is requested at boot, but it is a request, not a guarantee.
 
 ---

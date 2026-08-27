@@ -411,6 +411,14 @@ table.tbl tr:last-child td{border-bottom:0}
 .tier-ref{background:var(--st-assigned-bg); color:var(--st-assigned)}
 .tier-est{background:var(--st-progress-bg); color:var(--st-progress)}
 .tier-unv{background:var(--st-rework-bg);   color:var(--st-rework)}
+#arDetBar{display:flex;flex-direction:column;gap:6px;margin-bottom:6px}
+#arDetBar .detrow{display:flex;gap:7px;align-items:center;flex-wrap:wrap}
+#arDetBar .detmsg{font-size:11.5px;color:#cbd5e1;line-height:1.35;flex:1;min-width:120px}
+#arDetBar .detmsg b{color:#5eead4}
+#arDetBar .detmsg.warn b{color:#fbbf24}
+#arDetBar .conf{position:relative;height:5px;border-radius:3px;background:rgba(148,163,184,.3);overflow:hidden;min-width:64px;flex:0 0 84px}
+#arDetBar .conf i{position:absolute;inset:0 auto 0 0;border-radius:3px;background:#fbbf24;transition:width 140ms linear}
+#arDetBar .conf.hi i{background:#2dd4bf}
 
 .pverify{border-radius:var(--r);border:1px solid var(--border);background:var(--surface-2);padding:12px 14px}
 .pverify.pass{background:var(--st-approved-bg);border-color:transparent}
@@ -636,30 +644,77 @@ const STANDOFF_TOL_FT = 0.5;   // ± band
 const ANGLE_TOL_DEG   = 5;     // ± per axis
 const ARM_MS          = 800;   // gates must hold continuously this long
 const ASSUMED_HFOV_DEG= 66;    // last-resort smartphone horizontal FOV
+
+/* ---- reference-scale error budget ----
+   Distance from a reference is D = f·W/w_px, so every one of these is a
+   RELATIVE standard deviation feeding a quadrature sum. They are declared here
+   rather than buried in a "± 2 %" string, so the number the merchandiser reads
+   is derived from the actual measurement chain and moves when the chain changes
+   — calibrate the device and the reported error drops on its own. */
+const FOCAL_SIGMA_FLOOR   = 0.012;  // focus breathing: a phone's focal length genuinely
+                                    // moves ~1 % between near and far focus
+const FOCAL_SIGMA_TRACK   = 0.030;  // MediaStreamTrack FOV, reported in whole degrees
+const FOCAL_SIGMA_ASSUMED = 0.120;  // an assumed 66° HFOV across the whole Android fleet
+const CALIB_DIST_SIGMA_FT = 0.0417; // ±0.5 in on the tape, plus where the user stood
+const CALIB_EDGE_SIGMA_PX = 1.5;    // per handle, dragging onto an edge by eye
+/* Uncorrected radial distortion, as a fraction of scale at the frame corner.
+   Phone ISPs correct most of it; this is a conservative residual, and it is why
+   the HUD nudges the reference back toward the middle of the frame. */
+const BARREL_K            = 0.030;
+const BARREL_WARN_R       = 0.55;   // normalised radius at which we start nagging
+
+/* ---- detector budget ----
+   The numbers the "degrade gracefully" rule is measured against. */
+const DET_BUDGET_MS       = 30;     // one pass; over this consistently ⇒ step down
+const DET_DEGRADE_RUN     = 6;      // consecutive overruns before stepping down
+const DET_ACCEPT_CONF     = 0.55;   // below this the outline is not even offered
+const DET_LOCK_CONF       = 0.62;   // below this a confirmed lock is dropped
+const DET_REACQUIRE_FRAC  = 0.15;   // corner jump (× quad diagonal) that breaks a lock
+const DET_STABLE_PASSES   = 2;      // consecutive agreeing passes before offering
 const M_TO_FT         = 3.28084;
 
-/* Known-width references the merchandiser can scale from (millimetres). */
+/* Known-size references the merchandiser can scale from (millimetres).
+   `tolMm` is the reference's own DIMENSIONAL uncertainty — how far its true
+   size may be from the nominal one printed here. It is a real term in the
+   distance error budget (see DET.errorEstimate), which is why a guillotined
+   sheet of office paper and a shopfitter's "900 mm" shelf carry very different
+   numbers. `auto` marks the rectangles the detector is allowed to look for. */
 const REF_PRESETS = [
-  {key:"a4",     label:"A4 sheet — short edge", mm:210,   quad:false},
-  {key:"a4l",    label:"A4 sheet — long edge",  mm:297,   quad:false},
-  {key:"card",   label:"Credit card — long edge", mm:85.6, quad:false},
-  {key:"shelf",  label:"Shelf face 900 × 400 mm", mm:900,  quad:true, hmm:400},
-  {key:"door",   label:"Door leaf 900 × 2100 mm", mm:900,  quad:true, hmm:2100},
-  {key:"frame",  label:"A1 poster frame 594 × 841 mm", mm:594, quad:true, hmm:841},
-  {key:"custom", label:"Custom…",               mm:0,     quad:false}
+  {key:"poster", label:"The installed poster itself", mm:0, quad:true, hmm:0,
+                 auto:true, dynamic:true, tolPct:0.010},
+  {key:"a4q",    label:"A4 sheet 210 × 297 mm — taped flat", mm:210, hmm:297,
+                 quad:true, auto:true, tolMm:0.5},
+  {key:"a4",     label:"A4 sheet — short edge", mm:210,   quad:false, tolMm:0.5},
+  {key:"a4l",    label:"A4 sheet — long edge",  mm:297,   quad:false, tolMm:0.5},
+  {key:"card",   label:"Credit card — long edge", mm:85.6, quad:false, tolMm:0.2},
+  {key:"shelf",  label:"Shelf face 900 × 400 mm", mm:900,  quad:true, hmm:400,
+                 auto:true, tolMm:6},
+  {key:"door",   label:"Door leaf 900 × 2100 mm", mm:900,  quad:true, hmm:2100,
+                 auto:true, tolMm:10},
+  {key:"frame",  label:"A1 poster frame 594 × 841 mm", mm:594, quad:true, hmm:841,
+                 auto:true, tolMm:2},
+  {key:"custom", label:"Custom…",               mm:0,     quad:false, tolPct:0.005}
 ];
 /* Verification tiers, strongest first. The "s" suffix means the photo was read
    back out of the SAME XR frame that produced the measurement (raw camera
    access); without it the photo came from the session-handover fallback. */
+/* `verified` is the ONE definition of what counts for the placement KPI, and it
+   is mirrored by the placements.is_verified generated column in the database
+   (see supabase/migrations/0005_retier_reference_scale.sql). A calibrated
+   reference-scale capture that passes every gate is evidence of the same
+   standing as an AR one: the distance came from a real measurement against a
+   real object of known size, not from a typed number or an assumed lens.
+   `rank` is a separate axis — AR is still the STRONGEST tier and still wins
+   bestPlacement() — and the estimated-focal and manual tiers stay unverified. */
 const TIER_META = {
-  Asd: {cls:"tier-arx", label:"AR single-frame · depth", rank:4},
-  As:  {cls:"tier-arx", label:"AR single-frame",  rank:4},
-  Ad:  {cls:"tier-ar",  label:"AR depth",         rank:3},
-  A:   {cls:"tier-ar",  label:"AR measured",      rank:3},
-  Bq:  {cls:"tier-ref", label:"Reference-scaled", rank:2},
-  B:   {cls:"tier-ref", label:"Reference-scaled", rank:2},
-  Be:  {cls:"tier-est", label:"Estimated",        rank:1},
-  C:   {cls:"tier-unv", label:"Unverified",       rank:0}
+  Asd: {cls:"tier-arx", label:"AR single-frame · depth", rank:4, verified:true},
+  As:  {cls:"tier-arx", label:"AR single-frame",  rank:4, verified:true},
+  Ad:  {cls:"tier-ar",  label:"AR depth",         rank:3, verified:true},
+  A:   {cls:"tier-ar",  label:"AR measured",      rank:3, verified:true},
+  Bq:  {cls:"tier-ref", label:"Reference-scaled", rank:2, verified:true},
+  B:   {cls:"tier-ref", label:"Reference-scaled", rank:2, verified:true},
+  Be:  {cls:"tier-est", label:"Estimated",        rank:1, verified:false},
+  C:   {cls:"tier-unv", label:"Unverified",       rank:0, verified:false}
 };
 const tierMeta = k => TIER_META[k] || TIER_META.C;
 const isARTier = k => k === "As" || k === "Asd" || k === "A" || k === "Ad";
@@ -1052,6 +1107,708 @@ const GEO = (function(){
     solveLinear:solveLinear, homography:homography, applyH:applyH,
     poseFromHomography:poseFromHomography, posterQuad:posterQuad,
     intrinsicsFromProjection:intrinsicsFromProjection, flipRowsRGBA:flipRowsRGBA
+  };
+})();
+
+/* ==========================================================
+   2b-bis. DET — automatic reference-rectangle detection
+   ------------------------------------------------------------
+   Hand-rolled, allocation-free-after-warmup, and deliberately dumb: it finds
+   ONE high-contrast quadrilateral per pass and hands its four corners to the
+   homography path that already exists in GEO. It does not track, it does not
+   learn, and it never decides on its own that a reading is trustworthy — the
+   merchandiser confirms the outline before it counts.
+
+   The pipeline, in the order the cost is paid:
+
+     1. the caller draws the video into a small work canvas and hands us the
+        LUMA plane for it (work resolution, long side ~480–800 px);
+     2. box-downsample ×2 into the DETECT plane (~240–400 px long side);
+     3. 1-2-1 separable blur, then a Sobel magnitude image;
+     4. a histogram percentile picks the edge threshold, so a dim scene and a
+        bright one get the same fraction of edge pixels;
+     5. one 3×3 dilation closes the 1–2 px gaps that would otherwise split the
+        rectangle's outline into four open arcs;
+     6. Moore-neighbourhood border following walks every closed edge blob.
+        Both the outer and the inner wall of the outline "ring" get traced,
+        which is a feature: the true rectangle lies between them, and step 8
+        removes the offset either way;
+     7. Douglas–Peucker at three tolerances; a contour that reduces to exactly
+        four convex vertices of plausible area becomes a candidate;
+     8. candidates are scored by how well they fit a RECTANGLE OF THE KNOWN
+        ASPECT RATIO under the known intrinsics (see rectFit) — not by how
+        rectangular they look in the image, which perspective ruins;
+     9. the winner's corners are re-derived at WORK resolution by fitting a
+        line to sub-pixel edge crossings along each side and intersecting
+        adjacent lines. Corner localisation is a direct term in the distance
+        error budget, so this step is the difference between ~1 % and ~4 %.
+
+   Everything here is a pure function over typed arrays. `Workspace` owns every
+   buffer and is reused for the life of a capture session — the only per-pass
+   allocations are a handful of 8-element corner arrays.
+   ========================================================== */
+const DET = (function(){
+  "use strict";
+
+  /* 8-neighbourhood, clockwise from east, in screen coordinates (y grows down). */
+  const DX = [ 1, 1, 0,-1,-1,-1, 0, 1];
+  const DY = [ 0, 1, 1, 1, 0,-1,-1,-1];
+
+  const clamp01 = v => v < 0 ? 0 : v > 1 ? 1 : v;
+
+  /* ---------- workspace: every buffer, allocated once ---------- */
+  function Workspace(){
+    this.w = 0; this.h = 0; this.sw = 0; this.sh = 0;
+    this.luma = null;      // work resolution, Uint8ClampedArray
+    this.small = null;     // detect resolution
+    this.blur = null; this.tmp = null;
+    this.mag = null;       // Uint16Array
+    this.bin = null; this.dil = null; this.visited = null;
+    this.hist = new Int32Array(256);
+    this.poly = null;      // Int32Array(maxPts*2) — one contour at a time
+    this.keep = null;      // Uint8Array(maxPts)
+    this.stack = new Int32Array(512);
+    this.maxPts = 0;
+    this.px = new Float64Array(64);   // refinement: edge points for one side
+    this.py = new Float64Array(64);
+  }
+  /* Size the workspace for a work plane of w×h whose detect plane is w/2×h/2.
+     Returns true when a (re)allocation happened. */
+  Workspace.prototype.fit = function(w, h){
+    const sw = Math.max(8, w >> 1), sh = Math.max(8, h >> 1);
+    if(this.w === w && this.h === h) return false;
+    this.w = w; this.h = h; this.sw = sw; this.sh = sh;
+    const N = w*h, M = sw*sh;
+    this.luma    = new Uint8ClampedArray(N);
+    this.small   = new Uint8ClampedArray(M);
+    this.blur    = new Uint8ClampedArray(M);
+    this.tmp     = new Uint8ClampedArray(M);
+    this.mag     = new Uint16Array(M);
+    this.bin     = new Uint8Array(M);
+    this.dil     = new Uint8Array(M);
+    this.visited = new Uint8Array(M);
+    this.maxPts  = Math.max(1024, 4*(sw + sh) + 512);
+    this.poly    = new Int32Array(this.maxPts*2);
+    this.keep    = new Uint8Array(this.maxPts);
+    return true;
+  };
+
+  /* ---------- stage 1: RGBA -> luma (ITU-R BT.601, integer) ---------- */
+  function lumaFromRGBA(rgba, out, n){
+    for(let i=0, j=0; i<n; i++, j+=4){
+      out[i] = (77*rgba[j] + 150*rgba[j+1] + 29*rgba[j+2]) >> 8;
+    }
+    return out;
+  }
+
+  /* ---------- stage 2: 2×2 box downsample ---------- */
+  function downsample2(src, w, h, out, sw, sh){
+    for(let y=0; y<sh; y++){
+      const s0 = (y*2)*w, s1 = (y*2+1)*w, d = y*sw;
+      for(let x=0; x<sw; x++){
+        const a = x*2;
+        out[d+x] = (src[s0+a] + src[s0+a+1] + src[s1+a] + src[s1+a+1] + 2) >> 2;
+      }
+    }
+    return out;
+  }
+
+  /* ---------- stage 3: separable 1-2-1 blur ---------- */
+  function blur121(src, w, h, tmp, out){
+    for(let y=0; y<h; y++){
+      const r = y*w;
+      tmp[r] = (src[r]*3 + src[r+1] + 2) >> 2;
+      for(let x=1; x<w-1; x++) tmp[r+x] = (src[r+x-1] + 2*src[r+x] + src[r+x+1] + 2) >> 2;
+      tmp[r+w-1] = (src[r+w-1]*3 + src[r+w-2] + 2) >> 2;
+    }
+    for(let x=0; x<w; x++) out[x] = (tmp[x]*3 + tmp[x+w] + 2) >> 2;
+    for(let y=1; y<h-1; y++){
+      const r = y*w, a = r-w, b = r+w;
+      for(let x=0; x<w; x++) out[r+x] = (tmp[a+x] + 2*tmp[r+x] + tmp[b+x] + 2) >> 2;
+    }
+    const l = (h-1)*w;
+    for(let x=0; x<w; x++) out[l+x] = (tmp[l+x]*3 + tmp[l-w+x] + 2) >> 2;
+    return out;
+  }
+
+  /* ---------- stage 4: Sobel magnitude, |gx| + |gy| ----------
+     The L1 norm rather than the L2: it is within 8 % of the true magnitude for
+     any gradient direction, and the threshold below is a percentile, so a
+     uniform 8 % scaling cancels out completely. */
+  function sobel(src, w, h, mag){
+    mag.fill(0);
+    let max = 0;
+    for(let y=1; y<h-1; y++){
+      const r = y*w, a = r-w, b = r+w;
+      for(let x=1; x<w-1; x++){
+        const i = r+x;
+        const gx = (src[a+x+1] + 2*src[i+1] + src[b+x+1]) - (src[a+x-1] + 2*src[i-1] + src[b+x-1]);
+        const gy = (src[b+x-1] + 2*src[b+x] + src[b+x+1]) - (src[a+x-1] + 2*src[a+x] + src[a+x+1]);
+        const m = (gx < 0 ? -gx : gx) + (gy < 0 ? -gy : gy);
+        mag[i] = m;
+        if(m > max) max = m;
+      }
+    }
+    return max;
+  }
+
+  /* ---------- stage 4b: percentile threshold ----------
+     Wants `frac` of the pixels above the cut, but never accepts a cut below
+     `floor`: on a blank wall the top 9 % of gradients are pure sensor noise and
+     tracing them would burn the whole frame budget on garbage contours. */
+  function percentileThreshold(mag, n, frac, floor, hist){
+    hist.fill(0);
+    for(let i=0; i<n; i++){
+      let v = mag[i] >> 2;                 // Sobel L1 maxes at 4·255; 256 bins
+      if(v > 255) v = 255;
+      hist[v]++;
+    }
+    const want = Math.round(n*frac);
+    let acc = 0, bin = 255;
+    for(let b=255; b>=0; b--){
+      acc += hist[b];
+      if(acc >= want){ bin = b; break; }
+    }
+    return Math.max(floor, bin << 2);
+  }
+
+  function threshold(mag, n, t, bin){
+    for(let i=0; i<n; i++) bin[i] = mag[i] >= t ? 1 : 0;
+    return bin;
+  }
+
+  /* ---------- stage 5: separable 3×3 dilation ---------- */
+  function dilate3(src, w, h, tmp, out){
+    for(let y=0; y<h; y++){
+      const r = y*w;
+      for(let x=0; x<w; x++){
+        const a = x > 0 ? src[r+x-1] : 0, b = src[r+x], c = x < w-1 ? src[r+x+1] : 0;
+        tmp[r+x] = (a|b|c);
+      }
+    }
+    for(let y=0; y<h; y++){
+      const r = y*w, a = y > 0 ? r-w : r, b = y < h-1 ? r+w : r;
+      for(let x=0; x<w; x++) out[r+x] = (tmp[a+x] | tmp[r+x] | tmp[b+x]);
+    }
+    return out;
+  }
+
+  /* ---------- stage 6: Moore-neighbourhood border following ----------
+     Writes the chain into `out` and marks every visited border pixel so the
+     raster scan never re-traces the same border. Returns the point count. */
+  function traceContour(bin, w, h, sx, sy, out, maxPts, visited){
+    let cx = sx, cy = sy, dir = 5;      // entered from the west ⇒ sweep from NW
+    let n = 0;
+    for(;;){
+      out[n*2] = cx; out[n*2+1] = cy; n++;
+      visited[cy*w + cx] = 1;
+      let found = false;
+      for(let k=0; k<8; k++){
+        const d = (dir + k) & 7;
+        const nx = cx + DX[d], ny = cy + DY[d];
+        if(nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+        if(bin[ny*w + nx]){
+          dir = (d + 5) & 7;            // backtrack is d+4; sweep starts one past it
+          cx = nx; cy = ny; found = true;
+          break;
+        }
+      }
+      if(!found) break;                  // isolated pixel
+      if(n >= 2 && cx === sx && cy === sy) break;
+      if(n >= maxPts) break;
+    }
+    return n;
+  }
+
+  /* ---------- stage 7: Douglas–Peucker on a CLOSED contour ----------
+     Split at the two mutually-farthest points, then simplify the two open
+     halves. Indices wrap, so no rotation of the chain is needed. */
+  function segDist2(pts, i, ax, ay, bx, by){
+    const px = pts[i*2], py = pts[i*2+1];
+    const dx = bx-ax, dy = by-ay;
+    const L2 = dx*dx + dy*dy;
+    if(L2 < 1e-9){ const ex = px-ax, ey = py-ay; return ex*ex + ey*ey; }
+    const cr = (px-ax)*dy - (py-ay)*dx;
+    return cr*cr/L2;
+  }
+  function dpHalf(pts, n, a, b, eps2, keep, stack){
+    let sp = 0;
+    stack[sp++] = a; stack[sp++] = b;
+    while(sp > 0){
+      const j = stack[--sp], i = stack[--sp];
+      const len = (j - i + n) % n;
+      if(len < 2) continue;
+      const ax = pts[i*2], ay = pts[i*2+1], bx = pts[j*2], by = pts[j*2+1];
+      let worst = -1, wi = -1;
+      for(let s=1; s<len; s++){
+        const k = (i + s) % n;
+        const d = segDist2(pts, k, ax, ay, bx, by);
+        if(d > worst){ worst = d; wi = k; }
+      }
+      if(worst > eps2 && wi >= 0){
+        keep[wi] = 1;
+        if(sp + 4 <= stack.length){ stack[sp++] = i; stack[sp++] = wi; stack[sp++] = wi; stack[sp++] = j; }
+      }
+    }
+  }
+  /* Simplifies and, if the result has exactly 4 vertices, writes them into
+     `quad` (x0,y0,…,x3,y3) and returns true. */
+  function dpQuad(pts, n, eps, keep, stack, quad){
+    if(n < 8) return false;
+    keep.fill(0, 0, n);
+    let i0 = 0, best = -1;
+    for(let i=1; i<n; i++){
+      const dx = pts[i*2]-pts[0], dy = pts[i*2+1]-pts[1];
+      const d = dx*dx + dy*dy;
+      if(d > best){ best = d; i0 = i; }
+    }
+    let j0 = 0; best = -1;
+    for(let i=0; i<n; i++){
+      const dx = pts[i*2]-pts[i0*2], dy = pts[i*2+1]-pts[i0*2+1];
+      const d = dx*dx + dy*dy;
+      if(d > best){ best = d; j0 = i; }
+    }
+    if(i0 === j0) return false;
+    keep[i0] = 1; keep[j0] = 1;
+    const eps2 = eps*eps;
+    dpHalf(pts, n, i0, j0, eps2, keep, stack);
+    dpHalf(pts, n, j0, i0, eps2, keep, stack);
+    let c = 0;
+    for(let i=0; i<n; i++){
+      if(!keep[i]) continue;
+      if(c === 4) return false;          // more than four ⇒ not our rectangle
+      quad[c*2] = pts[i*2]; quad[c*2+1] = pts[i*2+1];
+      c++;
+    }
+    return c === 4;
+  }
+
+  /* ---------- quad predicates ---------- */
+  function quadArea(q){
+    let s = 0;
+    for(let i=0; i<4; i++){
+      const j = (i+1) & 3;
+      s += q[i*2]*q[j*2+1] - q[j*2]*q[i*2+1];
+    }
+    return Math.abs(s)/2;
+  }
+  function isConvex(q){
+    let sign = 0;
+    for(let i=0; i<4; i++){
+      const a = i, b = (i+1)&3, c = (i+2)&3;
+      const cr = (q[b*2]-q[a*2])*(q[c*2+1]-q[b*2+1]) - (q[b*2+1]-q[a*2+1])*(q[c*2]-q[b*2]);
+      if(Math.abs(cr) < 1e-9) return false;      // three collinear corners
+      const s = cr > 0 ? 1 : -1;
+      if(sign === 0) sign = s;
+      else if(s !== sign) return false;
+    }
+    return true;
+  }
+  function minSide(q){
+    let m = Infinity;
+    for(let i=0; i<4; i++){
+      const j = (i+1)&3;
+      const d = Math.hypot(q[j*2]-q[i*2], q[j*2+1]-q[i*2+1]);
+      if(d < m) m = d;
+    }
+    return m;
+  }
+  function meanSide(q){
+    let s = 0;
+    for(let i=0; i<4; i++){
+      const j = (i+1)&3;
+      s += Math.hypot(q[j*2]-q[i*2], q[j*2+1]-q[i*2+1]);
+    }
+    return s/4;
+  }
+  /* Reorder into TL, TR, BR, BL as seen on screen. Sorting by polar angle about
+     the centroid fixes the winding (a convex quad's corners are monotone in
+     angle); rotating the cycle to start at the top-left-most corner fixes the
+     phase. A rectangle is 180°-symmetric, so the remaining ambiguity only ever
+     flips the recovered ROLL, which this code path never consumes. */
+  function orderQuad(q, out){
+    let cx = 0, cy = 0;
+    for(let i=0; i<4; i++){ cx += q[i*2]; cy += q[i*2+1]; }
+    cx /= 4; cy /= 4;
+    const idx = [0,1,2,3].sort(function(a,b){
+      return Math.atan2(q[a*2+1]-cy, q[a*2]-cx) - Math.atan2(q[b*2+1]-cy, q[b*2]-cx);
+    });
+    let start = 0, best = Infinity;
+    for(let k=0; k<4; k++){
+      const i = idx[k];
+      const s = q[i*2] + q[i*2+1];
+      if(s < best){ best = s; start = k; }
+    }
+    for(let k=0; k<4; k++){
+      const i = idx[(start + k) & 3];
+      out[k*2] = q[i*2]; out[k*2+1] = q[i*2+1];
+    }
+    return out;
+  }
+
+  /* ---------- the rectangularity test ----------
+     Under perspective a real rectangle is a trapezoid, so "does it look square"
+     is worthless. What IS invariant: with correct intrinsics, the homography
+     that maps the model rectangle onto the detected quad must have its first
+     two columns (once back-projected through K) orthogonal and equal in length,
+     because they are the first two columns of a rotation matrix. Those two
+     residuals ARE the test, and they only vanish for the right aspect ratio —
+     which is also how the portrait/landscape ambiguity gets resolved. */
+  function rectFit(q, aspect, f, cx, cy){
+    if(!(aspect > 0) || !(f > 0)) return null;
+    const hw = aspect/2, hh = 0.5;
+    const src = [[-hw,-hh],[hw,-hh],[hw,hh],[-hw,hh]];
+    const dst = [[q[0],q[1]],[q[2],q[3]],[q[4],q[5]],[q[6],q[7]]];
+    const H = GEO.homography(src, dst);
+    if(!H) return null;
+    const col = function(j){
+      return [ (H[0][j] - cx*H[2][j])/f, (H[1][j] - cy*H[2][j])/f, H[2][j] ];
+    };
+    const b1 = col(0), b2 = col(1);
+    const n1 = GEO.vlen(b1), n2 = GEO.vlen(b2);
+    if(!(n1 > 1e-12) || !(n2 > 1e-12)) return null;
+    return {
+      ortho: Math.abs(GEO.vdot(b1, b2))/(n1*n2),   // 0 for a true rectangle
+      scale: Math.abs(n1 - n2)/((n1 + n2)/2)       // 0 for the right aspect
+    };
+  }
+
+  /* ---------- confidence ----------
+     Five independent reasons to disbelieve a detection, weighted by how often
+     each one is the thing that is actually wrong in the field.
+
+     `rms` earns its place: the ortho/scale residuals only ask "is this quad a
+     rectangle of the right shape under this lens", and a quad that has latched
+     onto a shelf edge running alongside the reference is still a perfectly
+     valid rectangle — just the wrong one. What gives that away is the line fit
+     along the sides suddenly getting worse. In testing, an outline corrupted by
+     abutting clutter fitted its edges 3–5× less tightly than a clean one while
+     scoring identically on every other term. */
+  const CONF_W = { rect:0.36, scale:0.24, area:0.14, support:0.13, rms:0.13 };
+  const CONF_RMS_BAD = 0.40;      // px of line-fit residual that zeroes the term
+  function confidence(p){
+    const cRect  = clamp01(1 - (p.ortho  || 0)/0.22);
+    const cScale = clamp01(1 - (p.scale  || 0)/0.25);
+    const a = p.areaFrac || 0;
+    const cArea = a < 0.01 ? 0
+                : a < 0.05 ? (a - 0.01)/0.04
+                : a <= 0.55 ? 1
+                : a < 0.85 ? (0.85 - a)/0.30 : 0;
+    const cSup = clamp01(p.support == null ? 0.5 : p.support);
+    // unrefined candidates have no residual yet; not knowing is not evidence of badness
+    const cRms = (p.rms == null) ? 1 : clamp01(1 - p.rms/CONF_RMS_BAD);
+    return clamp01(CONF_W.rect*cRect + CONF_W.scale*cScale
+                 + CONF_W.area*clamp01(cArea) + CONF_W.support*cSup
+                 + CONF_W.rms*cRms);
+  }
+
+  /* ---------- sub-pixel edge refinement ----------
+     For each side, walk 18 stations between 12 % and 88 % of its length (the
+     corners themselves are where the edge model breaks down), scan ±R px along
+     the side's normal for the strongest luminance step, refine that peak to
+     sub-pixel with a 3-point parabola, then fit a total-least-squares line to
+     the surviving stations. Corners come back as line–line intersections, so a
+     corner is never worse than the two lines that made it — and a line fitted
+     to 18 points is far better than any single pixel. */
+  function sampleBil(luma, w, h, x, y){
+    if(x < 0) x = 0; else if(x > w-1.001) x = w-1.001;
+    if(y < 0) y = 0; else if(y > h-1.001) y = h-1.001;
+    const x0 = x|0, y0 = y|0, fx = x-x0, fy = y-y0, i = y0*w + x0;
+    const a = luma[i], b = luma[i+1], c = luma[i+w], d = luma[i+w+1];
+    return a + (b-a)*fx + (c-a)*fy + (a-b-c+d)*fx*fy;
+  }
+  /* Total-least-squares line through (px,py)[0..m). Returns point + unit dir. */
+  function fitLine(px, py, m){
+    let mx = 0, my = 0;
+    for(let i=0; i<m; i++){ mx += px[i]; my += py[i]; }
+    mx /= m; my /= m;
+    let sxx = 0, syy = 0, sxy = 0;
+    for(let i=0; i<m; i++){
+      const dx = px[i]-mx, dy = py[i]-my;
+      sxx += dx*dx; syy += dy*dy; sxy += dx*dy;
+    }
+    // principal eigenvector of [[sxx,sxy],[sxy,syy]]
+    const tr = sxx + syy, det = sxx*syy - sxy*sxy;
+    const disc = Math.max(0, tr*tr/4 - det);
+    const lam = tr/2 + Math.sqrt(disc);
+    let dx = sxy, dy = lam - sxx;
+    if(Math.abs(dx) + Math.abs(dy) < 1e-12){ dx = lam - syy; dy = sxy; }
+    const L = Math.hypot(dx, dy) || 1;
+    dx /= L; dy /= L;
+    let rss = 0;
+    for(let i=0; i<m; i++){
+      const ex = px[i]-mx, ey = py[i]-my;
+      const perp = ex*(-dy) + ey*dx;
+      rss += perp*perp;
+    }
+    return { x:mx, y:my, dx:dx, dy:dy, rms: Math.sqrt(rss/m), m:m };
+  }
+  function intersect(a, b){
+    const cr = a.dx*b.dy - a.dy*b.dx;
+    if(Math.abs(cr) < 1e-9) return null;
+    const s = ((b.x - a.x)*b.dy - (b.y - a.y)*b.dx)/cr;
+    return [ a.x + s*a.dx, a.y + s*a.dy ];
+  }
+  const REFINE = { samples:18, radius:7, minGrad:9, centreBias:0.30, t0:0.12, t1:0.88,
+                   radius1:11, radius2:4, minGrad1:7 };
+  /* `quad` is in WORK-plane pixels. Writes refined corners into `out`. */
+  function refineQuad(luma, w, h, quad, out, ws, opt){
+    const o = opt || {};
+    const N = o.samples || REFINE.samples;
+    const R = o.radius  || REFINE.radius;
+    const minG = o.minGrad == null ? REFINE.minGrad : o.minGrad;
+    const lines = [];
+    let attempted = 0, accepted = 0;
+    for(let s=0; s<4; s++){
+      const e = (s+1) & 3;
+      const ax = quad[s*2], ay = quad[s*2+1], bx = quad[e*2], by = quad[e*2+1];
+      const L = Math.hypot(bx-ax, by-ay);
+      if(!(L > 6)){ lines.push(null); continue; }
+      const ux = (bx-ax)/L, uy = (by-ay)/L;
+      const nx = -uy, ny = ux;                       // unit normal
+      let m = 0;
+      for(let k=0; k<N; k++){
+        attempted++;
+        const t = REFINE.t0 + (REFINE.t1 - REFINE.t0)*(N === 1 ? 0.5 : k/(N-1));
+        const sx = ax + (bx-ax)*t, sy = ay + (by-ay)*t;
+        let bestG = 0, bestU = 0, bestRaw = 0;
+        let gm1 = 0, g0 = 0, gp1 = 0;
+        // gradient along the normal, sampled at half-pixel offsets
+        let prev = null;
+        const gAt = function(u){
+          const p = sampleBil(luma, w, h, sx + (u+0.5)*nx, sy + (u+0.5)*ny);
+          const q = sampleBil(luma, w, h, sx + (u-0.5)*nx, sy + (u-0.5)*ny);
+          const d = p - q;
+          return d < 0 ? -d : d;
+        };
+        for(let u=-R; u<=R; u++){
+          const g = gAt(u);
+          const weighted = g*(1 - REFINE.centreBias*Math.abs(u)/R);
+          if(weighted > bestG){ bestG = weighted; bestU = u; bestRaw = g; }
+        }
+        if(bestRaw < minG) continue;
+        gm1 = gAt(bestU-1); g0 = bestRaw; gp1 = gAt(bestU+1);
+        const den = gm1 - 2*g0 + gp1;
+        let sub = 0;
+        if(Math.abs(den) > 1e-6){
+          sub = 0.5*(gm1 - gp1)/den;
+          if(sub > 1) sub = 1; else if(sub < -1) sub = -1;
+        }
+        const u = bestU + sub;
+        if(m < ws.px.length){
+          ws.px[m] = sx + u*nx; ws.py[m] = sy + u*ny; m++;
+          accepted++;
+        }
+        void prev;
+      }
+      if(m < 5){ lines.push(null); continue; }
+      let ln = fitLine(ws.px, ws.py, m);
+      // one round of outlier rejection — a passing shopper, a shadow, a shelf
+      if(ln.rms > 0.35){
+        const cut = 2.2*ln.rms;
+        let k = 0;
+        for(let i=0; i<m; i++){
+          const ex = ws.px[i]-ln.x, ey = ws.py[i]-ln.y;
+          if(Math.abs(ex*(-ln.dy) + ey*ln.dx) <= cut){ ws.px[k] = ws.px[i]; ws.py[k] = ws.py[i]; k++; }
+        }
+        if(k >= 5 && k < m) ln = fitLine(ws.px, ws.py, k);
+      }
+      lines.push(ln);
+    }
+    let ok = 0, rss = 0, mTot = 0, sinSum = 0, sinN = 0;
+    for(let i=0; i<4; i++){
+      const prev = lines[(i+3) & 3], cur = lines[i];
+      let p = null;
+      if(prev && cur){
+        p = intersect(prev, cur);
+        if(p){
+          const sin = Math.abs(prev.dx*cur.dy - prev.dy*cur.dx);
+          sinSum += sin; sinN++;
+        }
+      }
+      if(p && isFinite(p[0]) && isFinite(p[1])
+         && Math.hypot(p[0]-quad[i*2], p[1]-quad[i*2+1]) < 3.5*(o.radius || REFINE.radius)){
+        out[i*2] = p[0]; out[i*2+1] = p[1]; ok++;
+      } else {
+        out[i*2] = quad[i*2]; out[i*2+1] = quad[i*2+1];
+      }
+    }
+    for(let i=0; i<4; i++){
+      const ln = lines[i];
+      if(!ln) continue;
+      rss += ln.rms*ln.rms*ln.m; mTot += ln.m;
+    }
+    const rms = mTot ? Math.sqrt(rss/mTot) : null;
+    const perLine = mTot ? (mTot/4) : 0;
+    const sinAvg = sinN ? (sinSum/sinN) : 1;
+    /* A corner is where two fitted lines meet. Each line's own position is
+       uncertain by rms/√m perpendicular to itself; two of them, crossing at
+       angle θ, put the intersection out by √2·(rms/√m)/|sin θ|. The 0.15 px
+       floor is the interpolation limit — no amount of averaging beats it. */
+    const cornerSigma = (rms != null && perLine >= 5)
+      ? Math.max(0.15, Math.SQRT2*(rms/Math.sqrt(perLine))/Math.max(0.2, sinAvg))
+      : null;
+    return {
+      corners: ok, rms: rms, support: attempted ? accepted/attempted : 0,
+      cornerSigma: cornerSigma, samplesPerLine: perLine
+    };
+  }
+
+  /* Two-stage refinement. The coarse quad comes off a DILATED edge image at half
+     resolution, so its sides can sit 8–12 px away from the truth — beyond the
+     tight scan radius that gives good sub-pixel precision. Stage 1 casts a wide
+     net to get within a couple of pixels; stage 2 re-scans narrowly from there,
+     where a nearby shelf edge or shadow can no longer out-vote the real one.
+     Cost is ~0.4 ms; skipping it costs several percent of distance accuracy on
+     obliquely-viewed references. */
+  function refine(luma, w, h, quad, out, ws, opt){
+    const o = opt || {};
+    const mid = new Float64Array(8);
+    const r1 = refineQuad(luma, w, h, quad, mid, ws,
+      { radius: o.radius1 || REFINE.radius1, minGrad: o.minGrad1 == null ? REFINE.minGrad1 : o.minGrad1,
+        samples: o.samples });
+    const r2 = refineQuad(luma, w, h, mid, out, ws,
+      { radius: o.radius2 || REFINE.radius2, minGrad: o.minGrad, samples: o.samples });
+    r2.stage1 = r1;
+    /* If the narrow second pass lost the edge (support collapsed), stage 1 is
+       still better than the coarse quad — keep it rather than a bad tighten. */
+    if(r2.support < 0.45 && r1.support >= r2.support){
+      out.set(mid);
+      r1.stage1 = null; r1.usedStage = 1;
+      return r1;
+    }
+    r2.usedStage = 2;
+    return r2;
+  }
+
+  /* ---------- the pass ----------
+     gray:   luma at WORK resolution (ws.luma, already filled by the caller)
+     aspect: the reference rectangle's width/height. Both orientations are
+             tried; `flipped` says the long edge ran horizontally.
+     Corners come back in WORK-plane pixels. */
+  const EPS_FRACS = [0.015, 0.030, 0.050];
+  const LEVELS = [0.09, 0.045];
+  function detect(ws, opt){
+    const o = opt || {};
+    const w = ws.w, h = ws.h, sw = ws.sw, sh = ws.sh, M = sw*sh;
+    const aspect = o.aspect > 0 ? o.aspect : 1;
+    // intrinsics expressed in DETECT-plane pixels
+    const f  = (o.focalPx || GEO.focalFromFov(w, 66)) * (sw/w);
+    const cx = (o.cx == null ? w/2 : o.cx) * (sw/w);
+    const cy = (o.cy == null ? h/2 : o.cy) * (sh/h);
+    const minArea = (o.minAreaFrac == null ? 0.012 : o.minAreaFrac) * M;
+    const maxArea = (o.maxAreaFrac == null ? 0.88  : o.maxAreaFrac) * M;
+
+    downsample2(ws.luma, w, h, ws.small, sw, sh);
+    blur121(ws.small, sw, sh, ws.tmp, ws.blur);
+    sobel(ws.blur, sw, sh, ws.mag);
+
+    const raw = new Float64Array(8), ord = new Float64Array(8);
+    let bestQ = null, bestScore = -1, bestParts = null, bestFlip = false;
+    let contours = 0, candidates = 0, level = -1;
+
+    for(let li=0; li<LEVELS.length; li++){
+      const t = percentileThreshold(ws.mag, M, LEVELS[li], o.gradFloor == null ? 26 : o.gradFloor, ws.hist);
+      threshold(ws.mag, M, t, ws.bin);
+      dilate3(ws.bin, sw, sh, ws.dil, ws.bin);      // tmp=dil, result back in bin
+      ws.visited.fill(0);
+      level = li;
+
+      for(let y=1; y<sh-1 && contours < 400; y++){
+        const row = y*sw;
+        for(let x=1; x<sw-1; x++){
+          const i = row + x;
+          if(!ws.bin[i] || ws.visited[i] || ws.bin[i-1]) continue;
+          const n = traceContour(ws.bin, sw, sh, x, y, ws.poly, ws.maxPts, ws.visited);
+          if(n < 24) continue;
+          contours++;
+          if(contours >= 400) break;
+          for(let e=0; e<EPS_FRACS.length; e++){
+            /* Tolerance scales with the CONTOUR, never with an absolute pixel count.
+               An absolute cap silently disabled the coarse levels on smaller detect
+               planes: the dilation rounds each corner by a fixed 2-3 px, which is a
+               much larger fraction of a small rectangle, so DP kept a fifth vertex
+               there and the reference was never offered on exactly the low-end
+               devices this feature exists for. */
+            const eps = Math.max(1.4, EPS_FRACS[e]*n);
+            if(!dpQuad(ws.poly, n, eps, ws.keep, ws.stack, raw)) continue;
+            const area = quadArea(raw);
+            if(area < minArea || area > maxArea) continue;
+            if(!isConvex(raw)) continue;
+            if(minSide(raw) < 10) continue;
+            orderQuad(raw, ord);
+            candidates++;
+            for(let flip=0; flip<2; flip++){
+              const asp = flip ? 1/aspect : aspect;
+              const fit = rectFit(ord, asp, f, cx, cy);
+              if(!fit) continue;
+              const parts = { ortho:fit.ortho, scale:fit.scale, areaFrac:area/M, support:null };
+              const c = confidence(parts);
+              if(c > bestScore){
+                bestScore = c; bestParts = parts; bestFlip = !!flip;
+                bestQ = bestQ || new Float64Array(8);
+                bestQ.set(ord);
+              }
+              if(Math.abs(aspect - 1) < 1e-6) break;    // square: no ambiguity
+            }
+          }
+        }
+      }
+      if(bestScore >= (o.acceptScore == null ? 0.55 : o.acceptScore)) break;
+    }
+
+    if(!bestQ) return { quad:null, score:0, contours:contours, candidates:candidates, level:level };
+    // detect plane -> work plane
+    const k = w/sw;
+    const q = new Float64Array(8);
+    for(let i=0; i<8; i++) q[i] = bestQ[i]*k;
+    return {
+      quad: q, score: bestScore, parts: bestParts, flipped: bestFlip,
+      contours: contours, candidates: candidates, level: level,
+      areaFrac: bestParts ? bestParts.areaFrac : 0
+    };
+  }
+
+  /* ---------- error budget ----------
+     Distance from a reference rectangle is D = f·W/w_px, so the relative error
+     is the quadrature sum of the relative errors of everything on the right.
+     Every term below is a measured or declared quantity — nothing is a
+     hardcoded "±2 %".
+
+       focal    σf/f from whatever produced the focal length (a device
+                calibration knows its own tape-measure and handle error; an
+                assumed field of view does not, and stays Tier Be)
+       refDim   the reference's own dimensional tolerance ÷ its size
+       corner   corner localisation: each side's length comes from two corners
+                each uncertain by σc, and the pose averages the two parallel
+                sides, so the scale error is σc/(√2·L̄)
+       barrel   uncorrected radial distortion, which grows as r² from the
+                optical centre — the reason the HUD nudges the reference back
+                toward the middle of the frame */
+  function errorEstimate(t){
+    const focal  = Math.max(0, t.focalRelSigma || 0);
+    const refDim = (t.refMm > 0) ? Math.max(0, t.refTolMm || 0)/t.refMm : 0;
+    const corner = (t.meanSidePx > 0 && t.cornerSigmaPx != null)
+      ? t.cornerSigmaPx/(Math.SQRT2*t.meanSidePx) : 0;
+    const r = Math.max(0, Math.min(1.4, t.radialNorm || 0));
+    const barrel = (t.barrelK == null ? 0.03 : t.barrelK)*r*r;
+    const rel = Math.sqrt(focal*focal + refDim*refDim + corner*corner + barrel*barrel);
+    return {
+      rel: rel, pct: rel*100,
+      terms: { focal:focal, refDim:refDim, corner:corner, barrel:barrel }
+    };
+  }
+
+  return {
+    Workspace: Workspace,
+    lumaFromRGBA: lumaFromRGBA, downsample2: downsample2, blur121: blur121,
+    sobel: sobel, percentileThreshold: percentileThreshold, threshold: threshold,
+    dilate3: dilate3, traceContour: traceContour, dpQuad: dpQuad,
+    quadArea: quadArea, isConvex: isConvex, minSide: minSide, meanSide: meanSide,
+    orderQuad: orderQuad, rectFit: rectFit, confidence: confidence,
+    fitLine: fitLine, intersect: intersect, sampleBil: sampleBil,
+    refineQuad: refineQuad, refine: refine, detect: detect, errorEstimate: errorEstimate,
+    REFINE: REFINE
   };
 })();
 
@@ -2318,11 +3075,24 @@ function blankPlacement(){
            focalPx:null, focalSource:"—", posterWFt:null, posterHFt:null,
            captureMode:"manual", pass:false, ts:null, note:"" };
 }
-/* A capture only counts as "placement verified" if every gate passed AND the
-   distance came from a real AR measurement rather than a scale estimate. */
-function placementVerified(p){ return !!(p && p.pass && isARTier(p.tier)); }
-/* The strongest outcome: verified AND the photo is the very frame that was measured. */
-function placementSingleFrame(p){ return !!(placementVerified(p) && p.captureMode === "single-frame"); }
+/* A capture counts as "placement verified" when every gate passed AND the
+   distance came from a real measurement — AR, or a CALIBRATED reference scale.
+   An assumed focal length (tier Be) and hand-typed numbers (tier C) are not
+   measurements and never qualify. TIER_META.verified is the single definition;
+   the database enforces the same one in placements.is_verified. */
+function placementVerified(p){ return !!(p && p.pass && tierMeta(p.tier).verified); }
+/* True only for the AR tiers. Kept apart from verification because the
+   same-frame provenance chip and the "strongest tier" ordering are about HOW
+   the measurement was made, not about whether it counts. */
+function placementAR(p){ return !!(p && isARTier(p.tier)); }
+/* The strongest outcome: verified AND the photo is the very frame that was
+   measured. This is deliberately AR-ONLY and does NOT follow placementVerified()
+   — same-frame provenance comes from reading the pixels back out of the XR
+   frame that produced the measurement, which no camera-tier path can do. The
+   database says the same thing in placements.is_same_frame. */
+function placementSingleFrame(p){
+  return !!(p && p.pass && placementAR(p) && p.captureMode === "single-frame");
+}
 function placementUnverified(p){ return !p || p.tier === "C"; }
 
 /* ==========================================================
@@ -2367,6 +3137,33 @@ function storeRow(s){
            geofence_m: s.geofenceM == null ? GEOFENCE_M : Math.round(s.geofenceM) };
 }
 
+/* The reference-scale evidence is written into placements.note as a compact
+   [ref …] tag, because the database has no columns for it yet (0005_*.sql part
+   2 adds them; the client will not name columns that might not exist, since a
+   PostgREST insert naming an unknown column fails 400 and the outbox treats
+   that as permanent). Parsing it back means a manager reviewing a placement
+   FETCHED FROM THE SERVER still sees the error bar and what it was scaled
+   from, instead of only the device that captured it. Anything unparseable is
+   simply ignored — the note stays readable either way. */
+const REF_NOTE_RE = /\[ref (\S+) ([\d.]+)x([\d.]+)mm (?:auto conf=([\d.]+)|manual) err=([\d.]+)% \(focal ([\d.]+) \/ dim ([\d.]+) \/ corner ([\d.]+) \/ barrel ([\d.]+)\) r=([\d.]+)\]/;
+function refEvidenceFromNote(note, p){
+  if(!note) return p;
+  const m = REF_NOTE_RE.exec(note);
+  if(!m) return p;
+  p.refSource = m[1];
+  p.refWmm = Number(m[2]); p.refHmm = Number(m[3]);
+  p.refAuto = m[4] != null;
+  if(m[4] != null) p.refConfidence = Number(m[4]);
+  p.errorPct = Number(m[5]);
+  p.errorTerms = { focal:Number(m[6]), refDim:Number(m[7]),
+                   corner:Number(m[8]), barrel:Number(m[9]) };
+  p.radialOffset = Number(m[10]);
+  if(!p.refLabel){
+    const def = REF_PRESETS.filter(x => x.key === p.refSource)[0];
+    p.refLabel = def ? def.label : p.refSource;
+  }
+  return p;
+}
 function mapPlacement(r){
   if(!r) return null;
   const p = {
@@ -2384,6 +3181,7 @@ function mapPlacement(r){
     armMs:r.arm_ms, note:r.note||"",
     ts:r.captured_at||r.recorded_at, recordedAt:r.recorded_at, createdBy:r.created_by||null
   };
+  refEvidenceFromNote(p.note, p);
   if(r.camera_w){
     p.cameraImage = { w:r.camera_w, h:r.camera_h, readbackMs:num(r.camera_readback_ms),
                       path:r.camera_path, aspectAgrees:r.camera_aspect_agrees };
@@ -3350,7 +4148,7 @@ function viewDashboard(){
     ["Rejected / Rework", k.rework, "returned to field", ""],
     ["% Completion", k.pct+"%", "of planned stores", "accent"],
     ["Placement-verified", k.verified + " · " + vPct + "%",
-     "of "+k.submissions+" submissions, AR-measured, all gates passed", "accent"],
+     "of "+k.submissions+" submissions — AR or calibrated reference scale, all gates passed", "accent"],
     ["Same-frame captures", k.sameFrame + " · " + sPct + "%",
      k.sameFrame
        ? "photographed in the measured frame — strongest evidence"
@@ -3900,7 +4698,11 @@ function viewApprovals(){
     const placeChip = placementUnverified(pl)
       ? '<span class="tierbadge tier-unv" title="Distance and squareness were never measured">⚠ UNVERIFIED PLACEMENT</span>'
       : '<span class="tierbadge '+tm.cls+'">'+esc(tm.label)+' · '+Number(pl.distanceFt).toFixed(1)+' ft'
-        +(pl.pass?'':' · GATES FAILED')+'</span>';
+        +(pl.errorPct != null ? ' ± '+pl.errorPct.toFixed(1)+'%' : '')
+        +(pl.pass?'':' · GATES FAILED')+'</span>'
+        + (placementVerified(pl) && !placementAR(pl)
+            ? '<span class="chip pass plain" title="Distance measured against a reference of known size with a calibrated focal length">VERIFIED · REFERENCE</span>'
+            : '');
     return '<div class="card" style="margin-bottom:12px'
       + (placementUnverified(pl) ? ';border-left:3px solid var(--st-rework)' : '')+'"><div class="bd">'
       + '<div style="display:flex;gap:16px;align-items:center;flex-wrap:wrap">'
@@ -4261,6 +5063,21 @@ function placementBlock(p, t){
           ? '<span class="chip neutral">measured, then re-opened the camera</span>'
           : '<span class="chip neutral">'+esc(p.captureMode || "—")+'</span>')
     + '</span></div>'
+    + (p.errorPct != null
+        ? '<div class="prow"><span class="pl">Estimated distance error <span style="opacity:.65">1σ, derived</span></span>'
+          + '<span><b>± '+p.errorPct.toFixed(1)+' %</b>'
+          + '<span class="chip '+(p.errorPct <= 5 ? "pass" : "fail")+'" style="margin-left:6px">'
+          + (p.errorPct <= 5 ? "WITHIN 5%" : "OVER 5%")+'</span></span></div>'
+        : '')
+    + (p.refLabel
+        ? '<div class="prow"><span class="pl">Scale reference'
+          + (p.refAuto ? ' <span style="opacity:.65">auto-detected</span>' : ' <span style="opacity:.65">outlined by hand</span>')
+          + '</span><span><b>'+esc(p.refLabel)+'</b>'
+          + (p.refConfidence != null
+              ? '<span class="chip neutral plain" style="margin-left:6px">'+Math.round(p.refConfidence*100)+'% conf</span>'
+              : '')
+          + '</span></div>'
+        : '')
     + '<div class="prow" style="border-top:1px solid rgba(128,128,128,.22);margin-top:6px;padding-top:8px">'
     +   '<span class="pl">Verification</span>'
     +   '<span><span class="chip '+(p.pass?"pass":"fail")+'">'+(p.pass?"ALL GATES PASSED":"GATES NOT MET")+'</span></span></div>'
@@ -4273,6 +5090,15 @@ function placementBlock(p, t){
           + (p.cameraImage.readbackMs != null ? ' · readback '+p.cameraImage.readbackMs+' ms' : '')
           + (p.cameraImage.path ? ' · '+esc(p.cameraImage.path) : '')
         : '')
+    +   (p.errorTerms
+        ? '<br><span class="mono">error budget:</span> focal ± '+p.errorTerms.focal+' % · reference size ± '
+          + p.errorTerms.refDim+' % · corner localisation ± '+p.errorTerms.corner
+          + ' % · lens distortion ± '+p.errorTerms.barrel+' % (added in quadrature)'
+        : '')
+    +   (p.detectWork ? '<br><span class="mono">detector:</span> '+esc(p.detectWork)
+          + (p.detectMs != null ? ' · '+p.detectMs+' ms/pass' : '')
+          + (p.refCornerRmsPx != null ? ' · edge residual '+p.refCornerRmsPx+' px' : '')
+          + (p.detectDegraded ? ' · stepped down' : '') : '')
     +   (p.note ? '<br><span style="color:var(--st-rework)">'+esc(p.note)+'</span>' : '')
     + '</div></div>';
 }
@@ -4807,8 +5633,17 @@ const ARC = {
   diag:null,
   sensors:{ on:false, src:"none", pitchDeg:null, rollDeg:null, alpha:null, beta:null, gamma:null,
             onOri:null, onMot:null },
-  focal:{ f:null, src:"—", estimated:true },
-  refPreset:"a4", refCustomMm:0, refWmm:210, refHmm:0,
+  focal:{ f:null, src:"—", estimated:true, relSigma:FOCAL_SIGMA_ASSUMED },
+  refPreset:"a4", refCustomMm:0, refWmm:210, refHmm:0, refPhase:"after",
+  /* Automatic reference detection. Everything measured about the detector lives
+     here so the diagnostics panel can read it without reaching into the loop. */
+  det:{ on:false, cls:"mid", step:0, work:640, fps:8,
+        canvas:null, ctx:null, ws:null, workW:0, workH:0, scale:1,
+        quad:null, cand:null, conf:0, stable:0, locked:false, offered:false,
+        wMm:0, hMm:0, flipped:false, cornerSigmaPx:null, support:0, rms:null,
+        radial:0, err:null, seenAt:0, note:"",
+        nextAt:0, lastMs:0, meanMs:0, maxMs:0, passes:0, hits:0,
+        overruns:0, degraded:0, degradeNote:"", bench:null },
   handles:[], quad:[],
   meas:{ distFt:null, yawDeg:null, yawVerified:false, distSrc:"", depthUsed:false, wallSeen:false },
   nudge:{x:0,y:0}, armT0:0, armed:false, posterImg:null, panel:null, busy:false,
@@ -4834,9 +5669,26 @@ function arcCalibKey(){
 function arcCalibAll(){
   try{ return JSON.parse(localStorage.getItem(CALIB_KEY) || "{}") || {}; }catch(e){ return {}; }
 }
+/* Exact match on device+resolution first. Failing that, ANY record for this
+   device is still usable: arcResolveFocal() rescales f by the width ratio, and
+   a focal length in pixels is linear in raster width. This matters now that the
+   capture path caps getUserMedia resolution on weak hardware — without the
+   fallback, capping the camera would silently throw away a calibration the
+   merchandiser had already done and drop them back to the estimated tier. */
 function arcCalibGet(){
   const all = arcCalibAll();
-  return all[arcCalibKey()] || null;
+  const exact = all[arcCalibKey()];
+  if(exact) return exact;
+  const dev = deviceString() + "|";
+  let best = null;
+  Object.keys(all).forEach(function(k){
+    if(k.indexOf(dev) !== 0) return;
+    const r = all[k];
+    if(!r || !(r.f > 0)) return;
+    if(!best || String(r.ts) > String(best.ts)) best = r;
+  });
+  if(best) return Object.assign({}, best, { rescaled:true });
+  return null;
 }
 function arcCalibSet(rec){
   try{
@@ -4858,20 +5710,38 @@ function arcResolveFocal(){
       const fov = st.fieldOfView || cp.fieldOfView || st.horizontalFieldOfView || cp.horizontalFieldOfView;
       const fovN = (fov && typeof fov === "object") ? fov.max : fov;
       if(fovN && fovN > 20 && fovN < 160){
-        return { f: GEO.focalFromFov(vw, fovN), src:"MediaStreamTrack field of view ("+Number(fovN).toFixed(0)+"°)", estimated:false };
+        return { f: GEO.focalFromFov(vw, fovN),
+                 src:"MediaStreamTrack field of view ("+Number(fovN).toFixed(0)+"°)",
+                 estimated:false, relSigma: arcQuad(FOCAL_SIGMA_TRACK, FOCAL_SIGMA_FLOOR) };
       }
       if(st.focalLengthX && st.focalLengthX > 50){
-        return { f: st.focalLengthX, src:"MediaStreamTrack focalLengthX", estimated:false };
+        return { f: st.focalLengthX, src:"MediaStreamTrack focalLengthX",
+                 estimated:false, relSigma: arcQuad(FOCAL_SIGMA_TRACK, FOCAL_SIGMA_FLOOR) };
       }
     }
   }catch(e){ /* capability probing is best-effort */ }
   const c = arcCalibGet();
   if(c && c.f > 0){
     const scaled = c.f * (vw / (c.vw || vw));
-    return { f: scaled, src:"device calibration ("+c.refLabel+", "+fmtD(c.ts)+")", estimated:false };
+    /* A calibration knows how good it is: it was solved from a tape measure and
+       two dragged handles, and both of those uncertainties were recorded when
+       it was saved. Records written before that existed fall back to a
+       deliberately pessimistic 2.5 %. */
+    const sig = (c.relSigma > 0) ? c.relSigma : 0.025;
+    return { f: scaled,
+             src:"device calibration ("+c.refLabel+", "+fmtD(c.ts)+")"
+                 + (c.rescaled ? ", rescaled from "+c.vw+"px" : ""),
+             estimated:false, relSigma: arcQuad(sig, FOCAL_SIGMA_FLOOR) };
   }
   return { f: GEO.focalFromFov(vw, ASSUMED_HFOV_DEG),
-           src:"assumed "+ASSUMED_HFOV_DEG+"° HFOV (estimated)", estimated:true };
+           src:"assumed "+ASSUMED_HFOV_DEG+"° HFOV (estimated)", estimated:true,
+           relSigma: FOCAL_SIGMA_ASSUMED };
+}
+/* quadrature sum — the only way independent relative errors ever combine here */
+function arcQuad(){
+  let s = 0;
+  for(let i=0; i<arguments.length; i++){ const v = arguments[i] || 0; s += v*v; }
+  return Math.sqrt(s);
 }
 /* video-pixel <-> CSS-pixel mapping for object-fit:cover */
 function arcMap(){
@@ -5289,14 +6159,22 @@ function arcErrorPanel(title, body, retryTier){
 }
 
 /* ---------- open / close ---------- */
-function arcOpen(taskId){
+/* `phase` picks the DEFAULT reference: an after-shot is taken with the poster
+   already on the wall, which makes the poster itself the best reference there
+   is — nothing to carry, nothing to tape up, and it is centred in frame by
+   construction. A before-shot has no poster yet, so it falls back to a printed
+   A4 sheet, which is the one rectangle a merchandiser can reliably produce. */
+function arcOpen(taskId, phase){
   const t = taskById(taskId);
   if(!t){ toast("Task not found.", true); return; }
   ARC.task = t; ARC.open = true; ARC.tier = null; ARC.armed = false; ARC.armT0 = 0;
   ARC.nudge = {x:0, y:0}; ARC.capture = null; ARC.busy = false;
   ARC.meas = { distFt:null, yawDeg:null, yawVerified:false, distSrc:"", depthUsed:false, wallSeen:false };
   ARC.mode = "two"; ARC.handles = []; ARC.quad = [];
-  ARC.refPreset = "a4"; ARC.refWmm = 210; ARC.refHmm = 0;
+  ARC.refPhase = (phase === "before") ? "before" : "after";
+  ARC.refPreset = (ARC.refPhase === "before") ? "a4q" : "poster";
+  ARC.refWmm = 210; ARC.refHmm = 297;
+  arcDetRelease();
   ARC.assumeLevel = false; ARC.pendingCalib = false;
   ARC.xr.focalPx = null; ARC.xr.vpW = 0; ARC.xr.vpH = 0;
   ARC.xr.pendingShot = null; ARC.xr.cam = null; ARC.xr.camIntr = null;
@@ -5323,6 +6201,7 @@ function arcClose(){
   if(ARC.raf){ cancelAnimationFrame(ARC.raf); ARC.raf = 0; }
   arcStopSensors();
   arcStopCamera();
+  arcDetRelease();
   if(ARC.xr.session){ try{ ARC.xr.session.end(); }catch(e){} }
   ARC.xr.session = null; ARC.xr.hitSource = null;
   ARC.xr.binding = null; ARC.xr.pendingShot = null; ARC.xr.cam = null; ARC.xr.camIntr = null;
@@ -5374,6 +6253,7 @@ function arcShell(t){
     +   '<div id="arLevel"><div class="cx"></div><div class="cy"></div><div class="ring"></div><div id="arBubble"></div></div>'
     +   '<div class="arbar bottom">'
     +     '<div id="arChips"></div>'
+    +     '<div id="arDetBar"></div>'
     +     '<div class="arstat" id="arDist">Waiting for a reading…</div>'
     +     '<div id="arRuler"><div id="arRulerBand"></div><div id="arRulerTicks"></div><div id="arNeedle" style="left:50%"></div></div>'
     +     '<div class="arrow2">'
@@ -5433,7 +6313,12 @@ function arcTierB(){
   const attempt = function(constraints){
     return navigator.mediaDevices.getUserMedia(constraints);
   };
-  attempt({ video:{ facingMode:{ ideal:"environment" }, width:{ ideal:1280 }, height:{ ideal:720 } }, audio:false })
+  /* Ask for no more pixels than this device can actually process. Every cost in
+     the detection pass is linear in the frame the browser hands back, and a
+     budget Android that is handed 1280×720 will simply drop frames instead. */
+  ARC.det.cls = arcDeviceClass();
+  attempt({ video: arcCameraConstraints(ARC.det.cls), audio:false })
+    .catch(function(){ return attempt({ video:{ facingMode:{ ideal:"environment" } }, audio:false }); })
     .catch(function(){ return attempt({ video:true, audio:false }); })
     .then(function(stream){
       ARC.stream = stream;
@@ -5456,8 +6341,16 @@ function arcTierB(){
     .then(function(){
       ARC.focal = arcResolveFocal();
       arcPanel(null);
-      ARC.mode = "two";
-      arcResetHandles();
+      /* Automatic detection is the DEFAULT path, not an extra mode hidden behind
+         a toggle. The whole point of the feature is that a merchandiser who is
+         already holding the phone up gets a measurement without hunting for a
+         known-width object and dragging handles on every single capture. The
+         manual modes are still one tap away and are what a failed detection
+         falls back to. */
+      ARC.mode = "auto";
+      ARC.handles = [];
+      arcDetInit();
+      arcRenderHandles();
       arcStartSensors().then(function(r){
         if(!r.ok) toast("Tilt/roll unavailable — " + r.why, true);
       });
@@ -5486,10 +6379,35 @@ function arcTierB(){
     });
 }
 
+/* The reference's own dimensional tolerance in mm, for the dimension given.
+   A preset either declares an absolute tolerance (a guillotined A4 sheet is
+   good to half a millimetre whatever its size) or a proportional one (a printed
+   poster is trimmed to roughly 1 % of its nominal size). */
+function arcRefTolMm(def, dimMm){
+  if(!def) return Math.max(0.5, 0.005*(dimMm||0));
+  if(def.tolMm != null) return def.tolMm;
+  return (def.tolPct != null ? def.tolPct : 0.005)*(dimMm||0);
+}
+/* The reference in force. "poster" is resolved from the TASK, not from the
+   preset table: the installed poster is the highest-value reference on an
+   after-shot because it needs no extra kit, it is already centred in frame, and
+   its true size is on the brief. */
 function arcRefDef(){
   const p = REF_PRESETS.filter(x=>x.key===ARC.refPreset)[0] || REF_PRESETS[0];
-  if(p.key === "custom") return { key:"custom", label:"Custom "+ARC.refWmm+" mm", mm:ARC.refWmm, quad:false, hmm:0 };
-  return p;
+  if(p.key === "poster"){
+    const t = ARC.task;
+    if(!t) return REF_PRESETS.filter(x=>x.key==="a4q")[0];
+    const wmm = t.widthFt*304.8, hmm = t.heightFt*304.8;
+    return { key:"poster", quad:true, auto:true,
+             label:"The poster itself ("+t.widthFt+" × "+t.heightFt+" ft)",
+             mm:wmm, hmm:hmm, tolMm: arcRefTolMm(p, Math.min(wmm, hmm)) };
+  }
+  if(p.key === "custom"){
+    return { key:"custom", label:"Custom "+ARC.refWmm+" mm", mm:ARC.refWmm,
+             quad: ARC.refHmm > 0, hmm: ARC.refHmm, auto: ARC.refHmm > 0,
+             tolMm: arcRefTolMm(p, ARC.refWmm) };
+  }
+  return Object.assign({}, p, { tolMm: arcRefTolMm(p, Math.min(p.mm, p.hmm || p.mm)) });
 }
 function arcResetHandles(){
   const st = arcEl("arStage");
@@ -5759,9 +6677,350 @@ function arcLoop(){
   ARC.raf = requestAnimationFrame(arcLoop);
 }
 
+/* ==========================================================
+   Automatic reference detection — the camera-tier plumbing
+   ------------------------------------------------------------
+   DET does the pixels; this does the policy. Three rules shape all of it:
+
+     1. NEVER run on the render loop. Detection is throttled by wall clock to
+        4–10 Hz depending on what the device turns out to be capable of, and it
+        is the only thing in the capture path allowed to cost tens of
+        milliseconds. The overlay keeps drawing at display rate from the last
+        result, so a slow detector makes the outline lag, never the preview.
+
+     2. NEVER accept a detection silently. A confidently-wrong rectangle is
+        worse than no rectangle at all, because it produces a plausible distance
+        that no one questions. The merchandiser confirms the outline once; after
+        that it stays locked only while it keeps agreeing with itself, and any
+        jump big enough to be a different object breaks the lock and asks again.
+
+     3. NEVER trap the user. Manual 4-handle is always one tap away and is
+        seeded with whatever the detector last found, so "the box is nearly
+        right" costs a drag rather than a restart.
+   ========================================================== */
+
+/* What this phone probably is. Neither hint is universal — deviceMemory is
+   Chromium-only and hardwareConcurrency lies on some budget SoCs — so an
+   unknown device is treated as MID, never as fast. The real answer comes from
+   measuring the first few passes and degrading, below. */
+function arcDeviceClass(){
+  const c = (typeof navigator !== "undefined" && navigator.hardwareConcurrency) || 0;
+  const m = (typeof navigator !== "undefined" && navigator.deviceMemory) || 0;
+  if((c && c <= 4) || (m && m <= 2)) return "low";
+  if((c && c <= 6) || (m && m <= 4)) return "mid";
+  if(!c && !m) return "mid";
+  return "high";
+}
+/* Progressive work-resolution / rate ladder. Index 0 is the most expensive.
+   Each device class starts partway down it and can only ever move further down. */
+const DET_LADDER = [
+  { work:800, fps:10 }, { work:640, fps:8 }, { work:640, fps:5 },
+  { work:512, fps:5 },  { work:400, fps:4 }
+];
+const DET_LADDER_START = { high:0, mid:1, low:3 };
+const DET_HOLD_MS = 500;      // how long a locked outline survives a missed pass
+
+function arcDetProfile(cls, step){
+  const i = clamp((DET_LADDER_START[cls] == null ? 1 : DET_LADDER_START[cls]) + (step||0),
+                  0, DET_LADDER.length - 1);
+  return DET_LADDER[i];
+}
+/* getUserMedia constraints. Capping the camera on weak hardware is the single
+   cheapest win available: every downstream cost — the drawImage, the readback,
+   the luma pass — is linear in the frame the browser hands us. */
+function arcCameraConstraints(cls){
+  const big = { width:{ ideal:1280 }, height:{ ideal:720 } };
+  const small = { width:{ ideal:640 }, height:{ ideal:480 }, frameRate:{ max:24 } };
+  return Object.assign({ facingMode:{ ideal:"environment" } }, cls === "low" ? small : big);
+}
+
+function arcDetReset(hard){
+  const d = ARC.det;
+  d.quad = null; d.cand = null; d.conf = 0; d.stable = 0;
+  d.locked = false; d.offered = false; d.err = null; d.seenAt = 0; d.note = "";
+  d.cornerSigmaPx = null; d.support = 0; d.rms = null; d.radial = 0;
+  d.flipped = false; d.wMm = 0; d.hMm = 0;
+  if(hard){
+    d.passes = 0; d.hits = 0; d.lastMs = 0; d.meanMs = 0; d.maxMs = 0;
+    d.overruns = 0; d.degraded = 0; d.degradeNote = ""; d.step = 0; d.nextAt = 0;
+  }
+}
+/* Sizes (or re-sizes) the work canvas and the DET workspace. The canvas is
+   created once per session and every typed array inside the workspace is
+   allocated once per RESOLUTION, so a steady-state pass allocates nothing but
+   the ImageData the 2D context insists on minting (there is no reusable
+   getImageData in the platform — noted, and the reason the work plane is kept
+   as small as the geometry can tolerate). */
+function arcDetFit(){
+  const d = ARC.det, v = ARC.video;
+  if(!v || !v.videoWidth) return false;
+  const prof = arcDetProfile(d.cls, d.step);
+  d.fps = prof.fps;
+  const vw = v.videoWidth, vh = v.videoHeight;
+  const long = Math.max(vw, vh);
+  const k = long > prof.work ? prof.work/long : 1;
+  // even dimensions: DET halves the plane for the detect pass
+  const ww = Math.max(64, (Math.round(vw*k) >> 1) << 1);
+  const wh = Math.max(64, (Math.round(vh*k) >> 1) << 1);
+  if(!d.canvas){
+    d.canvas = document.createElement("canvas");
+    d.ctx = d.canvas.getContext("2d", { willReadFrequently:true, alpha:false });
+  }
+  if(d.workW !== ww || d.workH !== wh){
+    d.canvas.width = ww; d.canvas.height = wh;
+    d.workW = ww; d.workH = wh;
+    if(!d.ws) d.ws = new DET.Workspace();
+    d.ws.fit(ww, wh);
+    arcDetReset(false);
+  }
+  d.scale = vw/ww;                       // work pixels -> video pixels
+  return true;
+}
+function arcDetInit(){
+  const d = ARC.det;
+  d.cls = arcDeviceClass();
+  d.step = 0;
+  arcDetReset(true);
+  d.on = true;
+  arcDetFit();
+}
+function arcDetRelease(){
+  const d = ARC.det;
+  d.on = false; d.ws = null; d.canvas = null; d.ctx = null;
+  d.workW = 0; d.workH = 0;
+  arcDetReset(true);
+}
+/* Mean corner displacement between two quads, in the same coordinate space. */
+function arcQuadDrift(a, b){
+  if(!a || !b) return Infinity;
+  let s = 0;
+  for(let i=0; i<4; i++) s += Math.hypot(a[i*2]-b[i*2], a[i*2+1]-b[i*2+1]);
+  return s/4;
+}
+function arcQuadDiag(q){
+  return (Math.hypot(q[4]-q[0], q[5]-q[1]) + Math.hypot(q[6]-q[2], q[7]-q[3]))/2;
+}
+/* One throttled detection pass. Returns true if it actually ran. */
+function arcDetStep(){
+  const d = ARC.det;
+  if(!d.on || ARC.tier !== "B" || ARC.mode !== "auto" || ARC.panel) return false;
+  const v = ARC.video;
+  if(!v || !v.videoWidth || v.readyState < 2) return false;
+  const now = arcNow();
+  if(now < d.nextAt) return false;
+  if(!arcDetFit()) return false;
+  d.nextAt = now + 1000/d.fps;
+
+  const def = arcRefDef();
+  const wMm = def.mm, hMm = def.hmm || def.mm;
+  if(!(wMm > 0) || !(hMm > 0)) return false;
+
+  const t0 = arcNow();
+  let res = null, rr = null;
+  try{
+    d.ctx.drawImage(v, 0, 0, d.workW, d.workH);
+    const img = d.ctx.getImageData(0, 0, d.workW, d.workH);
+    DET.lumaFromRGBA(img.data, d.ws.luma, d.workW*d.workH);
+    res = DET.detect(d.ws, {
+      aspect: wMm/hMm,
+      focalPx: ARC.focal.f ? ARC.focal.f/d.scale : null,   // intrinsics in WORK pixels
+      cx: d.workW/2, cy: d.workH/2
+    });
+    if(res && res.quad){
+      const out = new Float64Array(8);
+      rr = DET.refine(d.ws.luma, d.workW, d.workH, res.quad, out, d.ws, {});
+      res.refined = out;
+    }
+  }catch(e){
+    d.note = "detector pass failed: " + ((e && e.message) || "unknown");
+    res = null;
+  }
+  const ms = arcNow() - t0;
+
+  /* ---- budget bookkeeping and graceful degradation ---- */
+  d.passes++;
+  d.lastMs = ms;
+  d.meanMs = d.meanMs ? (d.meanMs*0.85 + ms*0.15) : ms;
+  if(ms > d.maxMs) d.maxMs = ms;
+  if(ms > DET_BUDGET_MS){
+    d.overruns++;
+    if(d.overruns >= DET_DEGRADE_RUN && d.step < DET_LADDER.length - 1){
+      d.step++; d.overruns = 0; d.degraded++;
+      const p = arcDetProfile(d.cls, d.step);
+      d.degradeNote = "passes were averaging " + Math.round(d.meanMs) + " ms (budget "
+        + DET_BUDGET_MS + " ms), so detection stepped down to " + p.work + " px at "
+        + p.fps + " fps.";
+      arcDetFit();
+      toast("Detection slowed down to keep the preview smooth — " + p.work + " px / " + p.fps + " fps.");
+    }
+  } else if(d.overruns > 0){
+    d.overruns--;
+  }
+
+  /* ---- what came back ---- */
+  if(!res || !res.quad || !res.refined){
+    d.cand = null;
+    if(d.locked && (now - d.seenAt) > DET_HOLD_MS){
+      d.locked = false; d.quad = null;
+      d.note = "lost the reference — hold the phone steady, or adjust by hand.";
+    }
+    return true;
+  }
+  d.hits++;
+
+  // work pixels -> video pixels, which is the space every measurement uses
+  const q = new Float64Array(8);
+  for(let i=0; i<8; i++) q[i] = res.refined[i]*d.scale;
+
+  /* Score the REFINED quad, not the coarse one: refinement is exactly the step
+     that turns a rough outline into something worth trusting, so the confidence
+     the user is shown must reflect the corners actually being used. */
+  const asp = res.flipped ? hMm/wMm : wMm/hMm;
+  const fit = DET.rectFit(res.refined, asp, ARC.focal.f ? ARC.focal.f/d.scale : GEO.focalFromFov(d.workW, ASSUMED_HFOV_DEG),
+                          d.workW/2, d.workH/2);
+  const areaFrac = DET.quadArea(res.refined)/(d.workW*d.workH);
+  const conf = fit
+    ? DET.confidence({ ortho:fit.ortho, scale:fit.scale, areaFrac:areaFrac,
+                       support:rr.support, rms:rr.rms })
+    : 0;
+
+  d.conf = conf;
+  d.flipped = !!res.flipped;
+  d.wMm = res.flipped ? hMm : wMm;
+  d.hMm = res.flipped ? wMm : hMm;
+  d.support = rr.support;
+  d.rms = rr.rms;
+  d.cornerSigmaPx = (rr.cornerSigma == null) ? null : rr.cornerSigma*d.scale;
+
+  // where in the frame it sits, normalised to the half-diagonal — the barrel term
+  let cxq = 0, cyq = 0;
+  for(let i=0; i<4; i++){ cxq += q[i*2]; cyq += q[i*2+1]; }
+  cxq /= 4; cyq /= 4;
+  const vw = v.videoWidth, vh = v.videoHeight;
+  d.radial = Math.hypot(cxq - vw/2, cyq - vh/2)/(Math.hypot(vw, vh)/2);
+
+  if(d.locked){
+    const drift = arcQuadDrift(q, d.quad);
+    const diag = arcQuadDiag(d.quad) || 1;
+    if(conf < DET_LOCK_CONF || drift > DET_REACQUIRE_FRAC*diag){
+      /* Either it stopped looking like the reference, or it jumped far enough
+         that it is probably a DIFFERENT object. Both mean the confirmation the
+         user gave no longer applies to what is on screen. */
+      d.locked = false; d.quad = null; d.offered = false; d.stable = 0;
+      d.cand = q; d.seenAt = now;
+      d.note = conf < DET_LOCK_CONF
+        ? "the outline stopped matching the reference — confirm it again."
+        : "the outline jumped to a different rectangle — confirm it again.";
+      return true;
+    }
+    d.quad = q; d.seenAt = now; d.note = "";
+    return true;
+  }
+
+  // not locked: build up agreement before offering anything
+  if(conf < DET_ACCEPT_CONF){
+    d.cand = null; d.stable = 0; d.offered = false;
+    return true;
+  }
+  const diag = arcQuadDiag(q) || 1;
+  d.stable = (d.cand && arcQuadDrift(q, d.cand) < DET_REACQUIRE_FRAC*diag) ? (d.stable + 1) : 0;
+  d.cand = q; d.seenAt = now;
+  d.offered = d.stable >= DET_STABLE_PASSES;
+  return true;
+}
+/* The user has looked at the outline and said yes. This is the ONLY way a
+   detection becomes a measurement. */
+function arcDetConfirm(){
+  const d = ARC.det;
+  if(!d.cand){ toast("Nothing detected yet — point the camera at the reference.", true); return; }
+  d.quad = d.cand; d.locked = true; d.note = "";
+  toast("Reference locked — " + Math.round(d.conf*100) + "% confidence.");
+}
+/* …and this is the escape hatch, seeded so no work is thrown away. */
+function arcDetToManual(){
+  const d = ARC.det, m = arcMap();
+  const src = d.quad || d.cand;
+  ARC.mode = "quad";
+  if(src){
+    ARC.handles = [];
+    for(let i=0; i<4; i++) ARC.handles.push(arcToCss(m, [src[i*2], src[i*2+1]]));
+    arcRenderHandles();
+    toast("Detected corners handed to the 4 handles — drag any that are off.");
+  } else {
+    arcResetHandles();
+  }
+}
+/* Corner-position uncertainty in VIDEO pixels for the current mode. Auto gets
+   the detector's own line-fit residual; the manual modes get the plain truth
+   that a fingertip on a phone screen lands within a few CSS pixels of where it
+   was aimed. */
+const ARC_HANDLE_SIGMA_CSS = 3.0;
+function arcCornerSigmaPx(){
+  if(ARC.mode === "auto" && ARC.det.cornerSigmaPx != null) return ARC.det.cornerSigmaPx;
+  const m = arcMap();
+  return ARC_HANDLE_SIGMA_CSS/(m.s || 1);
+}
+/* The error bar the merchandiser actually sees, and the one recorded as
+   evidence. Built from the live measurement, not from a constant. */
+function arcRefError(quadVid, def){
+  const v = ARC.video;
+  const vw = (v && v.videoWidth) || 1280, vh = (v && v.videoHeight) || 720;
+  let cx = 0, cy = 0;
+  for(let i=0; i<4; i++){ cx += quadVid[i*2]; cy += quadVid[i*2+1]; }
+  cx /= 4; cy /= 4;
+  const radial = Math.hypot(cx - vw/2, cy - vh/2)/(Math.hypot(vw, vh)/2);
+  /* The SMALLER dimension carries the larger relative tolerance, so quoting it
+     is the conservative choice. */
+  const wMm = (ARC.mode === "auto" && ARC.det.wMm) ? ARC.det.wMm : def.mm;
+  const hMm = (ARC.mode === "auto" && ARC.det.hMm) ? ARC.det.hMm : (def.hmm || def.mm);
+  const small = Math.min(wMm, hMm);
+  const e = DET.errorEstimate({
+    focalRelSigma: ARC.focal.relSigma,
+    refMm: small, refTolMm: arcRefTolMm(def, small),
+    cornerSigmaPx: arcCornerSigmaPx(),
+    meanSidePx: DET.meanSide(quadVid),
+    radialNorm: radial, barrelK: BARREL_K
+  });
+  e.radial = radial;
+  return e;
+}
+
 function arcMeasureTierB(){
   const m = arcMap(), f = ARC.focal.f, def = arcRefDef();
   const realWft = GEO.mToFt(def.mm/1000);
+  /* ---- automatic: the detected, confirmed, still-agreeing rectangle ---- */
+  if(ARC.mode === "auto"){
+    const d = ARC.det;
+    ARC.meas.refError = null;
+    if(!d.locked || !d.quad){
+      ARC.meas.distFt = null; ARC.meas.yawVerified = false; ARC.meas.wallSeen = false;
+      ARC.meas.distSrc = d.cand
+        ? "rectangle found — confirm the outline before it counts"
+        : (d.on ? "looking for the reference rectangle…" : "detector off");
+      return;
+    }
+    const dst = [[d.quad[0],d.quad[1]],[d.quad[2],d.quad[3]],[d.quad[4],d.quad[5]],[d.quad[6],d.quad[7]]];
+    const wFt = GEO.mToFt(d.wMm/1000), hFt = GEO.mToFt(d.hMm/1000);
+    const src = [[-wFt/2,-hFt/2],[wFt/2,-hFt/2],[wFt/2,hFt/2],[-wFt/2,hFt/2]];
+    const H = GEO.homography(src, dst);
+    const pose = H ? GEO.poseFromHomography(H, f, m.vw/2, m.vh/2) : null;
+    if(pose && isFinite(pose.distance) && pose.distance > 0.3 && pose.distance < 200){
+      ARC.meas.distFt = pose.distance;
+      ARC.meas.yawDeg = pose.yawDeg;
+      ARC.meas.yawVerified = true;
+      ARC.meas.homPitchDeg = pose.pitchDeg;
+      ARC.meas.wallSeen = true;
+      ARC.meas.refError = arcRefError(d.quad, def);
+      ARC.meas.distSrc = "reference-scaled — auto-detected rectangle ("
+        + def.label + (d.flipped ? ", landscape" : "") + ", "
+        + Math.round(d.conf*100) + "% confidence)";
+      return;
+    }
+    ARC.meas.distFt = null; ARC.meas.yawVerified = false; ARC.meas.wallSeen = false;
+    ARC.meas.distSrc = "the detected outline does not solve to a pose — adjust it by hand";
+    return;
+  }
+  ARC.meas.refError = null;
   if(ARC.mode === "quad" && ARC.handles.length === 4){
     const realHft = GEO.mToFt((def.hmm || def.mm)/1000);
     const dst = ARC.handles.map(function(p){ return arcToVid(m, p[0], p[1]); });
@@ -5774,6 +7033,9 @@ function arcMeasureTierB(){
       ARC.meas.yawVerified = true;
       ARC.meas.homPitchDeg = pose.pitchDeg;
       ARC.meas.wallSeen = true;
+      ARC.meas.refError = arcRefError(
+        new Float64Array([dst[0][0],dst[0][1],dst[1][0],dst[1][1],dst[2][0],dst[2][1],dst[3][0],dst[3][1]]),
+        def);
       ARC.meas.distSrc = "reference-scaled — 4-handle quad (" + def.label + ")";
       return;
     }
@@ -5844,7 +7106,7 @@ function arcNudgeNorm(){
 function arcTick(){
   if(!ARC.open) return;
   if(ARC.panel) { arcDrawOverlay(null); return; }
-  if(ARC.tier === "B") arcMeasureTierB();
+  if(ARC.tier === "B"){ arcDetStep(); arcMeasureTierB(); }
   const g = arcGates();
   ARC.lastGates = g;
 
@@ -5866,15 +7128,20 @@ function arcTick(){
 function arcRenderHud(g, prog){
   const t = ARC.task;
   const n1 = v => (v==null||!isFinite(v)) ? "—" : Number(v).toFixed(1);
-  const tierKey = ARC.tier === "A" ? (ARC.meas.depthUsed ? "Ad" : "A")
-                : ARC.tier === "B" ? (ARC.focal.estimated ? "Be" : (ARC.mode==="quad" ? "Bq" : "B"))
-                : "C";
+  const tierKey = arcTierKey();
   const tm = tierMeta(tierKey);
   const badge = arcEl("arTier");
   if(badge){ badge.className = "tierbadge " + tm.cls; badge.textContent = tm.label; }
 
   // distance
   const dEl = arcEl("arDist");
+  /* The error bar is derived per reading (focal uncertainty + the reference's
+     own dimensional tolerance + measured corner scatter + how far off-axis the
+     reference sits), so it moves as the merchandiser moves. It is shown next to
+     the number rather than buried, because a ±1 % reading and a ±9 % reading
+     look identical otherwise. */
+  const err = ARC.meas.refError;
+  const eTxt = err ? ('  ·  ± ' + err.pct.toFixed(1) + '%') : '';
   if(dEl){
     if(g.distance == null){
       dEl.className = "arstat";
@@ -5883,15 +7150,15 @@ function arcRenderHud(g, prog){
     } else if(Math.abs(g.delta) <= t.standoffTolFt){
       dEl.className = "arstat ok";
       dEl.innerHTML = "DISTANCE OK — " + g.distance.toFixed(1) + " ft"
-        + '<span class="sub">target ' + Number(t.standoffFt).toFixed(1) + ' ± ' + t.standoffTolFt + ' ft</span>';
+        + '<span class="sub">target ' + Number(t.standoffFt).toFixed(1) + ' ± ' + t.standoffTolFt + ' ft' + eTxt + '</span>';
     } else if(g.delta < 0){
       dEl.className = "arstat no";
       dEl.innerHTML = "TOO CLOSE — move back " + Math.abs(g.delta).toFixed(1) + " ft"
-        + '<span class="sub">' + g.distance.toFixed(1) + ' ft of ' + Number(t.standoffFt).toFixed(1) + ' ft</span>';
+        + '<span class="sub">' + g.distance.toFixed(1) + ' ft of ' + Number(t.standoffFt).toFixed(1) + ' ft' + eTxt + '</span>';
     } else {
       dEl.className = "arstat no";
       dEl.innerHTML = "TOO FAR — move in " + g.delta.toFixed(1) + " ft"
-        + '<span class="sub">' + g.distance.toFixed(1) + ' ft of ' + Number(t.standoffFt).toFixed(1) + ' ft</span>';
+        + '<span class="sub">' + g.distance.toFixed(1) + ' ft of ' + Number(t.standoffFt).toFixed(1) + ' ft' + eTxt + '</span>';
     }
   }
   // ruler
@@ -5965,10 +7232,16 @@ function arcRenderHud(g, prog){
       if(ARC.xr.anchors) bits.push('<span class="archip">anchors</span>');
     }
     if(ARC.tier === "B") bits.push('<span class="archip">' + esc(arcRefDef().label) + '</span>');
+    if(ARC.tier === "B" && ARC.mode === "auto" && ARC.det.passes){
+      bits.push('<span class="archip">detect ' + Math.round(ARC.det.meanMs) + ' ms · '
+        + ARC.det.workW + '×' + ARC.det.workH + ' · ' + ARC.det.fps + ' fps'
+        + (ARC.det.degraded ? ' ↓' : '') + '</span>');
+    }
     if(ARC.sensors.on) bits.push('<span class="archip">' + esc(ARC.sensors.src) + '</span>');
     bits.push('<span class="archip">screen ' + arcScreenAngle() + '°</span>');
     chips.innerHTML = bits.join("");
   }
+  arcRenderDetBar();
   const tools = arcEl("arTools");
   const attitudeLive = (g.pitch != null && g.roll != null && !g.attitudeAssumed);
   const key = [ARC.tier, ARC.mode, ARC.sensors.on?1:0, ARC.assumeLevel?1:0,
@@ -5979,6 +7252,7 @@ function arcRenderHud(g, prog){
     if(!ARC.sensors.on && ARC.tier !== "A") h += '<button class="arbtn pe" data-arc="sensors">Enable motion sensors</button>';
     if(!attitudeLive) h += '<button class="arbtn pe'+(ARC.assumeLevel?" on":"")+'" data-arc="assume">Assume level (not verified)</button>';
     if(ARC.tier === "B"){
+      h += '<button class="arbtn pe'+(ARC.mode==="auto"?" on":"")+'" data-arc="modeauto">Auto-detect</button>';
       h += '<button class="arbtn pe'+(ARC.mode==="two"?" on":"")+'" data-arc="mode2">2-handle</button>';
       h += '<button class="arbtn pe'+(ARC.mode==="quad"?" on":"")+'" data-arc="mode4">4-handle quad</button>';
       h += '<button class="arbtn pe" data-arc="refpick">Reference…</button>';
@@ -5988,6 +7262,179 @@ function arcRenderHud(g, prog){
     h += '<button class="arbtn pe" data-arc="recentre">Re-centre poster</button>';
     tools.innerHTML = h;
   }
+}
+
+/* ---------- a synthetic frame with a rectangle at a KNOWN pose ----------
+   Used by the geometry self-test (which asserts that the recovered distance and
+   yaw match the ones it rendered) and by the on-device benchmark (which needs a
+   realistic edge structure to time, and cannot assume a camera is present).
+   Corners are rendered with 3×3 supersampling, because the sub-pixel edge
+   refinement is exactly the thing being measured and a hard-aliased edge would
+   flatter it. Returns the ground-truth quad. */
+function arcDetSynth(ws, o){
+  const W = ws.w, H = ws.h;
+  const q = GEO.posterQuad({
+    focalPx: o.focalPx, cx: W/2, cy: H/2,
+    u0: W/2 + (o.uOff||0), v0: H/2 + (o.vOff||0),
+    distance: o.distFt, widthFt: o.wFt, heightFt: o.hFt,
+    yawDeg: o.yawDeg||0, pitchDeg: o.pitchDeg||0, rollDeg: o.rollDeg||0
+  });
+  const fg = o.fg == null ? 225 : o.fg, bg = o.bg == null ? 70 : o.bg;
+  const rnd = mulberry(o.seed || 7);
+  const L = ws.luma;
+  for(let i=0; i<W*H; i++){
+    const v = bg + (o.noise ? (rnd()*2-1)*o.noise : 0);
+    L[i] = v;
+  }
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for(let i=0; i<4; i++){
+    x0 = Math.min(x0, q[i][0]); x1 = Math.max(x1, q[i][0]);
+    y0 = Math.min(y0, q[i][1]); y1 = Math.max(y1, q[i][1]);
+  }
+  x0 = clamp(Math.floor(x0)-2, 0, W-1); x1 = clamp(Math.ceil(x1)+2, 0, W-1);
+  y0 = clamp(Math.floor(y0)-2, 0, H-1); y1 = clamp(Math.ceil(y1)+2, 0, H-1);
+  const inside = function(x, y){
+    let sign = 0;
+    for(let i=0; i<4; i++){
+      const a = q[i], b = q[(i+1)&3];
+      const cr = (b[0]-a[0])*(y-a[1]) - (b[1]-a[1])*(x-a[0]);
+      if(cr === 0) continue;
+      const sg = cr > 0 ? 1 : -1;
+      if(sign === 0) sign = sg; else if(sg !== sign) return false;
+    }
+    return true;
+  };
+  for(let y=y0; y<=y1; y++){
+    for(let x=x0; x<=x1; x++){
+      let acc = 0;
+      for(let sy=0; sy<3; sy++) for(let sx=0; sx<3; sx++){
+        if(inside(x + (sx+0.5)/3, y + (sy+0.5)/3)) acc++;
+      }
+      if(!acc) continue;
+      const a = acc/9;
+      L[y*W+x] = bg + (fg-bg)*a + (o.noise ? (rnd()*2-1)*o.noise : 0);
+    }
+  }
+  // clutter the detector must not prefer
+  if(o.clutter){
+    for(let k=0; k<o.clutter; k++){
+      const cx0 = Math.floor(rnd()*W*0.9), cy0 = Math.floor(rnd()*H*0.9);
+      const cw = 8 + Math.floor(rnd()*60), ch = 4 + Math.floor(rnd()*40);
+      const v = Math.floor(rnd()*90);
+      for(let y=cy0; y<Math.min(H, cy0+ch); y++)
+        for(let x=cx0; x<Math.min(W, cx0+cw); x++) L[y*W+x] = v;
+    }
+  }
+  return q;
+}
+
+/* Times the real detector on THIS device, on a frame we control, so the
+   ms-per-pass number in the diagnostics panel is a measurement rather than a
+   claim — and so it can be read on a phone that has no camera permission yet. */
+function arcDetBenchmark(){
+  const cls = arcDeviceClass();
+  const prof = arcDetProfile(cls, 0);
+  const W = (prof.work >> 1) << 1, H = ((Math.round(prof.work*9/16)) >> 1) << 1;
+  const ws = new DET.Workspace();
+  ws.fit(W, H);
+  const f = GEO.focalFromFov(W, ASSUMED_HFOV_DEG);
+  arcDetSynth(ws, { focalPx:f, distFt:6, wFt:4, hFt:3, yawDeg:12, noise:4, clutter:4, seed:23 });
+
+  /* A pass is not just the maths. Every real pass also pays a drawImage from
+     the video plus a getImageData off the 2D context, and on weak hardware that
+     readback is frequently the LARGER half. Benchmarking only DET would produce
+     a comfortable number that the live loop then fails to reproduce, so the
+     synthetic frame is pushed through a real canvas round-trip here — exactly
+     what arcDetStep() times — and both halves are reported separately so a slow
+     phone's actual bottleneck is identifiable. */
+  const src = document.createElement("canvas");
+  src.width = W; src.height = H;
+  const sctx = src.getContext("2d");
+  const id = sctx.createImageData(W, H);
+  for(let i=0, j=0; i<W*H; i++, j+=4){
+    const v = ws.luma[i];
+    id.data[j] = v; id.data[j+1] = v; id.data[j+2] = v; id.data[j+3] = 255;
+  }
+  sctx.putImageData(id, 0, 0);
+
+  const work = document.createElement("canvas");
+  work.width = W; work.height = H;
+  const wctx = work.getContext("2d", { willReadFrequently:true, alpha:false });
+  const out = new Float64Array(8);
+  const one = function(){
+    const t0 = arcNow();
+    wctx.drawImage(src, 0, 0, W, H);
+    const img = wctx.getImageData(0, 0, W, H);
+    DET.lumaFromRGBA(img.data, ws.luma, W*H);
+    const t1 = arcNow();
+    const r = DET.detect(ws, { aspect:4/3, focalPx:f, cx:W/2, cy:H/2 });
+    if(r && r.quad) DET.refine(ws.luma, W, H, r.quad, out, ws, {});
+    const t2 = arcNow();
+    return { ms: t2 - t0, read: t1 - t0, comp: t2 - t1, hit: !!(r && r.quad) };
+  };
+  for(let i=0; i<4; i++) one();                   // let the JIT settle
+  const times = [], reads = [], comps = [];
+  let hits = 0;
+  for(let i=0; i<24; i++){
+    const r = one();
+    times.push(r.ms); reads.push(r.read); comps.push(r.comp);
+    if(r.hit) hits++;
+  }
+  const med = a => { const b = a.slice().sort(function(x,y){ return x-y; }); return b[Math.floor(b.length/2)]; };
+  const sorted = times.slice().sort(function(a,b){ return a-b; });
+  const m = med(times);
+  ARC.det.bench = {
+    cls: cls, w: W, h: H, detectW: W>>1, detectH: H>>1, runs: times.length, hits: hits,
+    median: +m.toFixed(2), p90: +sorted[Math.floor(sorted.length*0.9)].toFixed(2),
+    min: +sorted[0].toFixed(2), max: +sorted[sorted.length-1].toFixed(2),
+    readbackMs: +med(reads).toFixed(2), computeMs: +med(comps).toFixed(2),
+    fps: prof.fps, budget: DET_BUDGET_MS,
+    headroom: +(DET_BUDGET_MS/Math.max(m, 0.01)).toFixed(2), ts: new Date().toISOString()
+  };
+  if(ARC.panel === "diag") arcDiagRender(null);
+  toast("Detector benchmark: " + m.toFixed(1) + " ms median at " + W + "×" + H
+    + " (budget " + DET_BUDGET_MS + " ms).", m > DET_BUDGET_MS);
+  return ARC.det.bench;
+}
+
+/* The confirm / correct affordance. Rendered every tick but only written when
+   the text actually changes — innerHTML on every frame would fight the
+   compositor on exactly the phones this feature exists for. */
+function arcRenderDetBar(){
+  const box = arcEl("arDetBar");
+  if(!box) return;
+  const d = ARC.det;
+  let html = "";
+  if(ARC.tier === "B" && ARC.mode === "auto"){
+    const pct = Math.round(d.conf*100);
+    const meter = '<span class="conf'+(d.conf >= DET_LOCK_CONF ? ' hi' : '')+'">'
+      + '<i style="width:'+clamp(pct,0,100)+'%"></i></span>';
+    const barrel = (d.radial > BARREL_WARN_R);
+    if(d.locked){
+      html = '<div class="detrow">'+meter
+        + '<span class="detmsg"><b>Reference locked</b> · '+pct+'% · corners ± '
+        + (d.cornerSigmaPx == null ? '—' : d.cornerSigmaPx.toFixed(2)+' px')+'</span>'
+        + '<button class="arbtn pe" data-arc="detmanual">Adjust by hand</button>'
+        + '<button class="arbtn pe" data-arc="detdrop">Re-detect</button></div>';
+      if(barrel) html += '<div class="detrow"><span class="detmsg warn">'
+        + '<b>Off-centre</b> — the reference is '+Math.round(d.radial*100)
+        + '% of the way to the frame corner, where lens distortion adds error. '
+        + 'Turn to put it nearer the middle.</span></div>';
+    } else if(d.offered && d.cand){
+      html = '<div class="detrow">'+meter
+        + '<span class="detmsg"><b>Rectangle found</b> · '+pct+'% — is the outline on the '
+        + esc(arcRefDef().label).toLowerCase()+'?</span>'
+        + '<button class="arbtn pe on" data-arc="detconfirm">Use this</button>'
+        + '<button class="arbtn pe" data-arc="detmanual">Adjust by hand</button>'
+        + '<button class="arbtn pe" data-arc="detreject">No</button></div>';
+    } else {
+      html = '<div class="detrow"><span class="detmsg">'
+        + esc(d.note || "Point the camera so the whole " + arcRefDef().label.toLowerCase()
+              + " is in frame and well lit.")
+        + '</span><button class="arbtn pe" data-arc="detmanual">Outline by hand</button></div>';
+    }
+  }
+  if(box.dataset.h !== html){ box.dataset.h = html; box.innerHTML = html; }
 }
 
 /* ---------- overlay drawing ---------- */
@@ -6023,6 +7470,34 @@ function arcDrawOverlay(g){
   ctx.moveTo(ccx, ccy-14); ctx.lineTo(ccx, ccy+14); ctx.stroke();
   ctx.restore();
 
+  if(ARC.mode === "auto" && ARC.tier === "B"){
+    const d = ARC.det, q = d.locked ? d.quad : d.cand;
+    if(q){
+      const m = arcMap();
+      const pts = [];
+      for(let i=0; i<4; i++) pts.push(arcToCss(m, [q[i*2], q[i*2+1]]));
+      ctx.save();
+      ctx.lineWidth = d.locked ? 2.5 : 2;
+      ctx.strokeStyle = d.locked ? "rgba(45,212,191,.95)" : "rgba(251,191,36,.9)";
+      if(!d.locked) ctx.setLineDash([7,5]);
+      ctx.beginPath();
+      ctx.moveTo(pts[0][0], pts[0][1]);
+      for(let i=1; i<4; i++) ctx.lineTo(pts[i][0], pts[i][1]);
+      ctx.closePath(); ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = d.locked ? "rgba(45,212,191,.95)" : "rgba(251,191,36,.9)";
+      for(let i=0; i<4; i++){
+        ctx.beginPath(); ctx.arc(pts[i][0], pts[i][1], d.locked ? 4 : 3.2, 0, 2*Math.PI); ctx.fill();
+      }
+      let lx = 0, ly = 0;
+      for(let i=0; i<4; i++){ lx += pts[i][0]; ly += pts[i][1]; }
+      ctx.font = "800 11px ui-monospace, Menlo, monospace";
+      ctx.textAlign = "center";
+      ctx.fillText((d.locked ? "REFERENCE " : "CANDIDATE ") + Math.round(d.conf*100) + "%",
+                   lx/4, ly/4 - 6);
+      ctx.restore();
+    }
+  }
   if(ARC.mode === "quad" && ARC.tier === "B" && ARC.handles.length === 4){
     ctx.save(); ctx.strokeStyle = "rgba(45,212,191,.8)"; ctx.lineWidth = 2; ctx.setLineDash([6,5]);
     ctx.beginPath(); ctx.moveTo(ARC.handles[0][0], ARC.handles[0][1]);
@@ -6148,22 +7623,37 @@ function arcCalibSave(){
     toast("That solves to an implausible "+hfov.toFixed(0)+"° field of view — re-check the distance and handles.", true);
     return;
   }
+  /* f = px·d/W, so σf/f is the quadrature sum of the relative errors of the two
+     things the user supplied: the tape reading, and the pixel width they got by
+     dragging two handles (two independent handles ⇒ √2 · per-handle σ). Storing
+     it means every later reading can quote a real error bar instead of a guess. */
+  const relSigma = arcQuad(CALIB_DIST_SIGMA_FT/dFt,
+                           Math.SQRT2*CALIB_EDGE_SIGMA_PX/px,
+                           (arcRefTolMm(REF_PRESETS.filter(p=>p.key===(sel?sel.value:"a4"))[0], mm))/mm);
   arcCalibSet({ f:f, vw:m.vw, vh:m.vh, refLabel: sel ? (sel.options[sel.selectedIndex].text) : (mm+" mm"),
-                mm:mm, distFt:dFt, pixelWidth:px, ts:new Date().toISOString(), device:deviceString() });
+                mm:mm, distFt:dFt, pixelWidth:px, relSigma:relSigma,
+                ts:new Date().toISOString(), device:deviceString() });
   ARC.focal = arcResolveFocal();
-  toast("Calibrated: f = "+Math.round(f)+" px (HFOV "+hfov.toFixed(1)+"°).");
+  toast("Calibrated: f = "+Math.round(f)+" px (HFOV "+hfov.toFixed(1)+"°), ± "
+    + (ARC.focal.relSigma*100).toFixed(1) + "%.");
   arcPanel(null);
   if(ARC.tier !== "B"){ arcTierB(); } else { arcLoop(); }
 }
 
 /* ---------- reference picker ---------- */
 function arcRefPanel(){
-  arcPanel('<h2>Known-width reference</h2>'
-    + '<p>Pick something on the wall whose real size you know. 4-handle presets outline a rectangle, '
-    + 'which also recovers yaw obliqueness from the keystone.</p>'
+  const t = ARC.task;
+  arcPanel('<h2>Scale reference</h2>'
+    + '<p>Pick something on the wall whose real size you know. Rectangular references are found '
+    + '<b>automatically</b> and also recover yaw obliqueness from the keystone; width-only ones '
+    + 'need two handles and cannot see yaw.</p>'
+    + (t ? '<div class="hint" style="margin:0 0 10px">For an <b>after</b> shot the poster itself is the '
+        + 'best reference — it is already on the wall at a known <b class="num">'+t.widthFt+' × '+t.heightFt
+        + ' ft</b> and needs nothing carried to site. Before the poster is up, tape a plain <b>A4 sheet</b> '
+        + '(210 × 297 mm) flat to the wall.</div>' : '')
     + '<div class="field"><label class="fl" for="ref_sel">Reference</label><select id="ref_sel">'
     + REF_PRESETS.map(p=>'<option value="'+p.key+'"'+(p.key===ARC.refPreset?" selected":"")+'>'+esc(p.label)
-        + (p.quad?" · 4-handle":"") + '</option>').join("")
+        + (p.auto ? " · auto" : p.quad ? " · 4-handle" : " · 2-handle") + '</option>').join("")
     + '</select></div>'
     + '<div class="grid2">'
     + '<div class="field"><label class="fl" for="ref_w">Width (mm)</label><input id="ref_w" type="number" step="1" min="5" value="'+ARC.refWmm+'"></div>'
@@ -6176,7 +7666,14 @@ function arcRefPanel(){
   const sel = arcEl("ref_sel");
   if(sel) sel.addEventListener("change", function(){
     const p = REF_PRESETS.filter(x=>x.key===sel.value)[0];
-    if(p){ if(p.mm) arcEl("ref_w").value = p.mm; arcEl("ref_h").value = p.hmm || 0; }
+    if(!p) return;
+    if(p.key === "poster" && ARC.task){
+      arcEl("ref_w").value = (ARC.task.widthFt*304.8).toFixed(0);
+      arcEl("ref_h").value = (ARC.task.heightFt*304.8).toFixed(0);
+      return;
+    }
+    if(p.mm) arcEl("ref_w").value = p.mm;
+    arcEl("ref_h").value = p.hmm || 0;
   });
 }
 
@@ -6281,7 +7778,8 @@ function arcGeoFix(t){
 }
 function arcTierKey(){
   return ARC.tier === "A" ? (ARC.meas.depthUsed ? "Ad" : "A")
-       : ARC.tier === "B" ? (ARC.focal.estimated ? "Be" : (ARC.mode === "quad" ? "Bq" : "B"))
+       : ARC.tier === "B" ? (ARC.focal.estimated ? "Be"
+           : ((ARC.mode === "quad" || ARC.mode === "auto") ? "Bq" : "B"))
        : "C";
 }
 function arcBuildRecord(g, tierKey, focalPx, captureMode, camInfo){
@@ -6304,6 +7802,34 @@ function arcBuildRecord(g, tierKey, focalPx, captureMode, camInfo){
         : "XR view projection matrix")
     : ARC.focal.src;
   p.posterWFt = t.widthFt; p.posterHFt = t.heightFt;
+  /* ---- reference-scale provenance ----
+     Recorded on the placement so an approver can see WHAT the distance was
+     scaled from and how good that scaling was, not merely that it was "Tier B".
+     The database has no dedicated columns for these yet (see
+     supabase/migrations/0005_*.sql, part 2), so the same facts are also folded
+     into `note`, which is persisted, in a form a human can read. */
+  if(ARC.tier === "B"){
+    const rdef = arcRefDef();
+    const e = ARC.meas.refError;
+    p.refSource = rdef.key; p.refLabel = rdef.label;
+    p.refWmm = +( (ARC.mode === "auto" && ARC.det.wMm) ? ARC.det.wMm : rdef.mm ).toFixed(1);
+    p.refHmm = +( (ARC.mode === "auto" && ARC.det.hMm) ? ARC.det.hMm : (rdef.hmm || 0) ).toFixed(1);
+    p.refAuto = ARC.mode === "auto";
+    if(ARC.mode === "auto"){
+      p.refConfidence = +ARC.det.conf.toFixed(3);
+      p.refCornerRmsPx = ARC.det.rms == null ? null : +ARC.det.rms.toFixed(3);
+      p.refEdgeSupport = +ARC.det.support.toFixed(3);
+      p.detectMs = Math.round(ARC.det.meanMs);
+      p.detectWork = ARC.det.workW + "×" + ARC.det.workH + " @ " + ARC.det.fps + " fps";
+      p.detectDegraded = ARC.det.degraded > 0;
+    }
+    if(e){
+      p.errorPct = +e.pct.toFixed(2);
+      p.radialOffset = +e.radial.toFixed(3);
+      p.errorTerms = { focal:+(e.terms.focal*100).toFixed(2), refDim:+(e.terms.refDim*100).toFixed(2),
+                       corner:+(e.terms.corner*100).toFixed(2), barrel:+(e.terms.barrel*100).toFixed(2) };
+    }
+  }
   p.pass = !!(g.all && tierKey !== "C" && !g.attitudeAssumed);
   p.attitudeAssumed = !!g.attitudeAssumed;
   p.ts = new Date().toISOString();
@@ -6319,6 +7845,21 @@ function arcBuildRecord(g, tierKey, focalPx, captureMode, camInfo){
     notes.push("Photographed after the AR session handed the camera back, so the frame is a fraction of a second later than the measurement.");
   if(camInfo && camInfo.aspectAgrees === false)
     notes.push("The raw camera image aspect differed from the view frustum; the poster was projected with separate fx/fy to compensate.");
+  if(p.errorPct != null){
+    notes.push("[ref " + p.refSource + " " + p.refWmm + "x" + p.refHmm + "mm"
+      + (p.refAuto ? " auto conf=" + p.refConfidence : " manual")
+      + " err=" + p.errorPct + "% (focal " + p.errorTerms.focal + " / dim " + p.errorTerms.refDim
+      + " / corner " + p.errorTerms.corner + " / barrel " + p.errorTerms.barrel + ")"
+      + " r=" + p.radialOffset + "]");
+  }
+  if(p.refSource === "poster")
+    notes.push("Distance was scaled from the INSTALLED POSTER's briefed size — a poster printed to the wrong size would bias this reading by the same proportion.");
+  if(p.radialOffset != null && p.radialOffset > BARREL_WARN_R)
+    notes.push("The reference sat " + Math.round(p.radialOffset*100) + "% of the way to the frame corner, "
+      + "where uncorrected lens distortion is largest; its contribution is included in the ± "
+      + p.errorPct + "% above.");
+  if(p.detectDegraded)
+    notes.push("Detection ran at reduced resolution/rate on this device to stay inside the frame budget; that affects how quickly the outline updated, not the geometry of the corners it was measured from.");
   p.note = notes.join(" ");
   return p;
 }
@@ -6698,6 +8239,54 @@ function arcDiagRender(busyMsg){
   h += arcDiagRow("All zero", yn(d.allZero), d.allZero == null ? null : (d.allZero ? "bad" : "ok"));
   h += arcDiagRow("All black", yn(d.allBlack), d.allBlack == null ? null : (d.allBlack ? "bad" : "ok"));
 
+  h += arcDiagSection("Reference detector");
+  {
+    const dd = ARC.det, b = dd.bench;
+    h += arcDiagRow("Device class (from hints)", dd.cls, null,
+                    "hardwareConcurrency / deviceMemory; unknown ⇒ treated as mid, never high");
+    h += arcDiagRow("Logical cores / memory hint",
+      ((navigator.hardwareConcurrency || "—") + " / "
+       + (navigator.deviceMemory ? navigator.deviceMemory + " GB" : "not reported")));
+    const prof = arcDetProfile(dd.cls, dd.step);
+    h += arcDiagRow("Work / detect plane",
+      (dd.workW ? (dd.workW + " × " + dd.workH) : (prof.work + " px long side"))
+      + (dd.workW ? "  ⇒  " + (dd.workW>>1) + " × " + (dd.workH>>1) : ""),
+      null, "detection runs on the halved plane; corners are refined on the work plane");
+    h += arcDiagRow("Target rate", prof.fps + " fps", null,
+                    "throttled by wall clock, never tied to the render loop");
+    h += arcDiagRow("Passes / detections", dd.passes + " / " + dd.hits,
+                    dd.passes ? "ok" : null,
+                    dd.passes ? Math.round(100*dd.hits/dd.passes) + "% of passes found a rectangle" : "");
+    h += arcDiagRow("Last pass", dd.lastMs ? dd.lastMs.toFixed(1) + " ms" : "—",
+                    !dd.lastMs ? null : (dd.lastMs <= DET_BUDGET_MS ? "ok" : "warn"),
+                    "budget is " + DET_BUDGET_MS + " ms");
+    h += arcDiagRow("Mean / worst pass",
+      dd.meanMs ? (dd.meanMs.toFixed(1) + " / " + dd.maxMs.toFixed(1) + " ms") : "—",
+      !dd.meanMs ? null : (dd.meanMs <= DET_BUDGET_MS ? "ok" : "bad"));
+    h += arcDiagRow("Degraded", dd.degraded ? ("yes, " + dd.degraded + " step(s)") : "no",
+                    dd.degraded ? "warn" : (dd.passes ? "ok" : null), dd.degradeNote || "");
+    h += arcDiagRow("Confidence / lock",
+      (dd.passes ? Math.round(dd.conf*100) + "%" : "—") + " · " + (dd.locked ? "locked" : "not locked"));
+    h += arcDiagRow("Edge support / residual",
+      dd.rms == null ? "—" : (Math.round(dd.support*100) + "% · " + dd.rms.toFixed(2) + " px"),
+      null, "share of perpendicular scans that found an edge, and the line-fit RMS");
+    h += arcDiagRow("Corner σ (video px)", dd.cornerSigmaPx == null ? "—" : dd.cornerSigmaPx.toFixed(3),
+                    null, "feeds the corner term of the distance error budget");
+    h += arcDiagRow("Reference off-centre", dd.passes ? Math.round(dd.radial*100) + "%" : "—",
+                    !dd.passes ? null : (dd.radial <= BARREL_WARN_R ? "ok" : "warn"),
+                    "fraction of the way to the frame corner; distortion grows as r²");
+    h += arcDiagRow("Focal uncertainty",
+      ARC.focal && ARC.focal.relSigma != null ? (ARC.focal.relSigma*100).toFixed(1) + "%" : "—",
+      null, esc(ARC.focal ? ARC.focal.src : ""));
+    h += arcDiagRow("Benchmark (synthetic frame)",
+      b ? (b.median.toFixed(1) + " ms median · p90 " + b.p90.toFixed(1)
+           + " ms · " + b.w + "×" + b.h + " · " + b.hits + "/" + b.runs + " detected") : "— not run —",
+      !b ? null : (b.median <= DET_BUDGET_MS ? "ok" : "bad"),
+      b ? ("×" + b.headroom + " headroom against the " + b.budget + " ms budget · "
+           + b.readbackMs + " ms canvas readback + " + b.computeMs + " ms detect/refine")
+        : "tap Benchmark detector — runs the real detector on a synthetic frame, no camera needed");
+  }
+
   h += arcDiagSection("Tracking");
   h += arcDiagRow("Hit-test results", d.hitResults, d.hitResults ? "ok" : null,
                   "0 ⇒ move the phone slowly so the wall is found");
@@ -6729,6 +8318,7 @@ function arcDiagRender(busyMsg){
     + '<button class="btn primary" data-arc="diagprobe"'+(ARC.diagProbeRunning?' disabled':'')+'>'
     +   (ARC.diagProbeRunning ? "Probing…" : "Run live XR probe") + '</button>'
     + (ARC.diagProbeRunning ? '<button class="btn" data-arc="diagstop">Stop</button>' : '')
+    + '<button class="btn" data-arc="detbench">Benchmark detector</button>'
     + '<button class="btn" data-arc="diagcopy">Copy report</button>'
     + '<button class="btn" data-arc="diagselftest">Run geometry self-test</button>'
     + '<button class="btn ghost" data-arc="close">Close</button>'
@@ -6771,6 +8361,31 @@ function arcDiagText(){
   p("aspect skew", d.aspectSkew);
   p("camera fx/fy", d.camFocalX + "/" + d.camFocalY);
   p("camera cx/cy", d.camCx + "/" + d.camCy);
+  {
+    const dd = ARC.det, b = dd.bench, prof = arcDetProfile(dd.cls, dd.step);
+    p("detector device class", dd.cls);
+    p("detector cores/memory", (navigator.hardwareConcurrency || "?") + "/"
+      + (navigator.deviceMemory ? navigator.deviceMemory + "GB" : "?"));
+    p("detector work plane", dd.workW ? (dd.workW + "x" + dd.workH) : (prof.work + " long side"));
+    p("detector target fps", prof.fps);
+    p("detector passes/hits", dd.passes + "/" + dd.hits);
+    p("detector last ms", dd.lastMs ? dd.lastMs.toFixed(1) : null);
+    p("detector mean/max ms", dd.meanMs ? (dd.meanMs.toFixed(1) + "/" + dd.maxMs.toFixed(1)) : null);
+    p("detector budget ms", DET_BUDGET_MS);
+    p("detector degraded", dd.degraded ? (dd.degraded + " step(s): " + dd.degradeNote) : "no");
+    p("detector confidence", dd.passes ? Math.round(dd.conf*100) + "%" : null);
+    p("detector locked", dd.locked);
+    p("detector edge support", dd.passes ? Math.round(dd.support*100) + "%" : null);
+    p("detector line rms px", dd.rms == null ? null : dd.rms.toFixed(2));
+    p("detector corner sigma px", dd.cornerSigmaPx == null ? null : dd.cornerSigmaPx.toFixed(3));
+    p("reference off-centre", dd.passes ? Math.round(dd.radial*100) + "%" : null);
+    p("focal rel sigma", ARC.focal && ARC.focal.relSigma != null
+      ? (ARC.focal.relSigma*100).toFixed(1) + "%" : null);
+    p("focal source", ARC.focal && ARC.focal.src);
+    p("detector benchmark", b ? (b.median + " ms median, p90 " + b.p90 + ", " + b.w + "x" + b.h
+      + ", " + b.hits + "/" + b.runs + " hit, x" + b.headroom + " headroom") : null);
+    p("detector bench split", b ? (b.readbackMs + " ms readback + " + b.computeMs + " ms compute") : null);
+  }
   p("readback path", d.readbackPath);
   p("framebuffer status", d.fboStatusName);
   p("readback ms", d.readbackMs);
@@ -7040,17 +8655,40 @@ document.getElementById("arlayer").addEventListener("click", function(e){
                       ? "Tilt and roll assumed level — the capture will be recorded as NOT verified."
                       : "Assumed-level override off.", ARC.assumeLevel);
                     break;
+    case "modeauto": ARC.mode = "auto"; ARC.handles = []; arcRenderHandles();
+                     arcDetInit(); break;
     case "mode2":   ARC.mode = "two";  arcResetHandles(); break;
-    case "mode4":   ARC.mode = "quad"; arcResetHandles(); break;
+    case "mode4":   ARC.mode = "quad";
+                    // seed from whatever the detector last saw rather than a
+                    // default box in the middle of the screen
+                    if(ARC.det.quad || ARC.det.cand) arcDetToManual();
+                    else arcResetHandles();
+                    break;
+    case "detconfirm": arcDetConfirm(); break;
+    case "detmanual":  arcDetToManual(); break;
+    case "detreject":  ARC.det.cand = null; ARC.det.offered = false; ARC.det.stable = 0;
+                       ARC.det.note = "rejected — move so a different rectangle is in frame, "
+                         + "or outline it by hand.";
+                       break;
+    case "detdrop":    ARC.det.locked = false; ARC.det.quad = null;
+                       ARC.det.offered = false; ARC.det.stable = 0;
+                       ARC.det.note = "re-detecting…";
+                       break;
+    case "detbench":   arcDetBenchmark(); break;
     case "refpick": arcRefPanel(); break;
     case "refsave": {
       const sel = arcEl("ref_sel");
       ARC.refPreset = sel ? sel.value : "a4";
       ARC.refWmm = parseFloat((arcEl("ref_w")||{}).value) || 210;
       ARC.refHmm = parseFloat((arcEl("ref_h")||{}).value) || 0;
-      const def = REF_PRESETS.filter(x=>x.key===ARC.refPreset)[0];
-      ARC.mode = (def && def.quad) || ARC.refHmm > 0 ? "quad" : "two";
-      arcPanel(null); arcResetHandles(); arcLoop();
+      const def = arcRefDef();
+      /* A reference the detector can look for goes straight back to automatic;
+         a width-only one has no rectangle to find, so it stays manual. */
+      if(def && def.auto){ ARC.mode = "auto"; ARC.handles = []; arcDetInit(); }
+      else ARC.mode = (def && def.quad) ? "quad" : "two";
+      arcPanel(null);
+      if(ARC.mode === "auto") arcRenderHandles(); else arcResetHandles();
+      arcLoop();
       break;
     }
     case "refback": arcPanel(null); arcLoop(); break;
@@ -7457,8 +9095,13 @@ function runSelfTest(){
     tierMeta("As").cls !== tierMeta("A").cls, true);
   T("placementVerified accepts the single-frame tier",
     placementVerified({ pass:true, tier:"As" }), true);
-  T("placementVerified still rejects reference-scaled",
-    placementVerified({ pass:true, tier:"Bq" }), false);
+  T("placementVerified now ACCEPTS a calibrated reference-scaled pass",
+    placementVerified({ pass:true, tier:"Bq" }), true,
+    null, "re-tiered: a calibrated reference measurement is evidence, not an estimate");
+  T("…but an ESTIMATED focal (Be) is still not verified",
+    placementVerified({ pass:true, tier:"Be" }), false);
+  T("…and a reference capture that failed its gates is still not verified",
+    placementVerified({ pass:false, tier:"Bq" }), false);
   T("placementSingleFrame needs mode AND tier",
     placementSingleFrame({ pass:true, tier:"As", captureMode:"handover" }), false);
   T("placementSingleFrame accepts a genuine same-frame capture",
@@ -7479,11 +9122,239 @@ function runSelfTest(){
   T("seeded task carries a standoff target", t0.standoffFt > 0, true);
   T("seeded task carries poster dimensions", t0.widthFt > 0 && t0.heightFt > 0, true);
   T("blankPlacement is a failing record", blankPlacement().pass, false);
-  T("placementVerified rejects Tier B passes",
-    placementVerified({ pass:true, tier:"B" }), false);
+  T("placementVerified accepts a calibrated 2-handle pass too",
+    placementVerified({ pass:true, tier:"B" }), true);
+  T("placementAR keeps AR separable from verification",
+    placementAR({ tier:"Bq" }) === false && placementAR({ tier:"A" }) === true, true);
+  T("AR still outranks reference scale for bestPlacement",
+    tierMeta("A").rank > tierMeta("Bq").rank, true);
+  T("same-frame provenance stays AR-only",
+    placementSingleFrame({ pass:true, tier:"Bq", captureMode:"single-frame" }), false);
+  T("TIER_META is the single verification definition",
+    Object.keys(TIER_META).filter(k => TIER_META[k].verified).sort().join(","),
+    "A,Ad,As,Asd,B,Bq", 0, "mirrored by placements.is_verified in 0005_*.sql");
   T("placementVerified accepts Tier A passes",
     placementVerified({ pass:true, tier:"A" }), true);
   T("placementUnverified flags a missing record", placementUnverified(null), true);
+
+  /* ==========================================================
+     Reference-rectangle detector
+     ----------------------------------------------------------
+     Two kinds of assertion here. The cheap ones pin the primitives (ordering,
+     convexity, area, the rectangularity residual, the error algebra) to values
+     that can be checked by hand. The expensive ones render a rectangle at a
+     KNOWN pose, run the whole detect → refine → homography → pose chain over
+     the pixels, and assert that the distance and yaw that come back are the
+     ones that went in. That end-to-end pair is the only thing that can catch a
+     sign error or an off-by-one that every unit test would happily agree with.
+     ========================================================== */
+  (function detectorTests(){
+    const sq = new Float64Array([90,70, 10,10, 10,70, 90,10]);   // scrambled
+    const ord = new Float64Array(8);
+    DET.orderQuad(sq, ord);
+    T("orderQuad → TL,TR,BR,BL regardless of input winding",
+      Array.prototype.join.call(ord, ","), "10,10,90,10,90,70,10,70", 0);
+    T("quadArea of an 80×60 rectangle", DET.quadArea(ord), 4800, 1e-9);
+    T("meanSide of an 80×60 rectangle", DET.meanSide(ord), 70, 1e-9);
+    T("isConvex accepts a rectangle", DET.isConvex(ord), true);
+    T("isConvex rejects a bow-tie",
+      DET.isConvex(new Float64Array([10,10, 90,70, 90,10, 10,70])), false);
+    T("isConvex rejects three collinear corners",
+      DET.isConvex(new Float64Array([10,10, 50,10, 90,10, 50,70])), false);
+    T("minSide picks the short edge", DET.minSide(ord), 60, 1e-9);
+
+    /* --- rectangularity: the residual that survives perspective --- */
+    const W = 640, H = 360, f = GEO.focalFromFov(W, ASSUMED_HFOV_DEG);
+    const truth = GEO.posterQuad({ focalPx:f, cx:W/2, cy:H/2, distance:6,
+                                   widthFt:4, heightFt:3, yawDeg:20, pitchDeg:6 });
+    const flat = new Float64Array([truth[0][0],truth[0][1], truth[1][0],truth[1][1],
+                                   truth[2][0],truth[2][1], truth[3][0],truth[3][1]]);
+    const fitOK = DET.rectFit(flat, 4/3, f, W/2, H/2);
+    T("rectFit: a true 4:3 rectangle has no orthogonality residual", fitOK.ortho, 0, 1e-9,
+      "b1·b2 = 0 because they are columns of a rotation matrix");
+    T("rectFit: …and no scale residual", fitOK.scale, 0, 1e-9, "|b1| = |b2|");
+    const fitBad = DET.rectFit(flat, 3/4, f, W/2, H/2);
+    T("rectFit: the WRONG aspect ratio does not fit", fitBad.scale > 0.3, true,
+      null, "this is what resolves portrait vs landscape");
+    T("confidence prefers the correct aspect",
+      DET.confidence({ ortho:fitOK.ortho, scale:fitOK.scale, areaFrac:0.2, support:0.9 })
+        > DET.confidence({ ortho:fitBad.ortho, scale:fitBad.scale, areaFrac:0.2, support:0.9 }), true);
+    T("confidence is dragged down by a vanishing rectangle",
+      DET.confidence({ ortho:0, scale:0, areaFrac:0.001, support:1 }) < 0.9, true);
+    T("confidence is dragged down by a poor edge fit",
+      DET.confidence({ ortho:0, scale:0, areaFrac:0.2, support:1, rms:0.40 })
+        < DET.confidence({ ortho:0, scale:0, areaFrac:0.2, support:1, rms:0.02 }), true,
+      null, "a quad latched onto abutting clutter is still a rectangle — the line fit is what tells");
+    T("an unrefined candidate is not penalised for having no residual yet",
+      DET.confidence({ ortho:0, scale:0, areaFrac:0.2, support:1 }),
+      DET.confidence({ ortho:0, scale:0, areaFrac:0.2, support:1, rms:0 }), 1e-12);
+    T("confidence never exceeds 1",
+      DET.confidence({ ortho:0, scale:0, areaFrac:0.2, support:1, rms:0 }) <= 1, true);
+
+    /* --- contour following + polygon approximation, on a shape we drew --- */
+    (function(){
+      const bw = 40, bh = 30, bin = new Uint8Array(bw*bh), vis = new Uint8Array(bw*bh);
+      for(let y=8; y<22; y++) for(let x=10; x<30; x++) bin[y*bw+x] = 1;   // 20×14 filled
+      const pts = new Int32Array(4096);
+      const cnt = DET.traceContour(bin, bw, bh, 10, 8, pts, 2048, vis);
+      T("traceContour walks the whole border of a 20×14 block", cnt, 2*(20+14) - 4, 0,
+        "perimeter pixels of a filled rectangle");
+      const quad = new Float64Array(8), keep = new Uint8Array(4096), stack = new Int32Array(512);
+      const ok = DET.dpQuad(pts, cnt, 2, keep, stack, quad);
+      T("dpQuad reduces that border to exactly 4 vertices", ok, true);
+      const q4 = new Float64Array(8);
+      if(ok) DET.orderQuad(quad, q4);
+      T("dpQuad lands on the true corners", ok ? DET.quadArea(q4) : NaN, 19*13, 1e-9,
+        "the border runs through pixel centres, so the polygon is 19 × 13");
+    })();
+
+    /* --- workspace reuse: the allocation contract --- */
+    (function(){
+      const ws = new DET.Workspace();
+      T("Workspace.fit allocates on first call", ws.fit(64, 64), true);
+      T("Workspace.fit is a no-op at the same size", ws.fit(64, 64), false,
+        null, "buffers are reused across passes; nothing is allocated per frame");
+      T("Workspace.fit re-allocates when the size changes", ws.fit(96, 64), true);
+      T("Workspace sizes the detect plane at half", ws.sw + "x" + ws.sh, "48x32", 0);
+    })();
+
+    /* --- the error budget, against hand-computed arithmetic ---
+       focal 2 %, A4 short edge 210 ± 0.5 mm, σc 0.4 px over 200 px sides,
+       reference half-way to the frame corner with k = 0.03:
+         focal  = 0.0200000
+         refDim = 0.5/210            = 0.00238095
+         corner = 0.4/(√2·200)       = 0.00141421
+         barrel = 0.03·0.5²          = 0.00750000
+         total  = √(Σ squares)       = 0.02153877  ⇒ 2.1539 % */
+    (function(){
+      const e = DET.errorEstimate({ focalRelSigma:0.02, refMm:210, refTolMm:0.5,
+        cornerSigmaPx:0.4, meanSidePx:200, radialNorm:0.5, barrelK:0.03 });
+      T("errorEstimate: focal term", e.terms.focal, 0.02, 1e-12);
+      T("errorEstimate: reference-dimension term", e.terms.refDim, 0.00238095, 1e-8, "0.5 mm / 210 mm");
+      T("errorEstimate: corner term", e.terms.corner, 0.00141421, 1e-8, "σc / (√2·L̄)");
+      T("errorEstimate: barrel term", e.terms.barrel, 0.0075, 1e-12, "k·r²");
+      T("errorEstimate: quadrature total", e.pct, 2.1539, 1e-3, "hand-computed");
+      const e0 = DET.errorEstimate({ focalRelSigma:0.02, refMm:210, refTolMm:0.5,
+        cornerSigmaPx:0.4, meanSidePx:200, radialNorm:0, barrelK:0.03 });
+      T("errorEstimate: centring the reference removes the barrel term", e0.terms.barrel, 0, 1e-12);
+      T("errorEstimate: …and shrinks the total", e0.pct, 2.0191, 1e-3);
+      const e2 = DET.errorEstimate({ focalRelSigma:0.02, refMm:210, refTolMm:0.5,
+        cornerSigmaPx:0.4, meanSidePx:400, radialNorm:0, barrelK:0.03 });
+      T("errorEstimate: a reference twice as big halves the corner term",
+        e2.terms.corner, e0.terms.corner/2, 1e-12);
+      const eEst = DET.errorEstimate({ focalRelSigma:FOCAL_SIGMA_ASSUMED, refMm:210, refTolMm:0.5,
+        cornerSigmaPx:0.4, meanSidePx:200, radialNorm:0, barrelK:0.03 });
+      T("errorEstimate: an assumed focal length dominates everything else",
+        eEst.pct > 11.9 && eEst.pct < 12.3, true,
+        null, eEst.pct.toFixed(2) + "% — which is exactly why tier Be is not verified");
+      T("errorEstimate is never negative",
+        DET.errorEstimate({ focalRelSigma:0, refMm:0, refTolMm:0, cornerSigmaPx:null,
+                            meanSidePx:0, radialNorm:0 }).pct, 0, 1e-12);
+    })();
+
+    /* --- the [ref …] note tag survives a server round trip ---
+       placements has no columns for this evidence yet, so the note IS the
+       transport. If the writer and the reader ever disagree, a manager
+       reviewing a synced capture silently loses the error bar. */
+    (function(){
+      const note = "Yaw obliqueness not verified. [ref poster 1219.2x914.4mm auto conf=0.987 "
+        + "err=2.24% (focal 2 / dim 1 / corner 0.04 / barrel 0.01) r=0.034] "
+        + "Distance was scaled from the INSTALLED POSTER's briefed size.";
+      const p = refEvidenceFromNote(note, {});
+      T("note tag round-trip: reference source", p.refSource, "poster", 0);
+      T("note tag round-trip: reference size mm", p.refWmm + "x" + p.refHmm, "1219.2x914.4", 0);
+      T("note tag round-trip: auto-detected flag", p.refAuto, true);
+      T("note tag round-trip: confidence", p.refConfidence, 0.987, 1e-9);
+      T("note tag round-trip: error percentage", p.errorPct, 2.24, 1e-9);
+      T("note tag round-trip: error terms", p.errorTerms.focal + "/" + p.errorTerms.refDim
+        + "/" + p.errorTerms.corner + "/" + p.errorTerms.barrel, "2/1/0.04/0.01", 0);
+      T("note tag round-trip: radial offset", p.radialOffset, 0.034, 1e-9);
+      T("note tag round-trip: a manual capture is not marked auto",
+        refEvidenceFromNote("[ref a4q 210x297mm manual err=3.1% (focal 2 / dim 0.24 / corner 0.9 / barrel 0) r=0.1]", {}).refAuto,
+        false);
+      T("note tag round-trip: a note without the tag changes nothing",
+        Object.keys(refEvidenceFromNote("just prose, no tag", {})).length, 0, 0);
+      T("note tag round-trip: a null note is safe",
+        Object.keys(refEvidenceFromNote(null, {})).length, 0, 0);
+    })();
+
+    /* --- arcQuad, the only way relative errors combine --- */
+    T("arcQuad(3,4) is the Pythagorean 5", arcQuad(3, 4), 5, 1e-12);
+    T("arcQuad ignores missing terms", arcQuad(0.02, 0, null), 0.02, 1e-12);
+
+    /* --- reference tolerances --- */
+    T("A4 quad tolerance is half a millimetre",
+      arcRefTolMm(REF_PRESETS.filter(p=>p.key==="a4q")[0], 210), 0.5, 1e-9);
+    T("the poster's tolerance is proportional to its size",
+      arcRefTolMm(REF_PRESETS.filter(p=>p.key==="poster")[0], 914.4), 9.144, 1e-6,
+      "3 ft printed to ±1 %");
+
+    /* --- the degradation ladder --- */
+    T("a low-end device starts further down the ladder than a fast one",
+      arcDetProfile("low", 0).work < arcDetProfile("high", 0).work, true);
+    T("degrading never raises the work resolution",
+      arcDetProfile("mid", 1).work <= arcDetProfile("mid", 0).work, true);
+    T("the ladder bottoms out instead of running off the end",
+      arcDetProfile("low", 99).work, arcDetProfile("low", 4).work, 0);
+    T("every rung is inside the frame budget's reach",
+      arcDetProfile("low", 99).fps <= arcDetProfile("high", 0).fps, true);
+
+    /* --- end to end: render a known pose, measure it back --- */
+    (function(){
+      const ws = new DET.Workspace();
+      const WW = 640, HH = 360;
+      ws.fit(WW, HH);
+      const fw = GEO.focalFromFov(WW, ASSUMED_HFOV_DEG);
+      const cases = [
+        { name:"poster 4×3 ft square-on at 6 ft", wFt:4, hFt:3, distFt:6, yawDeg:0,  seed:11 },
+        { name:"poster 4×3 ft at 6 ft, yaw 20°",  wFt:4, hFt:3, distFt:6, yawDeg:20, seed:12 },
+        { name:"A4 sheet at 3 ft, yaw -15°",
+          wFt:GEO.mToFt(0.210), hFt:GEO.mToFt(0.297), distFt:3, yawDeg:-15, seed:13 }
+      ];
+      const out = new Float64Array(8);
+      cases.forEach(function(c){
+        arcDetSynth(ws, { focalPx:fw, distFt:c.distFt, wFt:c.wFt, hFt:c.hFt,
+                          yawDeg:c.yawDeg, noise:4, clutter:3, seed:c.seed });
+        const asp = c.wFt/c.hFt;
+        const r = DET.detect(ws, { aspect:asp, focalPx:fw, cx:WW/2, cy:HH/2 });
+        if(!r || !r.quad){
+          T("detector finds " + c.name, false, true, null, "no quad returned");
+          return;
+        }
+        T("detector finds " + c.name, true, true);
+        const rr = DET.refine(ws.luma, WW, HH, r.quad, out, ws, {});
+        const dst = [[out[0],out[1]],[out[2],out[3]],[out[4],out[5]],[out[6],out[7]]];
+        const mw = r.flipped ? c.hFt : c.wFt, mh = r.flipped ? c.wFt : c.hFt;
+        const src = [[-mw/2,-mh/2],[mw/2,-mh/2],[mw/2,mh/2],[-mw/2,mh/2]];
+        const Hm = GEO.homography(src, dst);
+        const pose = Hm ? GEO.poseFromHomography(Hm, fw, WW/2, HH/2) : null;
+        T("  …recovers the distance it was rendered at",
+          pose ? pose.distance : NaN, c.distFt, c.distFt*0.02,
+          "within 2 % of " + c.distFt.toFixed(1) + " ft");
+        T("  …recovers the yaw it was rendered at",
+          pose ? pose.yawDeg : NaN, c.yawDeg, 2.0, "within 2°");
+        T("  …with sub-pixel edge residual", rr.rms != null && rr.rms < 1.2, true,
+          null, rr.rms == null ? "no lines fitted" : rr.rms.toFixed(3) + " px");
+        T("  …and reports a corner σ the error budget can use",
+          rr.cornerSigma != null && rr.cornerSigma > 0 && rr.cornerSigma < 2, true,
+          null, rr.cornerSigma == null ? "null" : rr.cornerSigma.toFixed(3) + " px");
+      });
+
+      /* A blank wall must produce NOTHING. A detector that hallucinates a
+         rectangle on an empty frame is worse than one that never fires. */
+      ws.luma.fill(128);
+      const blank = DET.detect(ws, { aspect:4/3, focalPx:fw, cx:WW/2, cy:HH/2 });
+      T("a featureless frame yields no rectangle", !!(blank && blank.quad), false);
+
+      /* Orientation ambiguity: render A4 LANDSCAPE but ask for portrait. */
+      arcDetSynth(ws, { focalPx:fw, distFt:3, wFt:GEO.mToFt(0.297), hFt:GEO.mToFt(0.210),
+                        noise:4, seed:21 });
+      const rot = DET.detect(ws, { aspect:210/297, focalPx:fw, cx:WW/2, cy:HH/2 });
+      T("a landscape reference is recognised as the same sheet rotated",
+        !!(rot && rot.quad && rot.flipped), true,
+        null, "both orientations are scored; the better rectFit wins");
+    })();
+  })();
 
   /* --- geofence helper still intact --- */
   T("haversine ~111.2 km per degree of latitude",

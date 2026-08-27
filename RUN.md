@@ -171,8 +171,14 @@ move it slowly for two or three seconds; the probe ends itself and prints the re
 | Last error | `None.` | a name + message + stack — copy the whole report. |
 
 **Copy report** puts the whole thing on the clipboard as plain text (there is also a selectable
-text box at the bottom if the clipboard is blocked). **Run geometry self-test** runs the same 107
+text box at the bottom if the clipboard is blocked). **Run geometry self-test** runs the same 180
 assertions on the phone, including a real WebGL framebuffer readback and Y-flip round trip.
+
+**Benchmark detector** times the real reference-rectangle detector on this device against a
+synthetic frame — no camera permission needed — and reports median and p90 milliseconds per pass,
+split into the canvas readback and the detect/refine compute. The budget is 30 ms. If a live
+session's passes overrun it consistently, detection steps down its work resolution and rate on its
+own and says so in the **Reference detector** section.
 
 ### What gets recorded
 
@@ -232,7 +238,7 @@ off to the side and perfectly level. So:
 
 ## 4. Verifying the maths
 
-⋮ menu → **Run geometry self-test**. 107 assertions covering the pinhole identities, the wall-normal
+⋮ menu → **Run geometry self-test**. 180 assertions covering the pinhole identities, the wall-normal
 decomposition, quaternion rotation, device-attitude derivation (including the `beta = ±90` gimbal and
 screen-rotation compensation), the linear solver, poster projection, a full
 project → homography → pose round-trip, XR-projection-matrix → intrinsics extraction,
