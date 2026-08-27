@@ -1,0 +1,13 @@
+# Agent scratch / verification harness — not part of the app
+tools/
+
+# Backups
+*.bak
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+*.swp
+
+# Local Claude Code settings
+.claude/

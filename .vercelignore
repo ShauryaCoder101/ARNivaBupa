@@ -1,0 +1,17 @@
+# Backend SQL — contains seed password hashes and schema internals.
+# Never serve these from a public static host.
+supabase/
+
+# Test scaffolding. tools/mock-supabase.js REPLACES window.fetch and
+# tools/harness.html hard-codes a fixture project — neither must ever be served
+# from the same origin as the real app.
+tools/
+
+# Local dev notes
+RUN.md
+MIGRATION.md
+
+# Editor / OS noise
+.DS_Store
+Thumbs.db
+*.bak
