@@ -462,6 +462,11 @@ table.tbl tr:last-child td{border-bottom:0}
 .arstat.ok{background:rgba(21,128,61,.82);border-color:rgba(120,240,170,.5)}
 .arstat.no{background:rgba(190,18,60,.82);border-color:rgba(255,150,175,.5)}
 .arstat .sub{display:block;font-size:11px;font-weight:500;opacity:.85;margin-top:2px;font-family:var(--mono)}
+/* A held reading is not a live one. The tag rides inside the distance row so the
+   big number can never be read as "this is what the phone sees right now". */
+.arstat .heldtag{display:inline-block;background:#fbbf24;color:#2a1a00;border-radius:5px;
+  padding:1px 6px;font-size:10.5px;font-weight:800;letter-spacing:.04em;font-family:var(--mono);
+  vertical-align:2px;margin-right:6px;white-space:nowrap}
 
 .arrow2{display:flex;gap:8px;flex-wrap:wrap}
 .arrow2 .arstat{flex:1;min-width:132px;font-size:12.5px;padding:7px 10px}
@@ -1077,6 +1082,61 @@ const CALIB_EDGE_SIGMA_PX = 1.5;    // per handle, dragging onto an edge by eye
 const BARREL_K            = 0.030;
 const BARREL_WARN_R       = 0.55;   // normalised radius at which we start nagging
 
+/* ---- floor-line (reference-free) distance ----
+   THE METHOD. Hold the phone at height h above the floor, tilt it down by θ
+   below horizontal until the reticle sits on the line where the wall meets the
+   floor, and the horizontal distance to the wall is
+
+       d = h / tan θ
+
+   Nothing is taped to the wall and nothing of a known size has to be in frame.
+   The only inputs are the eye height (calibrated once per device) and the
+   depression angle, which comes from the gravity vector the phone already
+   reports and which is known-good on iOS.
+
+   TWO ASSUMPTIONS, both stated to the merchandiser and neither measurable from
+   a single view: the floor is LEVEL and the wall is VERTICAL. A sloping floor
+   biases θ by the slope; a wall that leans changes where the floor line is. In
+   a retail interior both hold to a fraction of a degree, but a ramp, a raised
+   plinth or a stepped shopfront break them, which is why the fallback exists.
+
+   ERROR. d = h·cot θ, so
+       ∂d/∂h = cot θ  = d/h        →  σ_h/h passes straight through
+       ∂d/∂θ = -h/sin²θ            →  relative σ_θ/(sin θ · cos θ)
+   The pitch term is minimised at θ = 45° (where it is exactly 2σ_θ) and blows
+   up at both ends of the range — which is what the angular band below guards.
+   Nothing here is a constant "± n %": see GEO.floorLineError. */
+const FLOOR_DEFAULT_H_M       = 1.45;   // a phone framing a wall sits about here on an
+                                        // adult of average height — chest/shoulder, not eye
+const FLOOR_DEFAULT_H_SIGMA   = 0.085;  // relative. Stature spread plus how differently two
+                                        // people hold a phone. On its own this misses 5 %,
+                                        // which is exactly why the default is badged ROUGH.
+const FLOOR_CAL_H_MIN_M       = 0.60;   // a solved height outside this band is not a person
+const FLOOR_CAL_H_MAX_M       = 2.20;   //   holding a phone; refuse rather than persist it
+const FLOOR_AIM_SIGMA_DEG     = 0.55;   // how precisely a person puts a reticle on a line seen
+                                        // across a room — the irreducible part of σ_θ
+const FLOOR_PITCH_SIGMA_FLOOR = 0.25;   // sensor floor: DeviceOrientation is quantised and
+                                        // filtered, so measured jitter can read implausibly low
+const FLOOR_MIN_DEPRESSION    = 10;     // below this tan θ → 0 and the distance explodes
+const FLOOR_MAX_DEPRESSION    = 75;     // above this they are aiming at their own feet
+const FLOOR_SHALLOW_WARN_DEG  = 18;     // still reported, but the error bar is growing fast
+const FLOOR_DIST_MIN_FT       = 1.0;    // sanity band on the result itself
+const FLOOR_DIST_MAX_FT       = 60.0;
+const FLOOR_SAMPLE_MS         = 700;    // window the depression median + jitter are taken over
+const FLOOR_LATCH_SIGMA_DEG   = 1.20;   // a reading is only latched once it has stopped moving
+const FLOOR_LIVE_SIGMA_DEG    = 3.00;   // above this the window is not describing ONE aim at all —
+                                        // mid-raise it blends the floor angle with the wall angle and
+                                        // the median lands somewhere plausible but entirely fictional,
+                                        // so no live distance is offered until it settles
+const FLOOR_HOLD_MAX_MS       = 25000;  // a held reading older than this is not offered at all
+const FLOOR_HOLD_WARN_MS      = 8000;   // …and is called out before that
+const FLOOR_STEP_ACCEL        = 1.80;   // m/s² of gravity-removed acceleration that reads as a STEP
+const FLOOR_STIR_ACCEL        = 0.60;   // …and as merely being jostled
+const FLOOR_STEP_GAP_MS       = 260;    // two peaks closer together than this are one step
+const FLOOR_RAISE_GRACE_MS    = 600;    // raising the phone off the floor line is itself a wrist
+                                        // movement that reads like a small step; don't charge it
+const FLOOR_CAL_KEY           = "niva.floorcal.v1";
+
 /* ---- detector budget ----
    The numbers the "degrade gracefully" rule is measured against. */
 const DET_BUDGET_MS       = 30;     // one pass; over this consistently ⇒ step down
@@ -1162,6 +1222,53 @@ const TIER_FIELD_LABEL = {
 };
 const tierMeta = k => TIER_META[k] || TIER_META.C;
 const isARTier = k => k === "As" || k === "Asd" || k === "A" || k === "Ad";
+
+/* ==========================================================
+   DISTANCE METHOD — a SECOND axis, deliberately not a tier
+   ----------------------------------------------------------
+   A tier answers "how good is this evidence?". A method answers "where did the
+   number come from?". They used to be the same question because there were only
+   ever two answers — AR measured it, or a reference of known size did. Floor-
+   line trigonometry is a third, and it needs to be distinguishable on the
+   placement record without pretending to be a new tier.
+
+   IT IS NOT A NEW TIER, AND THAT IS ON PURPOSE. `placements.tier` is a Postgres
+   ENUM — public.verification_tier ('Asd','As','Ad','A','Bq','B','Be','C') — and
+   `placements.tier_rank` is a stored generated column that CASEs over exactly
+   those eight labels. A ninth letter is therefore a schema migration (alter
+   type … add value, plus a rewrite of tier_rank), and 0005_retier_reference_
+   scale.sql is not even applied yet. So floor-line captures record an EXISTING
+   tier letter — 'Be', the tier that already means "a real capture whose
+   measurement chain is not tight enough to count as verified evidence" — and
+   carry their method here instead. is_verified is untouched in both the applied
+   schema and the pending one: 'Be' is unverified in each.
+
+   Like the reference-scale evidence before it, the method travels to the server
+   inside placements.note (see FLOOR_NOTE_RE) rather than in a column that might
+   not exist, and is parsed back out on the way in, so a manager reviewing a
+   SYNCED capture sees it too. Everything else — tier, rank, the KPIs, the
+   is_verified generated column — behaves exactly as it did.
+
+   `cls` and `label` mirror TIER_META's shape so the two maps read the same way;
+   `field` is the plain-language line, mirroring TIER_FIELD_LABEL. */
+const METHOD_META = {
+  "xr-hit-test":     { cls:"tier-ar",  label:"AR hit-test — the wall plane itself",
+                       field:"Phone measured the wall" },
+  "reference-scale": { cls:"tier-ref", label:"Reference scale — known-size object in frame",
+                       field:"Measured from the sheet" },
+  "floor-line":      { cls:"tier-est", label:"Floor-line trigonometry — d = h / tan θ",
+                       field:"Measured off the floor line" },
+  "manual":          { cls:"tier-unv", label:"Typed in by hand",
+                       field:"Typed in by hand" }
+};
+const methodMeta = k => METHOD_META[k] || METHOD_META.manual;
+/* Records written before methods existed, and every AR / reference / manual
+   capture, imply their method from the tier they already carry. Only floor-line
+   has to say so explicitly, because it shares tier 'Be' with the estimated-
+   focal reference path. */
+function methodFromTier(tier){
+  return isARTier(tier) ? "xr-hit-test" : (tier === "C" ? "manual" : "reference-scale");
+}
 const CAPTURE_MODES = {
   "single-frame": "measured and photographed in the same XR frame (raw camera access)",
   "handover":     "measured in XR, photographed after handing the camera back (sub-second gap)",
@@ -1444,6 +1551,78 @@ const GEO = (function(){
     return tiltFromGravity(applyScreenAngle(d, screenAngleDeg));
   }
 
+  /* ---- floor-line trigonometry (reference-free distance) ----
+
+     depressionFromGravity() is NOT tiltFromGravity().pitchDeg negated, and the
+     difference is the whole reason it exists. tiltFromGravity reports the pitch
+     of the screen's own vertical axis: atan2(g_z, -g_y). Roll bleeds part of
+     -g_y into g_x, so a phone held 30° off-level reads its 40° of depression as
+     44° — and at 40° a 4° error is a 14 % distance error.
+
+     The angle the trigonometry actually needs is the elevation of the OPTICAL
+     AXIS, and the rear camera looks along -z. With g the unit gravity-down
+     vector, sin(elevation) = (-ẑ)·(-g) = g_z, so the depression below
+     horizontal is asin(-g_z) — a function of g_z alone, and therefore invariant
+     under both roll and the screen-angle compensation (which only mixes x,y).
+     A merchandiser tilting the phone down one-handed is rolled by several
+     degrees whether they mean to be or not, so this matters in the field and
+     not just on paper. */
+  function depressionFromGravity(g){
+    const v = vnorm(g);
+    return deg(Math.asin(clamp(-v[2], -1, 1)));
+  }
+  /* d = h / tan θ, in whatever unit h is given in. Returns NaN outside the open
+     interval (0°, 90°): at 0 the ray never meets the floor and at 90 it lands on
+     the user's own shoes. The usable BAND is much narrower than that and is
+     enforced by the caller (floorGuard) — this is only the hard singularity. */
+  function floorLineDistance(h, thetaDeg){
+    if(!(h > 0) || !isFinite(thetaDeg) || thetaDeg <= 0 || thetaDeg >= 90) return NaN;
+    const t = Math.tan(rad(thetaDeg));
+    if(!(t > 0)) return NaN;
+    return h/t;
+  }
+  /* The calibration solve, the same identity rearranged: stand a MEASURED
+     distance from a wall, aim at the floor line, and the height falls out. */
+  function floorLineHeight(d, thetaDeg){
+    if(!(d > 0) || !isFinite(thetaDeg) || thetaDeg <= 0 || thetaDeg >= 90) return NaN;
+    return d*Math.tan(rad(thetaDeg));
+  }
+  /* ∂d/∂θ in units-of-h per RADIAN. Negative: tilting further down brings the
+     floor line — and therefore the wall — nearer. Worth having as its own
+     function because it is the term that decides whether a reading is usable,
+     and because the self-test can check it against a hand-computed value. */
+  function floorLineDDdTheta(h, thetaDeg){
+    if(!(h > 0) || !isFinite(thetaDeg) || thetaDeg <= 0 || thetaDeg >= 90) return NaN;
+    const s = Math.sin(rad(thetaDeg));
+    return -h/(s*s);
+  }
+  /* The honest error bar, derived from the two real terms and nothing else.
+
+       relative σ_d = √( (σ_h/h)² + (σ_θ / (sin θ · cos θ))² )
+
+     The second term is ∂d/∂θ · σ_θ divided through by d = h·cot θ, which
+     collapses to σ_θ/(sinθ·cosθ) = 2σ_θ/sin(2θ). It bottoms out at 2σ_θ at
+     θ = 45° and roughly quadruples by θ = 12°, which is why shallow aim is
+     called out rather than silently reported.
+     σ_θ is supplied by the caller as the quadrature sum of the MEASURED sensor
+     jitter and how well a person can put a reticle on a line. */
+  function floorLineError(t){
+    const hRel  = Math.max(0, t.heightRelSigma || 0);
+    const th    = t.thetaDeg;
+    const sTh   = rad(Math.max(0, t.thetaSigmaDeg || 0));
+    let pitch = Infinity;
+    if(isFinite(th) && th > 0 && th < 90){
+      const s = Math.sin(rad(th)), c = Math.cos(rad(th));
+      pitch = (s*c > 0) ? sTh/(s*c) : Infinity;
+    }
+    const rel = Math.sqrt(hRel*hRel + pitch*pitch);
+    return {
+      rel: rel, pct: rel*100,
+      terms: { height: hRel, pitch: pitch },
+      dDdThetaPerDeg: floorLineDDdTheta(t.h == null ? 1 : t.h, th)*D2R
+    };
+  }
+
   /* ---- linear algebra: dense n×n solve, partial pivoting ---- */
   function solveLinear(A, b){
     const n = b.length;
@@ -1605,6 +1784,9 @@ const GEO = (function(){
     gravityFromOrientation:gravityFromOrientation, applyScreenAngle:applyScreenAngle,
     tiltFromGravity:tiltFromGravity, attitudeFromOrientation:attitudeFromOrientation,
     attitudeFromAccel:attitudeFromAccel,
+    depressionFromGravity:depressionFromGravity,
+    floorLineDistance:floorLineDistance, floorLineHeight:floorLineHeight,
+    floorLineDDdTheta:floorLineDDdTheta, floorLineError:floorLineError,
     solveLinear:solveLinear, homography:homography, applyH:applyH,
     poseFromHomography:poseFromHomography, posterQuad:posterQuad,
     intrinsicsFromProjection:intrinsicsFromProjection, flipRowsRGBA:flipRowsRGBA
@@ -3574,7 +3756,8 @@ function blankPlacement(){
            pitchDeg:null, rollDeg:null, yawDeg:null, angleTolDeg:ANGLE_TOL_DEG,
            pitchOk:false, rollOk:false, yawOk:false, yawVerified:false,
            focalPx:null, focalSource:"—", posterWFt:null, posterHFt:null,
-           captureMode:"manual", pass:false, ts:null, note:"" };
+           captureMode:"manual", method:"manual", methodLabel:METHOD_META.manual.label,
+           pass:false, ts:null, note:"" };
 }
 /* A capture counts as "placement verified" when every gate passed AND the
    distance came from a real measurement — AR, or a CALIBRATED reference scale.
@@ -3665,6 +3848,33 @@ function refEvidenceFromNote(note, p){
   }
   return p;
 }
+
+/* The floor-line evidence rides in placements.note for exactly the reason the
+   [ref …] tag does: there are no columns for it, a PostgREST insert naming an
+   unknown column fails 400 PGRST204, and the outbox treats a 400 as permanent —
+   so a client that got ahead of its database would LOSE captures rather than
+   degrade. Everything needed to re-derive the error bar is in the tag: the eye
+   height and its uncertainty, the depression angle and its uncertainty, the two
+   error terms, how old the reading was when the shutter fired, and whether the
+   height came from a calibration or from the stated default.
+   Deliberately ASCII — a note is plain text on a round trip through Postgres,
+   an outbox blob and a render cache, and none of those need a degree sign. */
+const FLOOR_NOTE_RE = /\[floor h=([\d.]+)m\/([\d.]+)% ang=([\d.]+)deg\/([\d.]+)deg err=([\d.]+)% \(height ([\d.]+) \/ pitch ([\d.]+)\) age=([\d.]+)s cal=(device|default)\]/;
+function floorEvidenceFromNote(note, p){
+  if(!note) return p;
+  const m = FLOOR_NOTE_RE.exec(note);
+  if(!m) return p;
+  p.method = "floor-line";
+  p.floorHeightM      = Number(m[1]);
+  p.floorHeightPct    = Number(m[2]);
+  p.floorThetaDeg     = Number(m[3]);
+  p.floorThetaSigmaDeg= Number(m[4]);
+  p.errorPct          = Number(m[5]);
+  p.errorTerms        = { height:Number(m[6]), pitch:Number(m[7]) };
+  p.floorHeldS        = Number(m[8]);
+  p.floorCalibrated   = (m[9] === "device");
+  return p;
+}
 function mapPlacement(r){
   if(!r) return null;
   const p = {
@@ -3683,6 +3893,12 @@ function mapPlacement(r){
     ts:r.captured_at||r.recorded_at, recordedAt:r.recorded_at, createdBy:r.created_by||null
   };
   refEvidenceFromNote(p.note, p);
+  floorEvidenceFromNote(p.note, p);
+  /* The method is a second axis and has no column of its own. Floor-line says
+     so in the note; everything else is implied by the tier it already carries,
+     so rows written before methods existed still classify correctly. */
+  if(!p.method) p.method = methodFromTier(p.tier);
+  p.methodLabel = methodMeta(p.method).label;
   if(r.camera_w){
     p.cameraImage = { w:r.camera_w, h:r.camera_h, readbackMs:num(r.camera_readback_ms),
                       path:r.camera_path, aspectAgrees:r.camera_aspect_agrees };
@@ -5793,6 +6009,29 @@ function placementBlock(p, t){
           + '<span class="chip '+(p.errorPct <= 5 ? "pass" : "fail")+'" style="margin-left:6px">'
           + (p.errorPct <= 5 ? "WITHIN 5%" : "OVER 5%")+'</span></span></div>'
         : '')
+    + '<div class="prow"><span class="pl">How the distance was measured</span>'
+    +   '<span><span class="tierbadge '+methodMeta(p.method || methodFromTier(p.tier)).cls+'">'
+    +   esc(p.methodLabel || methodMeta(p.method || methodFromTier(p.tier)).label)+'</span></span></div>'
+    + (p.method === "floor-line"
+        ? '<div class="prow"><span class="pl">Phone height <span style="opacity:.65">h in d = h / tan θ</span></span>'
+          + '<span><b>'+(p.floorHeightM == null ? "—" : Number(p.floorHeightM).toFixed(2)+' m')+'</b>'
+          + '<span class="chip '+(p.floorCalibrated ? "pass" : "fail")+'" style="margin-left:6px">'
+          + (p.floorCalibrated ? "MEASURED ON THIS PHONE" : "ROUGH DEFAULT")+'</span></span></div>'
+          + '<div class="prow"><span class="pl">Aim below horizontal <span style="opacity:.65">θ</span></span>'
+          + '<span><b>'+(p.floorThetaDeg == null ? "—" : Number(p.floorThetaDeg).toFixed(1)+'°')+'</b>'
+          + (p.floorThetaSigmaDeg != null ? ' <span style="opacity:.6">± '+Number(p.floorThetaSigmaDeg).toFixed(2)+'°</span>' : '')
+          + (p.floorFtPerDeg != null ? ' <span class="chip neutral plain" style="margin-left:6px">'
+              + p.floorFtPerDeg+' ft per degree</span>' : '')
+          + '</span></div>'
+          + '<div class="prow"><span class="pl">Reading at the shutter</span><span>'
+          + (p.floorLive === false
+              ? '<span class="chip fail">HELD '+Number(p.floorHeldS||0).toFixed(1)+' s</span>'
+                + (p.floorMotionSeen === false
+                    ? '<span class="chip fail" style="margin-left:6px">MOVEMENT UNKNOWN</span>'
+                    : '<span class="chip pass" style="margin-left:6px">NO STEP DETECTED</span>')
+              : '<span class="chip pass">LIVE — aimed at the floor line</span>')
+          + '</span></div>'
+        : '')
     + (p.refLabel
         ? '<div class="prow"><span class="pl">Scale reference'
           + (p.refAuto ? ' <span style="opacity:.65">auto-detected</span>' : ' <span style="opacity:.65">outlined by hand</span>')
@@ -5814,11 +6053,16 @@ function placementBlock(p, t){
           + (p.cameraImage.readbackMs != null ? ' · readback '+p.cameraImage.readbackMs+' ms' : '')
           + (p.cameraImage.path ? ' · '+esc(p.cameraImage.path) : '')
         : '')
-    +   (p.errorTerms
+    +   (p.errorTerms && p.method === "floor-line"
+        ? '<br><span class="mono">error budget:</span> phone height ± '+p.errorTerms.height
+          + ' % · aim angle ± '+p.errorTerms.pitch+' % (added in quadrature; the angle term is '
+          + 'σ<sub>θ</sub>/(sin θ · cos θ), which is why a shallow aim costs so much)'
+        : p.errorTerms
         ? '<br><span class="mono">error budget:</span> focal ± '+p.errorTerms.focal+' % · reference size ± '
           + p.errorTerms.refDim+' % · corner localisation ± '+p.errorTerms.corner
           + ' % · lens distortion ± '+p.errorTerms.barrel+' % (added in quadrature)'
         : '')
+    +   (p.floorHeightSource ? '<br><span class="mono">height:</span> '+esc(p.floorHeightSource) : '')
     +   (p.detectWork ? '<br><span class="mono">detector:</span> '+esc(p.detectWork)
           + (p.detectMs != null ? ' · '+p.detectMs+' ms/pass' : '')
           + (p.refCornerRmsPx != null ? ' · edge residual '+p.refCornerRmsPx+' px' : '')
@@ -6649,6 +6893,16 @@ const ARC = {
         radial:0, err:null, seenAt:0, note:"",
         nextAt:0, lastMs:0, meanMs:0, maxMs:0, passes:0, hits:0,
         overruns:0, degraded:0, degradeNote:"", bench:null },
+  /* Floor-line trigonometry. Everything the method knows lives here so the HUD,
+     the record builder and the diagnostics panel can read it without any of
+     them reaching into the sampling loop. */
+  floor:{ on:false, hM:null, hRelSigma:null, hSrc:"", calibrated:false,
+          samples:[], theta:null, thetaSigma:null, thetaRaw:null,
+          live:null, hold:null, state:"none", why:"", warn:"",
+          calibrating:null,
+          motion:{ on:false, onMot:null, seen:false, since:0, steps:0,
+                   peak:0, stir:0, lastPeakAt:0 } },
+  assumeSquare:false,
   handles:[], quad:[],
   meas:{ distFt:null, yawDeg:null, yawVerified:false, distSrc:"", depthUsed:false, wallSeen:false },
   nudge:{x:0,y:0}, armT0:0, armed:false, posterImg:null, panel:null, busy:false,
@@ -7157,10 +7411,18 @@ function arcStartPanel(caps){
     rows += line(caps.media,  "Camera (getUserMedia)");
     rows += line(caps.xr,     "WebXR immersive-ar + hit-test", caps.xr?"":"Android Chrome + ARCore only");
     rows += line(caps.ori,    "Motion / orientation sensors", caps.oriGate?"iOS asks for permission":"");
-    rows += line(!!cal,       "This device is calibrated",
+    rows += line(!!cal,       "Lens calibrated (focal length)",
                  cal?(Math.round(cal.f)+" px @ "+cal.vw+"w")
-                    :byMode("reference scaling from the A4 sheet will be estimated",
+                    :byMode("reference scaling estimated; the drawn poster is scaled by f too",
                             "reference scaling will be estimated"));
+    if(MOCKUP){
+      const fcal = floorCalGet();
+      rows += line(!!fcal, "Phone height calibrated (floor-line)",
+                   fcal ? (Number(fcal.hM).toFixed(2)+" m ± "
+                           +(Number(fcal.relSigma||FLOOR_DEFAULT_H_SIGMA)*100).toFixed(1)+"%")
+                        : ("default "+FLOOR_DEFAULT_H_M.toFixed(2)+" m, ± "
+                           +(FLOOR_DEFAULT_H_SIGMA*100).toFixed(0)+"% — over the 5% budget on its own"));
+    }
     rows = '<div style="margin:12px 0;border-top:1px solid var(--border);border-bottom:1px solid var(--border);padding:6px 0">'
          + rows + '</div>';
   }
@@ -7183,15 +7445,27 @@ function arcStartPanel(caps){
                + 'at its real size.',
                'point it at the wall, walk to where it tells you, and the poster is drawn at its real size.')
       + '</div>';
+  } else if(caps.media && plain && MOCKUP){
+    /* MOCKUP MODE, NO ARCore. The wall is bare, so there is nothing on it to
+       measure against — but the floor is already there. Nothing to tape up and
+       nothing to carry, which was the whole complaint about the A4 sheet. */
+    how = '<div class="hint" style="margin:0 0 12px;font-size:13px;line-height:1.55">'
+      + '<b>This phone can’t measure the wall by itself, so it measures off the floor instead.</b> '
+      + 'Tilt the phone down until the line on screen sits where the wall meets the floor — from how far '
+      + 'down you tilted, it works out how far back you are standing. Nothing to tape up.'
+      + '<br><br>The first time on this phone it will ask you to set your height: stand a tape-measured '
+      + 'distance from any wall, aim at the floor line, done. Skip it and sizes will be roughly right '
+      + 'rather than right.'
+      + '<br><br><b>If the bottom of the wall is hidden</b> — shelving, stacked stock, a plinth — the floor '
+      + 'line isn’t there to aim at. Tape one plain A4 sheet flat on the wall instead; that path is still '
+      + 'one tap away.'
+      + '</div>';
   } else if(caps.media && plain){
     how = '<div class="hint" style="margin:0 0 12px;font-size:13px;line-height:1.55">'
       + '<b>This phone cannot work out distance on its own,</b> so it needs something of a known size in the '
       + 'picture to measure against. '
-      + byMode('A bare wall gives it nothing, so: <b>tape one sheet of A4 printer paper flat on the wall</b> '
-               + '(any plain sheet will do) and keep it in shot. The camera finds it by itself and works out '
-               + 'the rest.',
-               '<b>Tape one sheet of A4 printer paper flat on the wall</b> and keep it in shot; the camera '
-               + 'finds it by itself.')
+      + '<b>Tape one sheet of A4 printer paper flat on the wall</b> and keep it in shot; the camera '
+      + 'finds it by itself.'
       + '</div>';
   } else if(!caps.media && plain){
     how = '<div class="hint" style="margin:0 0 12px;font-size:13px;line-height:1.55">'
@@ -7204,16 +7478,25 @@ function arcStartPanel(caps){
   if(caps.xr)    btns += '<button class="btn primary" data-arc="tierA">'
                        + (plain ? byMode("Point at the wall","Start") : "Start AR measurement")+'</button>';
   if(caps.media) btns += '<button class="btn'+(caps.xr?'':' primary')+'" data-arc="tierB">'
-                       + (plain ? (caps.xr ? "Use the A4 sheet instead" : "Use the camera")
-                                : "Camera + reference scale")+'</button>';
+                       + (plain
+                           ? (caps.xr
+                               ? byMode("Measure off the floor instead", "Use the A4 sheet instead")
+                               : byMode("Measure off the floor", "Use the camera"))
+                           : byMode("Camera + floor-line (reference scale as fallback)",
+                                    "Camera + reference scale"))+'</button>';
   btns += '<button class="btn'+((!caps.xr && !caps.media)?' primary':'')+'" data-arc="tierC">'
         + (plain ? "Type the numbers in" : "Manual entry (unverified)")+'</button>';
   /* Calibration costs a tape measure and five minutes. It only pays for itself
      on the camera path, so it is not put in front of someone who is about to
      use AR and will never touch a reference. */
-  if(caps.media && (!plain || !caps.xr))
+  if(caps.media && (!plain || !caps.xr)){
+    if(MOCKUP)
+      btns += '<button class="btn ghost" data-arc="floorcal">'
+            + (plain ? "Set my height once (needs a tape measure)" : "Calibrate phone height (floor-line)…")+'</button>';
     btns += '<button class="btn ghost" data-arc="calib">'
-          + (plain ? "Set this phone up once (needs a tape measure)" : "Calibrate this device…")+'</button>';
+          + (plain ? (MOCKUP ? "Set the camera up once (sharper overlay)" : "Set this phone up once (needs a tape measure)")
+                   : "Calibrate lens (focal length)…")+'</button>';
+  }
   btns += '<button class="btn ghost" data-arc="close">Cancel</button>';
 
   arcPanel('<h2>'+(plain ? byMode("Mock the poster up","Take the photo") : "Guided poster capture")+'</h2>'
@@ -7262,7 +7545,9 @@ function arcOpen(taskId, phase){
   ARC.refPreset = MOCKUP ? "a4q" : ((ARC.refPhase === "before") ? "a4q" : "poster");
   ARC.refWmm = 210; ARC.refHmm = 297;
   arcDetRelease();
-  ARC.assumeLevel = false; ARC.pendingCalib = false;
+  floorRelease();
+  ARC.assumeLevel = false; ARC.assumeSquare = false;
+  ARC.pendingCalib = false; ARC.pendingFloorCalib = false;
   ARC.xr.focalPx = null; ARC.xr.vpW = 0; ARC.xr.vpH = 0;
   ARC.xr.pendingShot = null; ARC.xr.cam = null; ARC.xr.camIntr = null;
   ARC.xr.camAccess = false; ARC.xr.binding = null; ARC.xr.aspectWarned = false;
@@ -7289,6 +7574,7 @@ function arcClose(){
   arcStopSensors();
   arcStopCamera();
   arcDetRelease();
+  floorRelease();
   if(ARC.xr.session){ try{ ARC.xr.session.end(); }catch(e){} }
   ARC.xr.session = null; ARC.xr.hitSource = null;
   ARC.xr.binding = null; ARC.xr.pendingShot = null; ARC.xr.cam = null; ARC.xr.camIntr = null;
@@ -7441,15 +7727,25 @@ function arcTierB(){
          known-width object and dragging handles on every single capture. The
          manual modes are still one tap away and are what a failed detection
          falls back to. */
-      ARC.mode = "auto";
+      /* MOCKUP MODE, NO ARCore: floor-line is the DEFAULT and the A4 sheet is
+         the fallback, not the other way round. The merchandiser rejected taping
+         paper up in every shop, and on a bare wall the floor line is the only
+         thing in the room whose geometry is already known. The sheet is still
+         one tap away and is offered by name the moment the floor line cannot be
+         seen — shelving, stock or a plinth at the base of the wall is a real and
+         common case in retail, not a corner case.
+         VERIFICATION MODE is untouched: there the poster is on the wall and the
+         reference detector is still the right first move. */
+      ARC.mode = MOCKUP ? "floor" : "auto";
       ARC.handles = [];
-      arcDetInit();
+      if(ARC.mode === "floor") floorInit(); else arcDetInit();
       arcRenderHandles();
       arcStartSensors().then(function(r){
         if(!r.ok) toast("Tilt/roll unavailable — " + r.why, true);
       });
       arcLoop();
       if(ARC.pendingCalib){ ARC.pendingCalib = false; arcCalibPanel(); }
+      else if(ARC.pendingFloorCalib){ ARC.pendingFloorCalib = false; floorCalPanel(); }
     })
     .catch(function(err){
       const name = (err && err.name) || "";
@@ -8152,6 +8448,597 @@ function arcMeasureTierB(){
   ARC.meas.distSrc = "reference-scaled — 2-handle (" + def.label + ")";
 }
 
+/* ==========================================================
+   FLOOR-LINE — reference-free distance on a phone with no ARCore
+   ------------------------------------------------------------
+   d = h / tan θ.  Hold the phone at height h, tilt down by θ until the reticle
+   sits on the line where the wall meets the floor, and that is the horizontal
+   distance to the wall. Nothing is taped up, nothing of known size has to be in
+   frame, and the only sensor involved is the one this phone was already proven
+   to get right — the gravity vector behind "TILTED FORWARD 12°".
+
+   THE AIMING PROBLEM, HONESTLY.
+   While the reticle is on the floor line the wall is not framed; the moment the
+   phone comes up to frame the wall, the floor line leaves the view. There is no
+   way around that, so it is designed for rather than hidden:
+
+     · AIMED DOWN  — the reading is LIVE. The existing distance row does the
+       walking ("TOO CLOSE — move back 1.2 ft"), so the merchandiser walks
+       themselves to 6 ft while still looking at the floor.
+     · RAISED      — the last steady reading is HELD. It is labelled HELD, its
+       age is shown, and the record says how old it was when the shutter fired.
+       It is never dressed up as a live measurement.
+     · MOVED       — a separate devicemotion listener watches gravity-removed
+       acceleration between the latch and the shutter. One step invalidates the
+       held reading outright; a jostle warns; a phone that reports no motion at
+       all says so rather than implying the merchandiser stood still.
+
+   The first ~600 ms after a latch is not counted, because raising the phone is
+   itself a wrist movement that reads like a small step on the accelerometer.
+   Everything after that is the merchandiser's own feet.
+   ========================================================== */
+
+/* ---- per-device eye height, stored exactly the way the focal calibration is:
+        one key per device string, in its own localStorage blob, tolerant of a
+        browser that refuses storage entirely. ---- */
+function floorCalKey(){ return deviceString(); }
+function floorCalAll(){
+  try{ return JSON.parse(localStorage.getItem(FLOOR_CAL_KEY) || "{}") || {}; }catch(e){ return {}; }
+}
+function floorCalGet(){
+  const r = floorCalAll()[floorCalKey()];
+  return (r && r.hM > 0) ? r : null;
+}
+function floorCalSet(rec){
+  try{
+    const all = floorCalAll();
+    all[floorCalKey()] = rec;
+    localStorage.setItem(FLOOR_CAL_KEY, JSON.stringify(all));
+  }catch(e){ toast("Could not save the height (storage unavailable).", true); }
+}
+function floorCalClear(){
+  try{
+    const all = floorCalAll();
+    delete all[floorCalKey()];
+    localStorage.setItem(FLOOR_CAL_KEY, JSON.stringify(all));
+  }catch(e){}
+}
+/* The height in force, and how much it is worth. A calibration records its own
+   uncertainty when it is solved (tape error + angle error), the same way the
+   focal calibration does — so a merchandiser who calibrated properly gets a
+   tighter error bar than one who did not, without anyone editing a constant. */
+function floorResolveHeight(){
+  const f = ARC.floor, c = floorCalGet();
+  if(c){
+    f.hM = Number(c.hM);
+    f.hRelSigma = (c.relSigma > 0) ? Number(c.relSigma) : FLOOR_DEFAULT_H_SIGMA;
+    f.calibrated = true;
+    f.hSrc = "measured on this phone — " + f.hM.toFixed(2) + " m, solved from "
+           + Number(c.distFt).toFixed(1) + " ft at " + Number(c.thetaDeg).toFixed(1) + "°, "
+           + fmtD(c.ts);
+  } else {
+    f.hM = FLOOR_DEFAULT_H_M;
+    f.hRelSigma = FLOOR_DEFAULT_H_SIGMA;
+    f.calibrated = false;
+    f.hSrc = "stated default " + FLOOR_DEFAULT_H_M.toFixed(2) + " m — never measured on this phone";
+  }
+  return f;
+}
+
+/* ---- the gravity vector, from whichever sensor is actually reporting ---- */
+function floorGravity(){
+  const s = ARC.sensors, m = ARC.floor.motion;
+  if(s.beta != null || s.gamma != null)
+    return GEO.applyScreenAngle(GEO.gravityFromOrientation(s.alpha, s.beta, s.gamma), arcScreenAngle());
+  if(m.g) return GEO.applyScreenAngle(m.g, arcScreenAngle());
+  return null;
+}
+/* Depression of the OPTICAL AXIS below horizontal. Not the negated HUD pitch —
+   see GEO.depressionFromGravity for why roll makes those two different. */
+function floorDepressionDeg(){
+  const g = floorGravity();
+  if(!g) return null;
+  const th = GEO.depressionFromGravity(g);
+  return isFinite(th) ? th : null;
+}
+
+/* ---- movement between the measurement and the shutter ---- */
+function floorMotionAttach(){
+  const m = ARC.floor.motion;
+  if(m.onMot || typeof window.DeviceMotionEvent === "undefined") return;
+  m.onMot = function(e){
+    const gi = e.accelerationIncludingGravity;
+    if(gi && (gi.x != null || gi.y != null || gi.z != null)){
+      const v = GEO.vnorm([-(gi.x||0), -(gi.y||0), -(gi.z||0)]);
+      if(isFinite(v[0]) && isFinite(v[1]) && isFinite(v[2])) m.g = v;
+    }
+    /* Prefer the gravity-REMOVED vector where the UA offers one (iOS always
+       does). Failing that, subtract the magnitude of gravity from the raw
+       magnitude. That is crude — it under-reads a purely horizontal push — but
+       it only has to separate "stood still" from "took a step", and it is never
+       integrated into a displacement, which would drift uselessly. */
+    let a = null;
+    const la = e.acceleration;
+    if(la && (la.x != null || la.y != null || la.z != null))
+      a = Math.hypot(la.x||0, la.y||0, la.z||0);
+    else if(gi && (gi.x != null || gi.y != null || gi.z != null))
+      a = Math.abs(Math.hypot(gi.x||0, gi.y||0, gi.z||0) - 9.80665);
+    if(a == null || !isFinite(a)) return;
+    m.seen = true;
+    const now = Date.now();
+    // the raise itself is a wrist movement, not a step — do not charge it
+    if(m.since && now - m.since < FLOOR_RAISE_GRACE_MS) return;
+    if(a > m.peak) m.peak = a;
+    if(a >= FLOOR_STEP_ACCEL && now - m.lastPeakAt >= FLOOR_STEP_GAP_MS){
+      m.steps++; m.lastPeakAt = now;
+    }
+  };
+  try{ window.addEventListener("devicemotion", m.onMot, true); m.on = true; }catch(e){ m.onMot = null; }
+}
+function floorMotionDetach(){
+  const m = ARC.floor.motion;
+  if(m.onMot){
+    try{ window.removeEventListener("devicemotion", m.onMot, true); }catch(e){}
+    m.onMot = null;
+  }
+  m.on = false;
+}
+/* Restart the movement account. `seen` deliberately survives: it records
+   whether this device EVER reports motion, which is a property of the phone,
+   not of this reading. */
+function floorMotionMark(){
+  const m = ARC.floor.motion;
+  m.since = Date.now(); m.steps = 0; m.peak = 0; m.lastPeakAt = 0;
+}
+
+/* ---- the angular band ----
+   ONE place decides whether an angle may be reported, so the HUD, the note on
+   the record and the self-test can never disagree about it. */
+function floorGuard(thetaDeg){
+  if(thetaDeg == null || !isFinite(thetaDeg))
+    return { ok:false, code:"nosensor",
+             why:"No tilt reading from this phone yet — tap “Enable motion sensors”." };
+  if(thetaDeg <= 0)
+    return { ok:false, code:"up",
+             why:"The phone is level or aiming upwards, so the line never reaches the floor. Tilt it DOWN." };
+  if(thetaDeg < FLOOR_MIN_DEPRESSION)
+    return { ok:false, code:"shallow",
+             why:"Only " + thetaDeg.toFixed(0) + "° down — nearly straight ahead. At that angle the sum "
+                + "divides by almost nothing and the distance runs away, so it will not be shown. "
+                + "Tilt further down until the line sits where the wall meets the floor." };
+  if(thetaDeg > FLOOR_MAX_DEPRESSION)
+    return { ok:false, code:"steep",
+             why:thetaDeg.toFixed(0) + "° down is almost straight at the ground — that is the floor by "
+                + "your own feet, not the bottom of the wall. Raise the phone a little." };
+  return { ok:true, code:"ok", why:"" };
+}
+/* Total 1σ on the depression angle: the jitter actually MEASURED off this
+   phone's sensor over the last window, floored so a heavily filtered UA cannot
+   claim to be perfect, added in quadrature with how precisely a person can put
+   a reticle on a line across a room. */
+function floorThetaSigma(){
+  const f = ARC.floor;
+  const jitter = Math.max(f.thetaSigma == null ? 0 : f.thetaSigma, FLOOR_PITCH_SIGMA_FLOOR);
+  return arcQuad(jitter, FLOOR_AIM_SIGMA_DEG);
+}
+
+/* ---- one sampling pass, called from arcTick ---- */
+function floorStep(){
+  const f = ARC.floor;
+  const now = Date.now();
+  const raw = floorDepressionDeg();
+  f.thetaRaw = raw;
+
+  /* A short rolling window. The MEDIAN is what gets used, because one spike
+     from a bump should not move the reading; the SPREAD of the window is the
+     sensor noise term in the error budget, measured rather than assumed. */
+  if(raw != null){
+    f.samples.push({ t:now, th:raw });
+    while(f.samples.length && now - f.samples[0].t > FLOOR_SAMPLE_MS) f.samples.shift();
+    if(f.samples.length > 240) f.samples.splice(0, f.samples.length - 240);
+  } else if(f.samples.length && now - f.samples[f.samples.length-1].t > FLOOR_SAMPLE_MS){
+    f.samples.length = 0;
+  }
+  const n = f.samples.length;
+  if(n >= 3){
+    const v = f.samples.map(function(s){ return s.th; }).sort(function(a,b){ return a-b; });
+    const med = (n % 2) ? v[(n-1)>>1] : (v[n/2-1] + v[n/2])/2;
+    let s2 = 0;
+    for(let i=0; i<n; i++){ const dv = f.samples[i].th - med; s2 += dv*dv; }
+    f.theta = med;
+    f.thetaSigma = Math.sqrt(s2/(n-1));
+  } else if(raw != null){
+    f.theta = raw; f.thetaSigma = null;
+  } else {
+    f.theta = null; f.thetaSigma = null;
+  }
+
+  const g = floorGuard(f.theta);
+  if(!g.ok){
+    f.live = null; f.why = g.why; f.code = g.code;
+    return;
+  }
+  /* Mid-raise the window holds samples from BOTH the floor aim and the wall
+     aim. Their median is a number that never corresponded to any real aim, yet
+     it sits comfortably inside the band — so it would print as a confident live
+     distance for the better part of a second. The spread gives it away: 18° of
+     scatter is not sensor noise. Refuse rather than flash a fiction. */
+  if(f.thetaSigma != null && f.thetaSigma > FLOOR_LIVE_SIGMA_DEG){
+    f.live = null; f.code = "moving";
+    f.why = "The phone is still swinging. Hold it steady with the line on the wall/floor join.";
+    return;
+  }
+  const sTh = floorThetaSigma();
+  const dFt = GEO.mToFt(GEO.floorLineDistance(f.hM, f.theta));
+  if(!(isFinite(dFt) && dFt >= FLOOR_DIST_MIN_FT && dFt <= FLOOR_DIST_MAX_FT)){
+    f.live = null; f.code = "range";
+    f.why = isFinite(dFt)
+      ? ("That angle works out to " + dFt.toFixed(0) + " ft, which is not a wall inside a shop — "
+         + "check the line really is on the wall/floor join.")
+      : "That angle does not solve to a distance at all.";
+    return;
+  }
+  const err = GEO.floorLineError({ h:f.hM, heightRelSigma:f.hRelSigma,
+                                   thetaDeg:f.theta, thetaSigmaDeg:sTh });
+  f.live = { distFt:dFt, theta:f.theta, thetaSigma:sTh, err:err, at:now };
+  f.why = ""; f.code = "ok";
+  /* Latch only once the angle has STOPPED MOVING. A reading taken mid-swing is
+     the one thing a held value must never be. Every fresh latch also restarts
+     the movement account, so "have you moved?" is always measured from the
+     reading that is actually on screen. */
+  if(f.thetaSigma != null && f.thetaSigma <= FLOOR_LATCH_SIGMA_DEG){
+    f.hold = { distFt:dFt, theta:f.theta, thetaSigma:sTh, err:err, at:now };
+    floorMotionMark();
+  }
+}
+
+/* Is the held reading still worth offering, and what has to be said about it? */
+function floorHoldState(){
+  const f = ARC.floor, m = f.motion;
+  if(!f.hold)
+    return { ok:false, code:"none", age:0,
+             why:"Nothing measured yet. Tilt the phone down until the line sits where the wall meets the floor." };
+  const age = Date.now() - f.hold.at;
+  if(age > FLOOR_HOLD_MAX_MS)
+    return { ok:false, code:"stale", age:age,
+             why:"That reading is " + Math.round(age/1000) + " s old — too old to trust. "
+                + "Tilt down onto the floor line again." };
+  if(m.seen && m.steps >= 1)
+    return { ok:false, code:"moved", age:age,
+             why:"You have moved since that reading" + (m.steps > 1 ? " (" + m.steps + " steps)" : "")
+                + ", so the distance no longer holds. Tilt down onto the floor line again." };
+  let warn = "";
+  if(!m.seen)
+    warn = "This phone is not reporting movement, so the app cannot tell whether you walked after taking "
+         + "that reading. If you moved at all, measure again.";
+  else if(m.peak >= FLOOR_STIR_ACCEL)
+    warn = "The phone was jostled after that reading. It does not look like a step, but if you shifted "
+         + "your feet, measure again.";
+  else if(age > FLOOR_HOLD_WARN_MS)
+    warn = "That reading is " + Math.round(age/1000) + " s old.";
+  return { ok:true, code:"held", age:age, why:"", warn:warn };
+}
+
+/* ---- what the rest of the app sees ----
+   Writes the SAME fields arcMeasureTierB writes, so arcGates(), the HUD, the
+   ruler, the arming ring and arcBuildRecord are all untouched. There is exactly
+   one distance gate and this feeds it. */
+function floorMeasure(){
+  const f = ARC.floor;
+  ARC.meas.refError = null;
+  ARC.meas.heldMs = null;
+  ARC.meas.yawDeg = null; ARC.meas.yawVerified = false;
+  ARC.meas.homPitchDeg = null;
+  ARC.meas.floorReading = null;
+
+  if(f.live){
+    f.state = "live"; f.warn = "";
+    ARC.meas.distFt = f.live.distFt;
+    ARC.meas.refError = f.live.err;
+    ARC.meas.wallSeen = true;
+    ARC.meas.floorReading = f.live;
+    ARC.meas.distSrc = "floor-line, LIVE — reticle on the wall/floor join at "
+      + f.live.theta.toFixed(1) + "° below horizontal, height "
+      + f.hM.toFixed(2) + " m (" + (f.calibrated ? "measured on this phone" : "stated default") + ")";
+    return;
+  }
+  const h = floorHoldState();
+  if(h.ok){
+    f.state = "held"; f.warn = h.warn;
+    ARC.meas.distFt = f.hold.distFt;
+    ARC.meas.refError = f.hold.err;
+    ARC.meas.heldMs = h.age;
+    ARC.meas.wallSeen = true;
+    ARC.meas.floorReading = f.hold;
+    ARC.meas.distSrc = "floor-line, HELD — measured " + (h.age/1000).toFixed(1)
+      + " s earlier at " + f.hold.theta.toFixed(1) + "° below horizontal, height "
+      + f.hM.toFixed(2) + " m (" + (f.calibrated ? "measured on this phone" : "stated default") + ")"
+      + (f.motion.seen ? (f.motion.steps ? "; MOVED since" : "; no step detected since")
+                       : "; this device reports no movement data");
+    return;
+  }
+  f.state = h.code;
+  f.warn = "";
+  ARC.meas.distFt = null;
+  ARC.meas.wallSeen = false;
+  /* When there is nothing held at all, the useful thing to say is why the LIVE
+     reading is refused (they are aiming wrong). Once something has been held,
+     why it can no longer be used is the more useful thing. */
+  ARC.meas.distSrc = (h.code === "none") ? (f.why || h.why) : h.why;
+}
+
+/* ---- entering and leaving the mode ---- */
+function floorInit(){
+  const f = ARC.floor;
+  f.on = true;
+  f.samples = []; f.live = null; f.hold = null;
+  f.theta = null; f.thetaSigma = null; f.thetaRaw = null;
+  f.state = "none"; f.why = ""; f.warn = ""; f.code = "none";
+  f.calibrating = null;
+  f.motion.seen = false; f.motion.g = null;
+  floorMotionMark();
+  floorResolveHeight();
+  floorMotionAttach();
+}
+function floorRelease(){
+  const f = ARC.floor;
+  f.on = false;
+  f.samples = []; f.live = null; f.hold = null; f.calibrating = null;
+  f.theta = null; f.thetaSigma = null;
+  floorMotionDetach();
+}
+
+/* ---- calibration: solve h from a distance the merchandiser measured once ----
+   Deliberately NOT "type in your chest height". People do not know it, and the
+   ones who guess guess badly. Standing a tape-measured distance from any wall
+   and aiming at the floor line solves the same unknown from the same geometry
+   the method itself uses, so a systematic aiming habit partly cancels out. */
+function floorCalPanel(){
+  const c = floorCalGet();
+  const plain = (myRole() === "Merchandiser");
+  arcPanel('<h2>' + (plain ? "Teach it how tall you are" : "Calibrate phone height (floor-line)") + '</h2>'
+    + '<p>' + (plain
+        ? 'It works out distance from how far down you tilt the phone — so it needs to know how high off '
+          + 'the floor you hold it. You only do this once on this phone.'
+        : 'Floor-line distance is <span class="mono">d = h / tan θ</span>. θ comes from the phone; '
+          + '<span class="mono">h</span> is solved here from one known distance, and its uncertainty is '
+          + 'recorded with it and carried into every later error bar.') + '</p>'
+    + '<ol><li>Find a wall with clear floor at the bottom of it.</li>'
+    + '<li>Measure a distance from that wall with a tape (or use a fixture you know the size of) and stand there.</li>'
+    + '<li>Tap start, then tilt the phone down until the line sits exactly where the wall meets the floor.</li>'
+    + '<li>Hold still and tap save.</li></ol>'
+    + '<div class="field"><label class="fl" for="fcal_d">Measured distance you are standing from the wall (ft)</label>'
+    +   '<input id="fcal_d" type="number" step="0.05" min="1" max="30" value="5.0"></div>'
+    + '<div class="hint">Around <b>5 ft</b> is the sweet spot: it puts the tilt near 45°, where the angle '
+    + 'matters least and the solve is tightest.</div>'
+    + (c ? '<div class="hint">Saved for this phone: <b class="num">' + Number(c.hM).toFixed(2) + ' m</b> '
+        + '(± ' + (Number(c.relSigma||FLOOR_DEFAULT_H_SIGMA)*100).toFixed(1) + '%), from '
+        + Number(c.distFt).toFixed(1) + ' ft at ' + Number(c.thetaDeg).toFixed(1) + '°, ' + fmtD(c.ts) + '.</div>' : '')
+    + '<div class="pfoot"><button class="btn primary" data-arc="floorcalstart">Start — aim at the floor line</button>'
+    + (c ? '<button class="btn danger" data-arc="floorcalclear">Clear</button>' : '')
+    + '<button class="btn" data-arc="floorcalback">Back to camera</button></div>');
+  ARC.panel = "floorcal";
+}
+function floorCalStart(){
+  const dFt = parseFloat((arcEl("fcal_d")||{}).value);
+  if(!(dFt >= 1 && dFt <= 30)){
+    toast("Enter the distance you measured, in feet.", true);
+    return;
+  }
+  ARC.floor.calibrating = { knownFt: dFt };
+  arcPanel(null);
+  if(ARC.tier === "B") arcLoop();
+}
+function floorCalSave(){
+  const f = ARC.floor;
+  const cal = f.calibrating;
+  if(!cal){ return; }
+  const th = f.theta;
+  const g = floorGuard(th);
+  if(!g.ok){ toast(g.why, true); return; }
+  if(f.thetaSigma != null && f.thetaSigma > FLOOR_LATCH_SIGMA_DEG){
+    toast("The phone is still moving — hold it steady on the floor line for a second.", true);
+    return;
+  }
+  const dM = GEO.ftToM(cal.knownFt);
+  const hM = GEO.floorLineHeight(dM, th);
+  if(!(hM >= FLOOR_CAL_H_MIN_M && hM <= FLOOR_CAL_H_MAX_M)){
+    toast("That solves to " + (isFinite(hM) ? hM.toFixed(2) + " m" : "nothing usable")
+      + ", which is not a person holding a phone. Check the distance you typed and that the line is on "
+      + "the wall/floor join.", true);
+    return;
+  }
+  /* h = d·tan θ, so σh/h is the quadrature sum of the relative errors of the two
+     things that went in: the tape reading, and the angle. The angle term is
+     σθ/(sinθ·cosθ) — the same expression that appears in the distance error,
+     because it is the same derivative rearranged. */
+  const sTh = floorThetaSigma();
+  const s = Math.sin(GEO.rad(th)), c = Math.cos(GEO.rad(th));
+  const relSigma = arcQuad(CALIB_DIST_SIGMA_FT/cal.knownFt, GEO.rad(sTh)/(s*c));
+  floorCalSet({ hM:hM, relSigma:relSigma, thetaDeg:th, thetaSigmaDeg:sTh,
+                distFt:cal.knownFt, ts:new Date().toISOString(), device:deviceString() });
+  f.calibrating = null;
+  f.hold = null; f.samples = [];
+  floorResolveHeight();
+  toast("Height set: " + hM.toFixed(2) + " m (" + (hM*M_TO_FT).toFixed(2) + " ft), ± "
+    + (relSigma*100).toFixed(1) + "%.");
+}
+
+/* ---- the status bar (renders into #arDetBar, alongside the detector's) ---- */
+function floorBarHtml(){
+  const f = ARC.floor;
+  const plain = (myRole() === "Merchandiser");
+  const rows = [];
+  const row = function(cls, msg, btns){
+    return '<div class="detrow"><span class="detmsg' + (cls ? " " + cls : "") + '">' + msg + '</span>'
+         + (btns || "") + '</div>';
+  };
+  const a4Btn = '<button class="arbtn pe" data-arc="floorfallback">'
+    + (plain ? "Use an A4 sheet instead" : "Fall back to reference scale") + '</button>';
+
+  /* --- calibration in progress: this takes over the bar --- */
+  if(f.calibrating){
+    const th = f.theta;
+    const g = floorGuard(th);
+    const hM = g.ok ? GEO.floorLineHeight(GEO.ftToM(f.calibrating.knownFt), th) : NaN;
+    const steady = (f.thetaSigma != null && f.thetaSigma <= FLOOR_LATCH_SIGMA_DEG);
+    rows.push(row(g.ok ? "" : "warn",
+      '<b>Setting your height</b> — stand ' + f.calibrating.knownFt.toFixed(1)
+      + ' ft from the wall and put the line exactly where the wall meets the floor.'));
+    rows.push(row(g.ok && steady ? "" : "warn",
+      g.ok
+        ? ('Tilt <b>' + th.toFixed(1) + '°</b> down' + (steady ? ' · steady' : ' · <b>hold still</b>')
+           + ' → height <b>' + (isFinite(hM) ? hM.toFixed(2) + ' m' : '—') + '</b>')
+        : esc(g.why),
+      '<button class="arbtn pe' + (g.ok && steady ? ' on' : '') + '" data-arc="floorcalsave">Save</button>'
+      + '<button class="arbtn pe" data-arc="floorcalcancel">Cancel</button>'));
+    return rows.join("");
+  }
+
+  /* --- the height in force. Shouted about while it is a guess, because that is
+         the single term that puts the reading over the 5 % budget; once it is
+         measured it lives quietly in the chip strip instead. --- */
+  if(!f.calibrated){
+    rows.push(row("warn",
+      '<b>ROUGH</b> — using a standard ' + f.hM.toFixed(2) + ' m ('
+      + (f.hM*M_TO_FT).toFixed(1) + ' ft) phone height, not yours. That alone is worth ± '
+      + (FLOOR_DEFAULT_H_SIGMA*100).toFixed(0) + '%.',
+      '<button class="arbtn pe on" data-arc="floorcal">'
+        + (plain ? "Set my height" : "Calibrate height") + '</button>'));
+  }
+
+  /* --- the live / held distinction, said plainly --- */
+  const err = ARC.meas.refError;
+  const ePct = err ? (' · ± ' + err.pct.toFixed(1) + '%') : '';
+  if(f.state === "live"){
+    const shallow = f.theta < FLOOR_SHALLOW_WARN_DEG;
+    rows.push(row(shallow ? "warn" : "",
+      '<b>LIVE</b> — reading the floor line at ' + f.theta.toFixed(1) + '° down' + ePct
+      + (shallow ? ' · shallow angle, the error grows fast here — tilt further down if you can' : '')
+      + (plain ? ' · walk until the distance says OK, then raise the phone' : '')));
+  } else if(f.state === "held"){
+    const age = (ARC.meas.heldMs || 0)/1000;
+    rows.push(row(f.warn ? "warn" : "",
+      '<b>HELD</b> — this is not live. Measured <b>' + age.toFixed(0) + ' s ago</b> at '
+      + f.hold.theta.toFixed(1) + '° down' + ePct
+      + (f.warn ? ' · ' + esc(f.warn) : (f.motion.seen ? ' · you have not moved since' : '')),
+      '<button class="arbtn pe" data-arc="floorremeasure">Measure again</button>'));
+  } else {
+    rows.push(row("warn", '<b>No distance</b> — ' + esc(ARC.meas.distSrc || f.why || ""),
+      f.state === "nosensor" ? '<button class="arbtn pe" data-arc="sensors">Enable motion sensors</button>' : ""));
+  }
+
+  /* --- squareness: the one gate this method genuinely cannot see --- */
+  if(ARC.meas.distFt != null && !ARC.assumeSquare){
+    rows.push(row("warn",
+      plain
+        ? '<b>Last thing</b> — the app cannot tell whether you are facing the wall straight on, because '
+          + 'there is nothing on it to look at. Stand square to the wall, then confirm.'
+        : '<b>Yaw unmeasurable</b> — a bare wall offers no keystone. Confirm squareness by eye; the '
+          + 'capture is recorded with <span class="mono">yaw_verified = false</span>.',
+      '<button class="arbtn pe on" data-arc="square">'
+        + (plain ? "I'm facing the wall square-on" : "Confirm square by eye") + '</button>'));
+  }
+
+  /* --- the honest fallback ---
+     Spelled out while nothing is being measured, which is exactly when a hidden
+     floor line is the likely cause; reduced to the button once a reading is
+     coming, so the bar does not crowd the distance readout on a small screen. */
+  const working = (f.state === "live" || f.state === "held");
+  rows.push(row("",
+    working
+      ? (plain ? 'Floor line hidden further along the wall?' : 'Occluded floor line?')
+      : (plain
+          ? 'Shelving, stock or a plinth along the bottom of the wall? Then the floor line is hidden and '
+            + 'this will not work — tape up an A4 sheet instead.'
+          : 'If the wall/floor join is occluded (shelving, stock, skirting plinths — common in retail), '
+            + 'reference scale from a taped A4 sheet is the fallback.'),
+    a4Btn));
+  return rows.join("");
+}
+
+/* ---- the reticle ---- */
+function floorDrawReticle(ctx, cw, ch, g){
+  const f = ARC.floor;
+  const y = ch/2 + ARC.nudge.y;
+  const live = (f.state === "live");
+  const held = (f.state === "held");
+  const colour = live ? "rgba(45,212,191,.95)" : held ? "rgba(148,163,184,.85)" : "rgba(251,191,36,.9)";
+  ctx.save();
+  ctx.strokeStyle = colour;
+  ctx.lineWidth = live ? 2.5 : 2;
+  if(!live) ctx.setLineDash([9,6]);
+  ctx.beginPath();
+  ctx.moveTo(cw*0.06, y); ctx.lineTo(cw*0.94, y);
+  ctx.stroke();
+  ctx.setLineDash([]);
+  // end ticks, so the line reads as an instrument rather than a scratch
+  ctx.beginPath();
+  ctx.moveTo(cw*0.06, y-7); ctx.lineTo(cw*0.06, y+7);
+  ctx.moveTo(cw*0.94, y-7); ctx.lineTo(cw*0.94, y+7);
+  ctx.stroke();
+  ctx.font = "800 11px ui-monospace, Menlo, monospace";
+  ctx.textAlign = "center";
+  ctx.fillStyle = colour;
+  const label = (myRole() === "Merchandiser")
+    ? (live ? "PUT THIS LINE WHERE THE WALL MEETS THE FLOOR"
+            : held ? "HELD — MEASURED A MOMENT AGO" : "TILT DOWN ONTO THE WALL/FLOOR JOIN")
+    : ((f.theta == null ? "θ —" : "θ " + f.theta.toFixed(1) + "°")
+       + " · " + (live ? "LIVE" : held ? "HELD" : "NO READING"));
+  ctx.fillText(label, cw/2, y - 12);
+  ctx.restore();
+  void g;
+}
+
+/* ---- the placement record ---- */
+function floorBuildRecord(p){
+  const f = ARC.floor, r = ARC.meas.floorReading;
+  p.method = "floor-line";
+  p.methodLabel = METHOD_META["floor-line"].label;
+  p.floorHeightM   = +Number(f.hM).toFixed(3);
+  p.floorHeightPct = +(f.hRelSigma*100).toFixed(2);
+  p.floorCalibrated = !!f.calibrated;
+  p.floorHeightSource = f.hSrc;
+  p.floorMotionSeen = !!f.motion.seen;
+  if(r){
+    p.floorThetaDeg      = +r.theta.toFixed(2);
+    p.floorThetaSigmaDeg = +r.thetaSigma.toFixed(2);
+    p.errorPct   = +r.err.pct.toFixed(2);
+    p.errorTerms = { height:+(r.err.terms.height*100).toFixed(2),
+                     pitch: +(r.err.terms.pitch*100).toFixed(2) };
+    p.floorHeldS = +((ARC.meas.heldMs || 0)/1000).toFixed(1);
+    p.floorLive  = (ARC.meas.heldMs == null);
+    /* How many feet the answer moves per degree of aim, AT THE ANGLE USED. This
+       is the number that makes a shallow reading obviously worse than a steep
+       one, and it is computed, not looked up. */
+    p.floorFtPerDeg = +Math.abs(GEO.mToFt(GEO.floorLineDDdTheta(f.hM, r.theta))*GEO.D2R).toFixed(3);
+  }
+}
+function floorNotes(p, notes){
+  if(p.method !== "floor-line") return;
+  notes.push("Distance came from FLOOR-LINE TRIGONOMETRY (d = h / tan θ) — nothing of a known size was in "
+    + "frame and nothing was taped to the wall. It assumes the floor is level and the wall vertical.");
+  if(!p.floorCalibrated)
+    notes.push("The phone height was the stated default of " + FLOOR_DEFAULT_H_M.toFixed(2) + " m, NOT measured "
+      + "on this device. That single term is worth ± " + (FLOOR_DEFAULT_H_SIGMA*100).toFixed(1)
+      + "% and dominates the error bar above.");
+  if(p.floorThetaDeg != null && p.floorThetaDeg < FLOOR_SHALLOW_WARN_DEG)
+    notes.push("Aimed only " + p.floorThetaDeg.toFixed(1) + "° below horizontal, near the shallow end of the "
+      + "usable band, where the answer moves " + p.floorFtPerDeg + " ft per degree of aim.");
+  if(p.floorLive === false)
+    notes.push("The distance was measured " + p.floorHeldS + " s BEFORE the shutter fired, with the phone "
+      + "aimed down at the floor line, and held while the phone was raised to frame the wall. "
+      + (p.floorMotionSeen
+          ? "Movement sensing saw no step in between."
+          : "This device reported no movement data, so whether the merchandiser walked in between is UNKNOWN."));
+  if(p.floorThetaDeg != null)
+    notes.push("[floor h=" + p.floorHeightM.toFixed(3) + "m/" + p.floorHeightPct.toFixed(2)
+      + "% ang=" + p.floorThetaDeg.toFixed(2) + "deg/" + p.floorThetaSigmaDeg.toFixed(2)
+      + "deg err=" + p.errorPct.toFixed(2) + "% (height " + p.errorTerms.height.toFixed(2)
+      + " / pitch " + p.errorTerms.pitch.toFixed(2) + ") age=" + p.floorHeldS.toFixed(1)
+      + "s cal=" + (p.floorCalibrated ? "device" : "default") + "]");
+}
+
 /* gate evaluation — one place, used by the HUD, the shutter and the record */
 function arcGates(){
   const t = ARC.task, s = ARC.sensors;
@@ -8168,10 +9055,20 @@ function arcGates(){
     if(roll  == null) roll  = 0;
     assumed = true;
   }
-  const yaw = ARC.meas.yawVerified ? ARC.meas.yawDeg : null;
+  /* Squareness. A reference rectangle recovers yaw from its keystone and the XR
+     path gets it from the wall plane; floor-line trigonometry measures distance
+     and NOTHING else, and a bare wall offers no keystone to read, so on that
+     path yaw is genuinely unmeasurable rather than merely absent. This is the
+     exact shape of the assume-level override that already exists for a phone
+     with no attitude sensor: the merchandiser states it, the gate accepts the
+     stated value, and the record says it was stated and not measured
+     (yaw_verified stays false, and the note says so in words). */
+  let yaw = ARC.meas.yawVerified ? ARC.meas.yawDeg : null;
+  let yawAssumed = false;
+  if(ARC.assumeSquare && yaw == null){ yaw = 0; yawAssumed = true; }
   const g = {
     distance: d, delta: (d==null?null:d - t.standoffFt),
-    pitch: pitch, roll: roll, yaw: yaw,
+    pitch: pitch, roll: roll, yaw: yaw, yawAssumed: yawAssumed,
     distOk: d != null && Math.abs(d - t.standoffFt) <= tol,
     pitchOk: pitch != null && Math.abs(pitch) <= atol,
     rollOk:  roll  != null && Math.abs(roll)  <= atol,
@@ -8204,7 +9101,13 @@ function arcNudgeNorm(){
 function arcTick(){
   if(!ARC.open) return;
   if(ARC.panel) { arcDrawOverlay(null); return; }
-  if(ARC.tier === "B"){ arcDetStep(); arcMeasureTierB(); }
+  /* Two measurement sources, ONE gate. Whichever one runs, it writes the same
+     ARC.meas fields and everything downstream — arcGates, the ruler, the arming
+     ring, the shutter, arcBuildRecord — is unchanged and unaware. */
+  if(ARC.tier === "B"){
+    if(ARC.mode === "floor"){ floorStep(); floorMeasure(); }
+    else { ARC.meas.heldMs = null; ARC.meas.floorReading = null; arcDetStep(); arcMeasureTierB(); }
+  }
   const g = arcGates();
   ARC.lastGates = g;
 
@@ -8234,9 +9137,15 @@ function arcRenderHud(g, prog){
     /* Tier letters are a reviewer's vocabulary. The person holding the phone is
        told what the phone is doing instead. The tier itself is unchanged and
        still lands on the placement row. */
+    /* Tier Be is reached two different ways now — an assumed focal length, and
+       floor-line trigonometry — and they do not deserve the same words. The
+       tier letter on the record is untouched either way. */
+    const floorNow = (ARC.tier === "B" && ARC.mode === "floor");
     badge.textContent = (myRole() === "Merchandiser")
-      ? (TIER_FIELD_LABEL[tierKey] || TIER_FIELD_LABEL.C)
-      : tm.label;
+      ? (floorNow
+          ? (ARC.floor.calibrated ? "Measuring off the floor" : "Rough — height not set")
+          : (TIER_FIELD_LABEL[tierKey] || TIER_FIELD_LABEL.C))
+      : (floorNow ? tm.label + " · floor-line" : tm.label);
   }
 
   // distance
@@ -8265,6 +9174,13 @@ function arcRenderHud(g, prog){
       dEl.className = "arstat no";
       dEl.innerHTML = "TOO FAR — move in " + g.delta.toFixed(1) + " ft"
         + '<span class="sub">' + g.distance.toFixed(1) + ' ft of ' + Number(t.standoffFt).toFixed(1) + ' ft' + eTxt + '</span>';
+    }
+    /* A HELD reading is not a live one, and the big number must never imply it
+       is. The tag rides on the same row so it cannot be missed, and the sub-line
+       says how long ago the phone was actually aimed at the floor. */
+    if(ARC.meas.heldMs != null && g.distance != null){
+      dEl.innerHTML = '<span class="heldtag">HELD ' + Math.round(ARC.meas.heldMs/1000) + ' s AGO</span> '
+        + dEl.innerHTML;
     }
   }
   // ruler
@@ -8301,11 +9217,17 @@ function arcRenderHud(g, prog){
   else setStat("arRoll", false, "ROLLED " + Math.abs(g.roll).toFixed(0) + "° — level the phone");
 
   const pfy = (myRole() === "Merchandiser");
-  if(!g.yawVerified) setStat("arYaw", null,
+  const floorMode = (ARC.tier === "B" && ARC.mode === "floor");
+  if(!g.yawVerified && g.yawAssumed) setStat("arYaw", true,
+    pfy ? "FACING THE WALL — you said so" : "SQUARE — stated, not measured",
+    pfy ? "nothing on the wall to check it against" : "yaw_verified = false on the record");
+  else if(!g.yawVerified) setStat("arYaw", null,
     pfy ? "CAN'T TELL IF YOU'RE SQUARE ON" : "YAW UNVERIFIED",
-    ARC.tier === "B"
-      ? (pfy ? "mark all 4 corners and it can" : "switch to 4-handle quad mode to check")
-      : (pfy ? "still looking for the wall"    : "no wall plane yet"));
+    floorMode
+      ? (pfy ? "confirm it below once you're square" : "unmeasurable on a bare wall — confirm by eye")
+      : ARC.tier === "B"
+        ? (pfy ? "mark all 4 corners and it can" : "switch to 4-handle quad mode to check")
+        : (pfy ? "still looking for the wall"    : "no wall plane yet"));
   else if(g.yawOk)   setStat("arYaw", true, (pfy ? "STRAIGHT ON " : "SQUARE ") + n1(g.yaw) + "°");
   else setStat("arYaw", false, (pfy ? "AT AN ANGLE " : "OFF-AXIS ") + Math.abs(g.yaw).toFixed(0)
     + "° — move round so you face the wall");
@@ -8342,7 +9264,13 @@ function arcRenderHud(g, prog){
       if(ARC.xr.depth) bits.push('<span class="archip">depth</span>');
       if(ARC.xr.anchors) bits.push('<span class="archip">anchors</span>');
     }
-    if(ARC.tier === "B") bits.push('<span class="archip">' + esc(arcRefDef().label) + '</span>');
+    if(ARC.tier === "B" && ARC.mode === "floor"){
+      bits.push('<span class="archip">h ' + ARC.floor.hM.toFixed(2) + ' m'
+        + (ARC.floor.calibrated ? '' : ' (default)') + '</span>');
+      bits.push('<span class="archip">θ '
+        + (ARC.floor.theta == null ? '—' : ARC.floor.theta.toFixed(1) + '°') + '</span>');
+    }
+    else if(ARC.tier === "B") bits.push('<span class="archip">' + esc(arcRefDef().label) + '</span>');
     if(ARC.tier === "B" && ARC.mode === "auto" && ARC.det.passes){
       bits.push('<span class="archip">detect ' + Math.round(ARC.det.meanMs) + ' ms · '
         + ARC.det.workW + '×' + ARC.det.workH + ' · ' + ARC.det.fps + ' fps'
@@ -8356,7 +9284,8 @@ function arcRenderHud(g, prog){
   const tools = arcEl("arTools");
   const attitudeLive = (g.pitch != null && g.roll != null && !g.attitudeAssumed);
   const key = [ARC.tier, ARC.mode, ARC.sensors.on?1:0, ARC.assumeLevel?1:0,
-               attitudeLive?1:0, ARC.focal.estimated?1:0].join("|");
+               attitudeLive?1:0, ARC.focal.estimated?1:0,
+               ARC.assumeSquare?1:0, ARC.floor.calibrated?1:0].join("|");
   if(tools && tools.dataset.tier !== key){
     tools.dataset.tier = key;
     let h = "";
@@ -8366,17 +9295,36 @@ function arcRenderHud(g, prog){
     if(!attitudeLive) h += '<button class="arbtn pe'+(ARC.assumeLevel?" on":"")+'" data-arc="assume">'
       + (pf ? "I am holding it straight" : "Assume level (not verified)") + '</button>';
     if(ARC.tier === "B"){
-      h += '<button class="arbtn pe'+(ARC.mode==="auto"?" on":"")+'" data-arc="modeauto">'
-        + (pf ? "Find it for me" : "Auto-detect") + '</button>';
-      h += '<button class="arbtn pe'+(ARC.mode==="two"?" on":"")+'" data-arc="mode2">'
-        + (pf ? "Mark 2 points" : "2-handle") + '</button>';
-      h += '<button class="arbtn pe'+(ARC.mode==="quad"?" on":"")+'" data-arc="mode4">'
-        + (pf ? "Mark 4 corners" : "4-handle quad") + '</button>';
-      h += '<button class="arbtn pe" data-arc="refpick">'
-        + (pf ? "Change what I am using" : "Reference…") + '</button>';
+      /* Floor-line first, because on a phone with no ARCore pointed at an empty
+         wall it is the method that needs nothing carried to site. */
+      h += '<button class="arbtn pe'+(ARC.mode==="floor"?" on":"")+'" data-arc="modefloor">'
+        + (pf ? "Measure off the floor" : "Floor-line (no reference)") + '</button>';
+      if(ARC.mode === "floor"){
+        h += '<button class="arbtn pe'+(ARC.assumeSquare?" on":"")+'" data-arc="square">'
+          + (pf ? "I'm facing the wall" : "Square by eye") + '</button>';
+        h += '<button class="arbtn pe" data-arc="floorcal">'
+          + (pf ? (ARC.floor.calibrated ? "Redo my height" : "Set my height — sizes are rough")
+                : (ARC.floor.calibrated ? "Re-calibrate height" : "Calibrate height — default in use")) + '</button>';
+      }
+      if(ARC.mode !== "floor"){
+        h += '<button class="arbtn pe'+(ARC.mode==="auto"?" on":"")+'" data-arc="modeauto">'
+          + (pf ? "Find it for me" : "Auto-detect") + '</button>';
+        h += '<button class="arbtn pe'+(ARC.mode==="two"?" on":"")+'" data-arc="mode2">'
+          + (pf ? "Mark 2 points" : "2-handle") + '</button>';
+        h += '<button class="arbtn pe'+(ARC.mode==="quad"?" on":"")+'" data-arc="mode4">'
+          + (pf ? "Mark 4 corners" : "4-handle quad") + '</button>';
+        h += '<button class="arbtn pe" data-arc="refpick">'
+          + (pf ? "Change what I am using" : "Reference…") + '</button>';
+      }
+      /* In floor mode the lens plays no part in the DISTANCE; it only scales the
+         poster that gets drawn. Saying "sizes are rough" there would point at
+         the wrong calibration. */
       h += '<button class="arbtn pe" data-arc="calib">'
-        + (pf ? (ARC.focal.estimated ? "Set this phone up — sizes are rough" : "Set this phone up again")
-              : (ARC.focal.estimated ? "Calibrate — readings are estimated" : "Re-calibrate")) + '</button>';
+        + (ARC.mode === "floor"
+            ? (pf ? (ARC.focal.estimated ? "Sharpen the poster size" : "Redo the camera setup")
+                  : (ARC.focal.estimated ? "Calibrate lens (overlay scale only)" : "Re-calibrate lens"))
+            : (pf ? (ARC.focal.estimated ? "Set this phone up — sizes are rough" : "Set this phone up again")
+                  : (ARC.focal.estimated ? "Calibrate — readings are estimated" : "Re-calibrate"))) + '</button>';
     }
     h += '<button class="arbtn pe" data-arc="recentre">Re-centre poster</button>';
     tools.innerHTML = h;
@@ -8524,7 +9472,9 @@ function arcRenderDetBar(){
   if(!box) return;
   const d = ARC.det;
   let html = "";
-  if(ARC.tier === "B" && ARC.mode === "auto"){
+  if(ARC.tier === "B" && ARC.mode === "floor"){
+    html = floorBarHtml();
+  } else if(ARC.tier === "B" && ARC.mode === "auto"){
     const pct = Math.round(d.conf*100);
     const meter = '<span class="conf'+(d.conf >= DET_LOCK_CONF ? ' hi' : '')+'">'
       + '<i style="width:'+clamp(pct,0,100)+'%"></i></span>';
@@ -8592,6 +9542,8 @@ function arcDrawOverlay(g){
   ctx.beginPath(); ctx.moveTo(ccx-14, ccy); ctx.lineTo(ccx+14, ccy);
   ctx.moveTo(ccx, ccy-14); ctx.lineTo(ccx, ccy+14); ctx.stroke();
   ctx.restore();
+
+  if(ARC.mode === "floor" && ARC.tier === "B") floorDrawReticle(ctx, cw, ch, g);
 
   if(ARC.mode === "auto" && ARC.tier === "B"){
     const d = ARC.det, q = d.locked ? d.quad : d.cand;
@@ -8920,11 +9872,32 @@ function arcGeoFix(t){
     }catch(e){ clearTimeout(bail); fallback("geolocation threw"); }
   });
 }
+/* FLOOR-LINE IS ALWAYS TIER 'Be', WHATEVER THE LENS IS DOING.
+
+   `Be` is the existing letter for "a real capture whose measurement chain is
+   not tight enough to stand as verified evidence", and that is an honest
+   description of a distance derived from one body height and one sensor angle
+   with the floor assumed level. Using it also means is_verified is untouched in
+   BOTH the applied schema (AR only) and the pending 0005 (AR + Bq/B): 'Be' is
+   unverified in each, so nothing about what counts as verified moves.
+
+   The alternative — a ninth tier letter — is a migration. `placements.tier` is
+   a Postgres ENUM and `placements.tier_rank` is a stored generated column that
+   CASEs over exactly eight labels, so adding one means ALTER TYPE plus a table
+   rewrite. The brief says not to write one, so the method travels on its own
+   axis instead: see METHOD_META and the [floor …] note tag. */
 function arcTierKey(){
   return ARC.tier === "A" ? (ARC.meas.depthUsed ? "Ad" : "A")
-       : ARC.tier === "B" ? (ARC.focal.estimated ? "Be"
-           : ((ARC.mode === "quad" || ARC.mode === "auto") ? "Bq" : "B"))
+       : ARC.tier === "B" ? ((ARC.mode === "floor") ? "Be"
+           : (ARC.focal.estimated ? "Be"
+              : ((ARC.mode === "quad" || ARC.mode === "auto") ? "Bq" : "B")))
        : "C";
+}
+/* Which of the three ways of getting a distance produced this capture. */
+function arcMethodKey(){
+  if(ARC.tier === "A") return "xr-hit-test";
+  if(ARC.tier === "B") return (ARC.mode === "floor") ? "floor-line" : "reference-scale";
+  return "manual";
 }
 function arcBuildRecord(g, tierKey, focalPx, captureMode, camInfo){
   const t = ARC.task;
@@ -8952,7 +9925,13 @@ function arcBuildRecord(g, tierKey, focalPx, captureMode, camInfo){
      The database has no dedicated columns for these yet (see
      supabase/migrations/0005_*.sql, part 2), so the same facts are also folded
      into `note`, which is persisted, in a form a human can read. */
-  if(ARC.tier === "B"){
+  /* The method is recorded on every capture, not only the new one, so a
+     reviewer never has to infer it from a tier letter. */
+  p.method = arcMethodKey();
+  p.methodLabel = methodMeta(p.method).label;
+  if(ARC.tier === "B" && ARC.mode === "floor"){
+    floorBuildRecord(p);
+  } else if(ARC.tier === "B"){
     const rdef = arcRefDef();
     const e = ARC.meas.refError;
     p.refSource = rdef.key; p.refLabel = rdef.label;
@@ -8974,8 +9953,15 @@ function arcBuildRecord(g, tierKey, focalPx, captureMode, camInfo){
                        corner:+(e.terms.corner*100).toFixed(2), barrel:+(e.terms.barrel*100).toFixed(2) };
     }
   }
+  /* `pass` is unchanged: every gate held, it was not typed in by hand, and the
+     tilt/roll were really measured. A yaw the merchandiser stated by eye does
+     NOT fail the capture — it was never measurable on a bare wall — but it is
+     recorded as unverified below, exactly as 2-handle reference mode already
+     was, and it can never make a capture verified because floor-line is tier
+     Be and tier Be is unverified in every version of the schema. */
   p.pass = !!(g.all && tierKey !== "C" && !g.attitudeAssumed);
   p.attitudeAssumed = !!g.attitudeAssumed;
+  p.yawAssumed = !!g.yawAssumed;
   p.ts = new Date().toISOString();
   p.angleSource = ARC.tier === "A"
     ? "yaw + tilt from the hit-test plane normal; roll from the gravity-aligned XR viewer pose"
@@ -8983,13 +9969,31 @@ function arcBuildRecord(g, tierKey, focalPx, captureMode, camInfo){
   const notes = [];
   if(tierKey === "C") notes.push("Unverified — distance and angles were typed in, not measured.");
   if(g.attitudeAssumed) notes.push("Tilt and roll were assumed level because this device has no attitude sensor — squareness is NOT verified.");
-  if(!g.yawVerified && tierKey !== "C") notes.push("Yaw obliqueness not verified — 2-handle reference mode cannot see keystone.");
-  if(tierKey === "Be") notes.push("Focal length is an assumed " + ASSUMED_HFOV_DEG + "° HFOV. Calibrate the device for a real number.");
+  if(!g.yawVerified && tierKey !== "C")
+    notes.push(p.method === "floor-line"
+      ? ("Yaw obliqueness not verified — floor-line trigonometry measures distance only, and a bare wall "
+         + "has no keystone to read squareness from."
+         + (g.yawAssumed ? " The merchandiser confirmed by eye that they were standing square." : ""))
+      : "Yaw obliqueness not verified — 2-handle reference mode cannot see keystone.");
+  if(tierKey === "Be"){
+    notes.push(p.method === "floor-line"
+      ? ("Recorded at tier Be. Floor-line distance is a real measurement, but its chain — one body height "
+         + "plus one sensor angle, with the floor assumed level — is not tight enough to stand as verified "
+         + "evidence, and the schema has no separate letter for it."
+         + (ARC.focal.estimated
+             ? " The lens is also uncalibrated: that plays no part in the distance, but the poster is DRAWN "
+               + "at f·W/d, so it still scales the overlay. Calibrate the device to tighten the picture."
+             : ""))
+      : "Focal length is an assumed " + ASSUMED_HFOV_DEG + "° HFOV. Calibrate the device for a real number.");
+  }
+  floorNotes(p, notes);
   if(p.captureMode === "handover" && isARTier(tierKey))
     notes.push("Photographed after the AR session handed the camera back, so the frame is a fraction of a second later than the measurement.");
   if(camInfo && camInfo.aspectAgrees === false)
     notes.push("The raw camera image aspect differed from the view frustum; the poster was projected with separate fx/fy to compensate.");
-  if(p.errorPct != null){
+  /* Floor-line also sets errorPct, and writes its own [floor …] tag above — the
+     [ref …] tag is only meaningful when there really was a reference. */
+  if(p.errorPct != null && p.refSource){
     notes.push("[ref " + p.refSource + " " + p.refWmm + "x" + p.refHmm + "mm"
       + (p.refAuto ? " auto conf=" + p.refConfidence : " manual")
       + " err=" + p.errorPct + "% (focal " + p.errorTerms.focal + " / dim " + p.errorTerms.refDim
@@ -9440,6 +10444,60 @@ function arcDiagRender(busyMsg){
         : "tap Benchmark detector — runs the real detector on a synthetic frame, no camera needed");
   }
 
+  /* Floor-line, for a manager or an admin looking at why a field reading was
+     what it was. The merchandiser's HUD says "tilt down until the line sits
+     where the wall meets the floor"; this says d = h/tan θ and shows the terms. */
+  h += arcDiagSection("Floor-line distance (d = h / tan θ)");
+  {
+    const f = ARC.floor;
+    const fcal = floorCalGet();
+    h += arcDiagRow("Mode active", ARC.mode === "floor" ? "yes" : "no",
+                    ARC.mode === "floor" ? "ok" : null,
+                    MOCKUP ? "default on a non-AR phone in mockup mode" : "reference scale is default in verification mode");
+    h += arcDiagRow("Phone height h", (f.hM == null ? "—" : Number(f.hM).toFixed(3) + " m")
+                      + (f.hRelSigma == null ? "" : "  ± " + (f.hRelSigma*100).toFixed(2) + " %"),
+                    fcal ? "ok" : "warn",
+                    fcal ? "solved from " + Number(fcal.distFt).toFixed(1) + " ft at "
+                           + Number(fcal.thetaDeg).toFixed(1) + "°"
+                         : "stated default — ± " + (FLOOR_DEFAULT_H_SIGMA*100).toFixed(1)
+                           + " % on its own, over the 5 % field budget");
+    h += arcDiagRow("Depression θ (roll-invariant)",
+                    f.theta == null ? "—" : Number(f.theta).toFixed(2) + "°",
+                    f.theta == null ? null : (floorGuard(f.theta).ok ? "ok" : "bad"),
+                    "band " + FLOOR_MIN_DEPRESSION + "–" + FLOOR_MAX_DEPRESSION
+                      + "°; asin(-g_z), NOT the HUD pitch (roll would corrupt that)");
+    h += arcDiagRow("Measured sensor jitter σ",
+                    f.thetaSigma == null ? "—" : Number(f.thetaSigma).toFixed(3) + "°", null,
+                    "sample spread over the last " + FLOOR_SAMPLE_MS + " ms; floored at "
+                      + FLOOR_PITCH_SIGMA_FLOOR + "° and combined with the "
+                      + FLOOR_AIM_SIGMA_DEG + "° aiming term");
+    h += arcDiagRow("Total σ_θ used",
+                    (f.theta == null ? "—" : floorThetaSigma().toFixed(3) + "°"));
+    h += arcDiagRow("∂d/∂θ at this angle",
+                    (f.theta == null || f.hM == null) ? "—"
+                      : (GEO.mToFt(GEO.floorLineDDdTheta(f.hM, f.theta))*GEO.D2R).toFixed(3) + " ft per degree",
+                    null, "-h/sin²θ — the term that explodes at shallow aim");
+    h += arcDiagRow("State", f.state || "—",
+                    f.state === "live" ? "ok" : f.state === "held" ? "warn" : null,
+                    f.state === "held" && ARC.meas.heldMs != null
+                      ? "held " + (ARC.meas.heldMs/1000).toFixed(1) + " s"
+                      : (f.why || ""));
+    h += arcDiagRow("Movement since the latch",
+                    f.motion.seen
+                      ? (f.motion.steps + " step" + (f.motion.steps === 1 ? "" : "s")
+                         + " · peak " + f.motion.peak.toFixed(2) + " m/s²")
+                      : "no devicemotion data",
+                    f.motion.seen ? (f.motion.steps ? "bad" : "ok") : "warn",
+                    "step ≥ " + FLOOR_STEP_ACCEL + " m/s², jostle ≥ " + FLOOR_STIR_ACCEL
+                      + ", first " + FLOOR_RAISE_GRACE_MS + " ms after a latch ignored (the raise itself)");
+    h += arcDiagRow("Estimated distance error",
+                    ARC.meas.refError && ARC.mode === "floor"
+                      ? "± " + ARC.meas.refError.pct.toFixed(2) + " %" : "—",
+                    ARC.meas.refError && ARC.mode === "floor"
+                      ? (ARC.meas.refError.pct <= 5 ? "ok" : "bad") : null,
+                    "√( (σ_h/h)² + (σ_θ/(sinθ·cosθ))² ) — derived, never a constant");
+  }
+
   h += arcDiagSection("Tracking");
   h += arcDiagRow("Hit-test results", d.hitResults, d.hitResults ? "ok" : null,
                   "0 ⇒ move the phone slowly so the wall is found");
@@ -9808,10 +10866,34 @@ document.getElementById("arlayer").addEventListener("click", function(e){
                       ? "Tilt and roll assumed level — the capture will be recorded as NOT verified."
                       : "Assumed-level override off.", ARC.assumeLevel);
                     break;
-    case "modeauto": ARC.mode = "auto"; ARC.handles = []; arcRenderHandles();
+    case "modefloor": floorRelease(); arcDetRelease();
+                      ARC.mode = "floor"; ARC.handles = []; arcRenderHandles();
+                      floorInit(); break;
+    case "square":  ARC.assumeSquare = !ARC.assumeSquare;
+                    toast(ARC.assumeSquare
+                      ? "Squareness taken from you, not measured — the capture records it as unverified."
+                      : "Squareness confirmation withdrawn.", ARC.assumeSquare);
+                    break;
+    case "floorcal":      if(!ARC.stream){ ARC.pendingFloorCalib = true; arcTierB(); }
+                          else floorCalPanel();
+                          break;
+    case "floorcalstart": floorCalStart(); break;
+    case "floorcalsave":  floorCalSave(); break;
+    case "floorcalcancel":ARC.floor.calibrating = null; break;
+    case "floorcalclear": floorCalClear(); floorResolveHeight();
+                          toast("Height cleared — back to the rough default."); floorCalPanel(); break;
+    case "floorcalback":  arcPanel(null); if(ARC.tier === "B") arcLoop(); break;
+    case "floorremeasure": ARC.floor.hold = null; ARC.floor.samples = [];
+                           toast("Tilt down onto the floor line again."); break;
+    case "floorfallback": floorRelease(); ARC.mode = "auto"; ARC.handles = [];
+                          arcRenderHandles(); arcDetInit();
+                          toast("Switched to the A4 sheet — tape one flat on the wall and keep it in shot.");
+                          break;
+    case "modeauto": floorRelease();
+                     ARC.mode = "auto"; ARC.handles = []; arcRenderHandles();
                      arcDetInit(); break;
-    case "mode2":   ARC.mode = "two";  arcResetHandles(); break;
-    case "mode4":   ARC.mode = "quad";
+    case "mode2":   floorRelease(); ARC.mode = "two";  arcResetHandles(); break;
+    case "mode4":   floorRelease(); ARC.mode = "quad";
                     // seed from whatever the detector last saw rather than a
                     // default box in the middle of the screen
                     if(ARC.det.quad || ARC.det.cand) arcDetToManual();
@@ -9837,6 +10919,7 @@ document.getElementById("arlayer").addEventListener("click", function(e){
       const def = arcRefDef();
       /* A reference the detector can look for goes straight back to automatic;
          a width-only one has no rectangle to find, so it stays manual. */
+      floorRelease();
       if(def && def.auto){ ARC.mode = "auto"; ARC.handles = []; arcDetInit(); }
       else ARC.mode = (def && def.quad) ? "quad" : "two";
       arcPanel(null);
@@ -10508,6 +11591,287 @@ function runSelfTest(){
       T("a landscape reference is recognised as the same sheet rotated",
         !!(rot && rot.quad && rot.flipped), true,
         null, "both orientations are scored; the better rectFit wins");
+    })();
+  })();
+
+  /* ==========================================================
+     Floor-line trigonometry — the reference-free method
+     ----------------------------------------------------------
+     Four kinds of assertion:
+       1. known h/θ pairs recover known distances, and the calibration solve
+          inverts the measurement solve exactly;
+       2. the error DERIVATIVE ∂d/∂θ = -h/sin²θ against values computed by
+          hand, and against a numerical difference of the function it
+          differentiates — which is the only check that catches a sign error
+          or a stray degree/radian conversion;
+       3. the degenerate-angle guards at both ends of the band;
+       4. the depression angle is roll-invariant, which the HUD pitch is not —
+          the single reason GEO.depressionFromGravity exists.
+     ========================================================== */
+  (function floorLineTests(){
+    const R2 = Math.SQRT2;
+
+    /* --- 1. known pairs, hand-computable --- */
+    // 45°: tan 45 = 1, so d == h exactly.
+    T("floor-line: h=1.5 m at 45° → d = 1.5 m", GEO.floorLineDistance(1.5, 45), 1.5, 1e-12,
+      "tan 45° = 1");
+    // 30°: tan 30 = 1/√3, so d = h·√3.
+    T("floor-line: h=1.5 m at 30° → d = h·√3", GEO.floorLineDistance(1.5, 30), 1.5*Math.sqrt(3), 1e-12);
+    // 60°: tan 60 = √3, so d = h/√3.
+    T("floor-line: h=1.5 m at 60° → d = h/√3", GEO.floorLineDistance(1.5, 60), 1.5/Math.sqrt(3), 1e-12);
+    // The field case the whole feature exists for: 6 ft standoff.
+    const hField = 1.45, dField = GEO.ftToM(6);
+    const thField = GEO.deg(Math.atan(hField/dField));
+    T("floor-line: the 6 ft field case needs 38.4° of tilt", thField, 38.4098, 1e-3,
+      "atan(1.45 / 1.8288)");
+    T("  …and that tilt returns 6.00 ft", GEO.mToFt(GEO.floorLineDistance(hField, thField)), 6, 1e-9);
+    T("floor-line: shallow aim reaches across a big store",
+      GEO.mToFt(GEO.floorLineDistance(1.45, 12)), 22.3810, 1e-3);
+
+    /* --- the calibration solve is the same identity rearranged --- */
+    T("floor-line: floorLineHeight inverts floorLineDistance",
+      GEO.floorLineHeight(GEO.floorLineDistance(1.62, 37), 37), 1.62, 1e-12);
+    T("floor-line: floorLineDistance inverts floorLineHeight",
+      GEO.floorLineDistance(GEO.floorLineHeight(2.4, 52), 52), 2.4, 1e-12);
+    // calibration at a measured 5 ft, for a person holding the phone at 1.45 m
+    const thCal = GEO.deg(Math.atan(1.45/GEO.ftToM(5)));
+    T("floor-line: calibrating at 5 ft solves the height back out",
+      GEO.floorLineHeight(GEO.ftToM(5), thCal), 1.45, 1e-12);
+    T("  …and 5 ft really does sit near the 45° sweet spot", thCal, 43.5746, 1e-3,
+      "which is why the calibration copy suggests it");
+
+    /* --- 2. the derivative, against hand-computed values --- */
+    // At 30°, sin 30 = 1/2, so -h/sin²θ = -4h. At 45°, sin²45 = 1/2, so -2h.
+    T("floor-line: ∂d/∂θ = -h/sin²θ at 30° is -4h", GEO.floorLineDDdTheta(1.5, 30), -6, 1e-12,
+      "-1.5/0.25");
+    T("floor-line: …at 45° is -2h", GEO.floorLineDDdTheta(1.5, 45), -3, 1e-12, "-1.5/0.5");
+    T("floor-line: …at 90° is -h", GEO.floorLineDDdTheta(1.5, 90 - 1e-9), -1.5, 1e-6);
+    T("floor-line: …is always negative — tilting down brings the wall nearer",
+      GEO.floorLineDDdTheta(1.45, 12) < 0 && GEO.floorLineDDdTheta(1.45, 70) < 0, true);
+    T("floor-line: …and is ~17× larger at 12° than at 60°",
+      GEO.floorLineDDdTheta(1.45, 12)/GEO.floorLineDDdTheta(1.45, 60),
+      Math.pow(Math.sin(GEO.rad(60))/Math.sin(GEO.rad(12)), 2), 1e-9,
+      "sin²60 / sin²12 = 17.4 — this is what a shallow aim costs");
+    // numerical check: the analytic derivative must match a central difference
+    (function(){
+      const h = 1.45, th = 33, e = 1e-5;
+      const num = (GEO.floorLineDistance(h, th+e) - GEO.floorLineDistance(h, th-e))/(2*GEO.rad(e));
+      T("floor-line: analytic ∂d/∂θ matches a central difference",
+        GEO.floorLineDDdTheta(h, th), num, 1e-6, "catches a stray deg/rad conversion");
+    })();
+
+    /* --- the error budget the merchandiser is shown --- */
+    // With no height error at all, the whole budget is σθ/(sinθ·cosθ); at 45°
+    // that collapses to exactly 2σθ in radians.
+    const e45 = GEO.floorLineError({ h:1.45, heightRelSigma:0, thetaDeg:45, thetaSigmaDeg:0.5 });
+    T("floor-line error: at 45° the angle term is exactly 2σ_θ",
+      e45.rel, 2*GEO.rad(0.5), 1e-12, "sinθ·cosθ = 1/2");
+    T("  …which is 1.745 % for half a degree of aim", e45.pct, 1.7453, 1e-3);
+    T("floor-line error: terms add in quadrature and nothing else",
+      GEO.floorLineError({ h:1.45, heightRelSigma:0.03, thetaDeg:45, thetaSigmaDeg:0.5 }).rel,
+      Math.sqrt(0.03*0.03 + Math.pow(2*GEO.rad(0.5), 2)), 1e-12);
+    T("floor-line error: an uncertain height passes straight through at 45°",
+      GEO.floorLineError({ h:1.45, heightRelSigma:0.04, thetaDeg:45, thetaSigmaDeg:0 }).rel, 0.04, 1e-12,
+      "∂d/∂h = cot θ = d/h, so σ_h/h is scale-free");
+    T("floor-line error: the angle term is symmetric about 45°",
+      GEO.floorLineError({ h:1, heightRelSigma:0, thetaDeg:30, thetaSigmaDeg:0.5 }).rel,
+      GEO.floorLineError({ h:1, heightRelSigma:0, thetaDeg:60, thetaSigmaDeg:0.5 }).rel, 1e-12,
+      "sinθ·cosθ = sin(2θ)/2");
+    T("floor-line error: a 12° aim costs 1/sin(24°) = 2.46× a 45° one",
+      GEO.floorLineError({ h:1.45, heightRelSigma:0, thetaDeg:12, thetaSigmaDeg:0.6 }).pct
+        / GEO.floorLineError({ h:1.45, heightRelSigma:0, thetaDeg:45, thetaSigmaDeg:0.6 }).pct,
+      1/Math.sin(GEO.rad(24)), 1e-9, "2σ/sin 2θ — the error is symmetric about 45°");
+    T("floor-line error: a CALIBRATED phone meets the 5 % field budget at 6 ft",
+      GEO.floorLineError({ h:hField, heightRelSigma:0.023, thetaDeg:thField,
+                           thetaSigmaDeg:arcQuad(FLOOR_PITCH_SIGMA_FLOOR, FLOOR_AIM_SIGMA_DEG) }).pct <= 5,
+      true, null,
+      GEO.floorLineError({ h:hField, heightRelSigma:0.023, thetaDeg:thField,
+                           thetaSigmaDeg:arcQuad(FLOOR_PITCH_SIGMA_FLOOR, FLOOR_AIM_SIGMA_DEG) }).pct.toFixed(2) + " %");
+    T("floor-line error: the UNCALIBRATED default does NOT, which is why it is badged ROUGH",
+      GEO.floorLineError({ h:FLOOR_DEFAULT_H_M, heightRelSigma:FLOOR_DEFAULT_H_SIGMA, thetaDeg:thField,
+                           thetaSigmaDeg:arcQuad(FLOOR_PITCH_SIGMA_FLOOR, FLOOR_AIM_SIGMA_DEG) }).pct > 5,
+      true, null,
+      GEO.floorLineError({ h:FLOOR_DEFAULT_H_M, heightRelSigma:FLOOR_DEFAULT_H_SIGMA, thetaDeg:thField,
+                           thetaSigmaDeg:arcQuad(FLOOR_PITCH_SIGMA_FLOOR, FLOOR_AIM_SIGMA_DEG) }).pct.toFixed(2) + " %");
+
+    /* --- 3. degenerate angles: the singularities, then the policy band --- */
+    T("floor-line: θ = 0 is refused outright (tan θ → 0, d → ∞)",
+      isFinite(GEO.floorLineDistance(1.45, 0)), false);
+    T("floor-line: a negative θ is refused (the ray never meets the floor)",
+      isFinite(GEO.floorLineDistance(1.45, -5)), false);
+    T("floor-line: θ = 90 is refused (aimed at their own feet)",
+      isFinite(GEO.floorLineDistance(1.45, 90)), false);
+    T("floor-line: θ > 90 is refused", isFinite(GEO.floorLineDistance(1.45, 100)), false);
+    T("floor-line: a zero height is refused", isFinite(GEO.floorLineDistance(0, 40)), false);
+    T("floor-line: the derivative refuses the same degenerate angles",
+      isFinite(GEO.floorLineDDdTheta(1.45, 0)) || isFinite(GEO.floorLineDDdTheta(1.45, 90)), false);
+    T("floor-line: the error at θ → 0 is infinite, not a small number",
+      isFinite(GEO.floorLineError({ h:1.45, heightRelSigma:0.02, thetaDeg:0, thetaSigmaDeg:0.5 }).rel),
+      false, null, "a NaN here would print as a plausible ± and be believed");
+    // the policy band, which is much narrower than the singularity
+    T("floorGuard: refuses a horizon aim and says why",
+      floorGuard(FLOOR_MIN_DEPRESSION - 0.5).code, "shallow", 0);
+    T("floorGuard: refuses aiming at your own feet and says why",
+      floorGuard(FLOOR_MAX_DEPRESSION + 0.5).code, "steep", 0);
+    T("floorGuard: refuses a level or upward aim", floorGuard(0).code, "up", 0);
+    T("floorGuard: refuses a missing sensor rather than assuming level",
+      floorGuard(null).code, "nosensor", 0);
+    T("floorGuard: accepts the bottom of the band", floorGuard(FLOOR_MIN_DEPRESSION).ok, true);
+    T("floorGuard: accepts the top of the band", floorGuard(FLOOR_MAX_DEPRESSION).ok, true);
+    T("floorGuard: accepts the 6 ft field case", floorGuard(thField).ok, true);
+    T("floorGuard: every refusal carries a reason the field can act on",
+      [0, -3, FLOOR_MIN_DEPRESSION-1, FLOOR_MAX_DEPRESSION+1, null]
+        .every(function(v){ const g = floorGuard(v); return !g.ok && g.why.length > 20; }), true);
+    T("floorGuard: the band never reaches either singularity",
+      FLOOR_MIN_DEPRESSION > 0 && FLOOR_MAX_DEPRESSION < 90, true);
+    // …and the band really does keep the error inside a usable range
+    T("floor-line: at the shallow edge of the band the error is still bounded",
+      GEO.floorLineError({ h:1.45, heightRelSigma:0.023, thetaDeg:FLOOR_MIN_DEPRESSION,
+                           thetaSigmaDeg:0.6 }).pct < 15, true, null,
+      GEO.floorLineError({ h:1.45, heightRelSigma:0.023, thetaDeg:FLOOR_MIN_DEPRESSION,
+                           thetaSigmaDeg:0.6 }).pct.toFixed(2) + " % — reported, but loudly");
+
+    /* --- 4. depression is roll-invariant; the HUD pitch is not --- */
+    // gravity for a camera aiming 40° down, held perfectly upright
+    const dep = 40, sd = Math.sin(GEO.rad(dep)), cd = Math.cos(GEO.rad(dep));
+    const gUp = [0, -cd, -sd];
+    T("depressionFromGravity: recovers 40° from an upright phone",
+      GEO.depressionFromGravity(gUp), 40, 1e-9);
+    T("  …and tiltFromGravity agrees while there is no roll",
+      -GEO.tiltFromGravity(gUp).pitchDeg, 40, 1e-9);
+    // the SAME physical aim, rolled 30° about the optical axis: x,y rotate, z does not
+    const rr = GEO.rad(30);
+    const gRoll = [ 0*Math.cos(rr) - (-cd)*Math.sin(rr), 0*Math.sin(rr) + (-cd)*Math.cos(rr), -sd ];
+    T("depressionFromGravity: SAME 40° when the phone is rolled 30°",
+      GEO.depressionFromGravity(gRoll), 40, 1e-9,
+      "asin(-g_z) — roll only mixes x and y");
+    T("  …whereas the HUD pitch reads 4.1° too steep, which is a 13 % distance error",
+      -GEO.tiltFromGravity(gRoll).pitchDeg, 44.0953, 1e-3,
+      "this is precisely why the method does not reuse it");
+    T("  …and the distances they would report differ by more than 10 %",
+      Math.abs(GEO.floorLineDistance(1.45, 44.0953) - GEO.floorLineDistance(1.45, 40))
+        / GEO.floorLineDistance(1.45, 40) > 0.10, true);
+    T("depressionFromGravity: a level phone is 0° down",
+      GEO.depressionFromGravity([0, -1, 0]), 0, 1e-9);
+    T("depressionFromGravity: a phone aimed straight down is 90°",
+      GEO.depressionFromGravity([0, 0, -1]), 90, 1e-9);
+    T("depressionFromGravity: aiming UP reports a negative depression",
+      GEO.depressionFromGravity([0, -cd, sd]), -40, 1e-9);
+    T("depressionFromGravity: survives the beta = ±90 gimbal the same way tilt does",
+      GEO.depressionFromGravity(GEO.gravityFromOrientation(0, 78, 0)), 12, 1e-6,
+      "the HUD's own 'TILTED FORWARD 12°' case");
+    T("depressionFromGravity: screen rotation does not change it",
+      GEO.depressionFromGravity(GEO.applyScreenAngle(gRoll, 90)),
+      GEO.depressionFromGravity(gRoll), 1e-12,
+      "applyScreenAngle only mixes x and y");
+    void R2;
+
+    /* --- the method axis, and the note tag that carries it --- */
+    T("METHOD_META covers every method arcMethodKey can produce",
+      ["xr-hit-test","reference-scale","floor-line","manual"]
+        .every(function(k){ return !!METHOD_META[k]; }), true);
+    T("methodFromTier: AR tiers imply the AR method",
+      methodFromTier("Asd") + "," + methodFromTier("A"), "xr-hit-test,xr-hit-test", 0);
+    T("methodFromTier: hand-typed implies manual", methodFromTier("C"), "manual", 0);
+    T("methodFromTier: everything else implies reference scale",
+      methodFromTier("Bq") + "," + methodFromTier("Be"), "reference-scale,reference-scale", 0);
+    T("floor-line is tier Be, so is_verified is untouched in BOTH schema states",
+      TIER_META.Be.verified, false, 0,
+      "unverified in 0001 (AR only) and in the pending 0005 (AR + Bq/B)");
+    T("floor-line does not add a ninth verification_tier enum value",
+      Object.keys(TIER_META).length, 8, 0, "a ninth would be a migration");
+    (function(){
+      const note = "Distance came from FLOOR-LINE TRIGONOMETRY (d = h / tan θ). "
+        + "[floor h=1.452m/2.30% ang=38.41deg/0.61deg err=3.12% (height 2.30 / pitch 2.11) "
+        + "age=4.2s cal=device] Yaw obliqueness not verified.";
+      const p = floorEvidenceFromNote(note, {});
+      T("floor note tag round-trip: method", p.method, "floor-line", 0);
+      T("floor note tag round-trip: height and its sigma",
+        p.floorHeightM + "/" + p.floorHeightPct, "1.452/2.3", 0);
+      T("floor note tag round-trip: angle and its sigma",
+        p.floorThetaDeg + "/" + p.floorThetaSigmaDeg, "38.41/0.61", 0);
+      T("floor note tag round-trip: error percentage", p.errorPct, 3.12, 1e-9);
+      T("floor note tag round-trip: error terms",
+        p.errorTerms.height + "/" + p.errorTerms.pitch, "2.3/2.11", 0);
+      T("floor note tag round-trip: how stale the reading was", p.floorHeldS, 4.2, 1e-9);
+      T("floor note tag round-trip: calibrated flag", p.floorCalibrated, true);
+      T("floor note tag round-trip: a default-height capture is not marked calibrated",
+        floorEvidenceFromNote("[floor h=1.450m/8.50% ang=40.00deg/0.60deg err=8.90% "
+          + "(height 8.50 / pitch 2.63) age=0.0s cal=default]", {}).floorCalibrated, false);
+      T("floor note tag round-trip: a reference-scale note is not read as floor-line",
+        floorEvidenceFromNote("[ref a4q 210x297mm manual err=3.1% (focal 2 / dim 0.24 "
+          + "/ corner 0.9 / barrel 0) r=0.1]", {}).method, undefined, 0);
+      T("floor note tag round-trip: a null note is safe",
+        Object.keys(floorEvidenceFromNote(null, {})).length, 0, 0);
+      T("the two note tags coexist without either shadowing the other",
+        (function(){
+          const both = "[ref a4q 210x297mm manual err=3.1% (focal 2 / dim 0.24 / corner 0.9 "
+            + "/ barrel 0) r=0.1] [floor h=1.500m/2.00% ang=45.00deg/0.50deg err=2.62% "
+            + "(height 2.00 / pitch 1.70) age=0.0s cal=device]";
+          const q = refEvidenceFromNote(both, {});
+          floorEvidenceFromNote(both, q);
+          return q.refSource === "a4q" && q.method === "floor-line";
+        })(), true);
+    })();
+
+    /* --- an end-to-end accuracy sweep, run the way the field runs it ---
+       For a grid of heights, true distances and height-calibration qualities:
+       solve the exact θ, perturb it by one σ, and check the recovered distance
+       lands inside the error bar the app would have printed. This is the
+       assertion that would fail if the geometry, the derivative or the budget
+       ever drifted apart from one another. */
+    (function(){
+      const sTh = arcQuad(FLOOR_PITCH_SIGMA_FLOOR, FLOOR_AIM_SIGMA_DEG);
+      const H_SIGMA = 0.023;              // what a careful 5 ft calibration is worth
+      let band = 0, within5 = 0, checked = 0;
+      let worstAngleRatio = 0, worstHeightErr = 0, worstPct = 0, bestPct = 100;
+      [1.25, 1.45, 1.70].forEach(function(h){
+        [4, 6, 8, 12].forEach(function(dFt){
+          const dM = GEO.ftToM(dFt);
+          const th = GEO.deg(Math.atan(h/dM));
+          if(!floorGuard(th).ok) return;
+          band++; checked++;
+          const est = GEO.floorLineError({ h:h, heightRelSigma:H_SIGMA, thetaDeg:th, thetaSigmaDeg:sTh });
+          if(est.pct <= 5) within5++;
+          worstPct = Math.max(worstPct, est.pct);
+          bestPct  = Math.min(bestPct,  est.pct);
+          /* Each term is checked against the EXACT nonlinear function, one at a
+             time. Perturbing both at once would be a 1.41σ event, not a 1σ one,
+             and would "fail" a budget that is perfectly correct. */
+          const exactTh = Math.abs(GEO.floorLineDistance(h, th + sTh) - dM)/dM;
+          worstAngleRatio = Math.max(worstAngleRatio, Math.abs(exactTh/est.terms.pitch - 1));
+          const exactH = Math.abs(GEO.floorLineDistance(h*(1+H_SIGMA), th) - dM)/dM;
+          worstHeightErr = Math.max(worstHeightErr, Math.abs(exactH - est.terms.height));
+        });
+      });
+      T("floor-line sweep: every grid point (3 heights × 4 distances) is inside the band",
+        band, 12, 0);
+      T("floor-line sweep: the angle term matches the exact function to better than 5 %",
+        worstAngleRatio < 0.05, true, null,
+        "worst linearisation gap " + (worstAngleRatio*100).toFixed(2) + " %");
+      T("floor-line sweep: the height term is exact, not linearised",
+        worstHeightErr < 1e-12, true, null, "sigma_h/h passes straight through cot theta");
+      T("floor-line sweep: a calibrated phone meets 5 % at every grid point",
+        within5, checked, 0,
+        checked + "/" + checked + " · best " + bestPct.toFixed(2)
+          + " % · worst " + worstPct.toFixed(2) + " %");
+      /* How it degrades: the same 6 ft standoff, aimed from progressively lower
+         heights so theta gets shallower. The point of the assertion is the
+         MONOTONICITY — the error must grow as the aim flattens, or the budget is
+         not tracking the derivative it claims to. */
+      (function(){
+        let prev = 0, monotonic = true, worst = 0;
+        [45, 40, 30, 20, 15, FLOOR_MIN_DEPRESSION].forEach(function(th){
+          const e = GEO.floorLineError({ h:1.45, heightRelSigma:H_SIGMA,
+                                         thetaDeg:th, thetaSigmaDeg:sTh });
+          if(e.pct < prev) monotonic = false;
+          prev = e.pct; worst = e.pct;
+        });
+        T("floor-line sweep: the error grows monotonically as the aim flattens",
+          monotonic, true, null,
+          "45 deg (the minimum) -> " + FLOOR_MIN_DEPRESSION + " deg, ending at "
+            + worst.toFixed(2) + " %");
+      })();
     })();
   })();
 
