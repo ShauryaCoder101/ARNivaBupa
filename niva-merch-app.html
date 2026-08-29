@@ -1151,6 +1151,13 @@ const ASSUMED_HFOV_DEG= 66;    // last-resort smartphone horizontal FOV
    where the wall lets them stand. */
 const FRAME_FILL_TARGET = 0.70;   // poster/frame width fraction at the recommended distance
 const FRAME_FILL_FULL   = 1.00;   // …and at the minimum workable distance
+/* …and the fraction below which standing further back is worth ONE SENTENCE and
+   never a refusal. Half the target fill, so it starts at twice the recommended
+   distance: the mockup is still complete and still honest — the artwork simply
+   sits small in a lot of wall. A merchandiser who has backed up that far has
+   usually done it because the aisle made them, and refusing a capture for a
+   preference is precisely the mistake the fixed standoff made. */
+const FRAME_FILL_LOOSE  = 0.35;
 /* The one place a recommendation must be quoted before any camera is open — the
    brief a merchandiser reads before walking into the store. Portrait, at the
    assumed lens, because that is the phone the app falls back to. The LIVE
@@ -9445,17 +9452,15 @@ function floorMeasure(){
        reading it is the statement, and the record still says the yaw was stated
        rather than measured (yaw_verified = false). See arcFieldUI. */
 function arcFloorTakeReading(){
-  const f = ARC.floor, t = ARC.task;
+  const f = ARC.floor;
   if(!f.live){ toast(arcPlainFloorWhy(f), true); return; }
-  /* Freezing a reading taken from the wrong spot would only mean being told to
-     walk and then to measure again. Refuse it here as well as in the button's
-     enabled state, so a stray tap cannot get past it. */
-  const d = f.live.distFt - t.standoffFt;
-  if(Math.abs(d) > t.standoffTolFt){
-    toast(d < 0 ? ("Move back " + Math.abs(d).toFixed(1) + " ft first — you are too close to the wall.")
-                : ("Move in " + d.toFixed(1) + " ft first — you are too far from the wall."), true);
-    return;
-  }
+  /* Freezing a reading taken from a spot the capture cannot be taken from would
+     only mean being told to walk and then to measure again. Refuse it here as
+     well as in the button's enabled state, so a stray tap cannot get past it —
+     and refuse it on the SAME TEST the button uses, which is why the decision
+     lives in floorReadingGate and not in this line. */
+  const gate = floorReadingGate(f.live.distFt);
+  if(!gate.ok){ toast(gate.why, true); return; }
   f.hold = { distFt:f.live.distFt, theta:f.live.theta, thetaSigma:f.live.thetaSigma,
              err:f.live.err, at:Date.now() };
   f.step = "frame";
@@ -9463,7 +9468,72 @@ function arcFloorTakeReading(){
   floorMotionMark();
   ARC.assumeSquare = true;
   ARC.armT0 = 0; ARC.armed = false;
-  toast("Measured " + f.live.distFt.toFixed(1) + " ft. Straighten the phone up — keep your feet where they are.");
+  toast("Measured " + f.live.distFt.toFixed(1) + " ft. Straighten the phone up — keep your feet where they are."
+        + gate.note);
+}
+
+/* ---- may this reading be frozen? ----
+   ONE place decides, so the button's enabled state, the refusal on a stray tap
+   and the self-test can never disagree about it — the same reason floorGuard
+   exists one screen earlier. The two ways of asking used to be written out
+   separately, and they drifted: the button was taught the derived standoff and
+   this refusal was not, so in mockup mode it offered a press it then rejected
+   with "Move in 6.0 ft first — you are too far from the wall", against a band
+   the mode had already stopped using.
+
+   VERIFICATION IS UNTOUCHED. There the capture is evidence measured against the
+   manager's spec, so both directions are hard stops at t.standoffFt ± tol and
+   the wording is verbatim what it always was.
+
+   MOCKUP asks the only question the mode can ask — can the artwork be drawn
+   complete from here?
+
+     · TOO CLOSE stays a hard stop. Below the minimum the poster cannot fit the
+       frame at all, so there is nothing to capture; and it is also where the
+       floor-line reading itself is worst, since a near wall means a steep θ and
+       ∂d/∂θ = -h/sin²θ is at its most unforgiving there. Refusing is a
+       statement about the measurement, not about a preference.
+     · TOO FAR is not refused, because there is nothing to refuse: standing
+       further back sees MORE wall, and the mockup stays complete and honest.
+       Once the artwork is small enough in frame to be worth mentioning, it is
+       mentioned — one sentence, appended to the confirmation, after the reading
+       has already been taken.
+
+   `note` is advice and rides on a SUCCESS; `why` is a refusal. Exactly one of
+   them is ever non-empty. */
+function floorReadingGate(distFt){
+  const t = ARC.task;
+  const none = { ok:false, code:"none", why:arcPlainFloorWhy(ARC.floor), note:"" };
+  if(distFt == null || !isFinite(distFt) || !t) return none;
+  if(!MOCKUP){
+    const d = distFt - t.standoffFt;
+    if(d < -t.standoffTolFt)
+      return { ok:false, code:"close", note:"",
+               why:"Move back " + Math.abs(d).toFixed(1) + " ft first — you are too close to the wall." };
+    if(d > t.standoffTolFt)
+      return { ok:false, code:"far", note:"",
+               why:"Move in " + d.toFixed(1) + " ft first — you are too far from the wall." };
+    return { ok:true, code:"ok", why:"", note:"" };
+  }
+  /* No intrinsics, no fit, nothing to refuse ON. A phone that cannot say how
+     much wall it sees must not invent a reason to reject a real measurement —
+     the same fail-open the distance gate takes when `fit` is missing. */
+  const fit = arcFit(distFt);
+  if(!fit || !fit.view) return { ok:true, code:"ok", why:"", note:"" };
+  const v = fit.view;
+  if(!v.fits)
+    return { ok:false, code:"close", note:"",
+             why:"Move back first — from here you can only see "
+               + (v.limit === "width"
+                    ? fmtRoughFt(v.visibleWFt, fit.seeWSigma) + " ft of wall"
+                    : fmtRoughFt(v.visibleHFt, fit.seeHSigma) + " ft of wall top to bottom")
+               + ", and the poster is " + (v.limit === "width" ? t.widthFt : t.heightFt)
+               + " ft. Stand about " + fmtRoughFt(fit.recommendedFt, fit.recSigma) + " ft back." };
+  if(Math.max(v.fillW, v.fillH) < FRAME_FILL_LOOSE)
+    return { ok:true, code:"far", why:"",
+             note:" The poster will sit small in the shot from here — about "
+                + fmtRoughFt(fit.recommendedFt, fit.recSigma) + " ft back fills it out." };
+  return { ok:true, code:"ok", why:"", note:"" };
 }
 
 /* ---- entering and leaving the mode ---- */
@@ -13593,6 +13663,89 @@ function runSelfTest(){
       T("taskStandoff: mockup derives 9.90 ft, verification keeps the task's 6.0 ft",
         so.recommendedFt, MOCKUP ? 9.8991 : STANDOFF_FT, 1e-3);
     })();
+  })();
+
+  /* --- FREEZING THE READING: the button and the refusal must agree ---------
+     The regression this block exists for: the Measure button's enabled state
+     was taught the derived mockup standoff and arcFloorTakeReading's own
+     refusal was not, so in mockup mode the button offered a press that was then
+     rejected with "Move in 6.0 ft first — you are too far from the wall" and
+     the merchandiser could not get past step 1 at any distance.
+
+     The load-bearing assertion is the LAST one: for every distance, the gate
+     that enables the button and the gate that freezes the reading return the
+     same answer. It is mode-independent, so it holds in both builds and would
+     have failed on the code it replaces.
+
+     ARC state is borrowed and put back — the suite runs against a live app, and
+     ARC.task belongs to whatever capture the user may have open. */
+  (function readingGateTests(){
+    const savedTask = ARC.task, savedTier = ARC.tier, savedDist = ARC.meas.distFt;
+    try{
+      ARC.task = normalizeTask({ campaignId:null, taskCode:"SELFTEST-FIT", status:S.DRAFT,
+                                 widthFt:9, heightFt:8, standoffFt:STANDOFF_FT,
+                                 standoffTolFt:STANDOFF_TOL_FT, angleTolDeg:ANGLE_TOL_DEG });
+      /* Tier C with no stage in the DOM: arcViewIntrinsics falls back to the
+         nominal portrait frame at the assumed lens, so the numbers below are the
+         ones the poster-fit block already pins. */
+      ARC.tier = "C";
+      const t = ARC.task;
+      const distOkAt = function(d){ ARC.meas.distFt = d; return arcGates().distOk; };
+      /* The near edge means different things in the two modes — the minimum
+         workable distance in mockup, the bottom of the manager's band in
+         verification — but "just inside it is refused, just outside it is
+         allowed" is the same statement either way. */
+      const fit = arcFit(12);
+      const edge = MOCKUP ? fit.minimumFt : (t.standoffFt - t.standoffTolFt);
+
+      T("freeze gate: a reading that does not exist is never freezable",
+        floorReadingGate(null).ok, false);
+      const gNear = floorReadingGate(3);
+      T("freeze gate: standing too close is a hard stop in BOTH modes", gNear.ok, false,
+        null, MOCKUP ? "3 ft is inside the " + edge.toFixed(2) + " ft minimum — the poster cannot fit the frame"
+                     : "3 ft is below the manager's band");
+      T("freeze gate: …named as the near direction", gNear.code, "close", 0);
+      T("freeze gate: …and the refusal says what to do about it",
+        gNear.why.length > 20, true);
+      T("freeze gate: a hair inside the near edge is refused",
+        floorReadingGate(edge*(1 - 1e-6)).ok, false, null, "edge " + edge.toFixed(4) + " ft");
+      T("freeze gate: …and a hair outside it is allowed",
+        floorReadingGate(edge*(1 + 1e-6)).ok, true);
+
+      /* THE FAILING CASE, at the distance a 9 × 8 ft poster actually needs. */
+      const g12 = floorReadingGate(12);
+      T("freeze gate: THE BUG — 12 ft from a 9×8 ft poster freezes in mockup, not in verification",
+        g12.ok, MOCKUP, null,
+        "12 ft is " + Math.abs(12 - t.standoffFt).toFixed(1) + " ft outside the old ± "
+          + t.standoffTolFt + " ft band, and the poster needs " + fit.minimumFt.toFixed(2) + " ft");
+      T("freeze gate: …and in mockup it is an ordinary good spot, with nothing to add",
+        MOCKUP ? (g12.code === "ok" && g12.why === "" && g12.note === "") : (g12.code === "far"),
+        true);
+
+      /* FAR: the same direction in both modes, and the whole of the change is
+         what each mode does about it. */
+      const g30 = floorReadingGate(30);
+      T("freeze gate: standing well back is the FAR case in both modes", g30.code, "far", 0);
+      T("freeze gate: …but only verification refuses it", g30.ok, MOCKUP);
+      T("freeze gate: mockup answers far with advice, verification with a refusal",
+        (g30.note !== "") === MOCKUP && (g30.why !== "") === !MOCKUP, true,
+        null, "exactly one of note/why is ever non-empty");
+      const gGood = floorReadingGate(MOCKUP ? fit.recommendedFt : t.standoffFt);
+      T("freeze gate: the recommended distance is silent — no refusal and no advice",
+        gGood.ok && gGood.why === "" && gGood.note === "", true);
+
+      /* The invariant the bug violated. */
+      const disagreed = [];
+      [2, 3, 4, 5, 5.6, 6, 6.5, 6.93, 7, 8, 9.9, 12, 18, 30, 45].forEach(function(d){
+        if(floorReadingGate(d).ok !== distOkAt(d)) disagreed.push(d.toFixed(2));
+      });
+      T("freeze gate: every distance the button offers can actually be frozen, and no other",
+        disagreed.length, 0, 0,
+        disagreed.length ? "disagreed at " + disagreed.join(", ") + " ft"
+                         : "15 distances from 2 to 45 ft, arcGates().distOk == floorReadingGate().ok");
+    } finally {
+      ARC.task = savedTask; ARC.tier = savedTier; ARC.meas.distFt = savedDist;
+    }
   })();
 
   /* --- geofence helper still intact --- */
