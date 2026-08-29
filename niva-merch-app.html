@@ -354,14 +354,18 @@ table.tbl tr:last-child td{border-bottom:0}
 .menuitem:hover{background:var(--surface-2)}
 
 /* ---------- Modal / toast ---------- */
-.scrim{position:fixed;inset:0;background:rgba(10,16,26,.45);z-index:80;display:flex;align-items:center;
+/* Above #arlayer (200), because the height question can be opened from inside
+   the capture screen and a dialog nobody can see is worse than no dialog. */
+.scrim{position:fixed;inset:0;background:rgba(10,16,26,.45);z-index:240;display:flex;align-items:center;
   justify-content:center;padding:20px}
 .modal{background:var(--surface);border:1px solid var(--border);border-radius:var(--r-lg);box-shadow:var(--shadow-lg);
   width:min(520px,100%);max-height:86vh;overflow:auto}
 .modal .mh{padding:14px 18px;border-bottom:1px solid var(--border);font-weight:650;font-size:15px}
 .modal .mb{padding:18px}
 .modal .mf{padding:12px 18px;border-top:1px solid var(--border);display:flex;gap:8px;justify-content:flex-end}
-#toasts{position:fixed;right:16px;bottom:16px;z-index:220;display:flex;flex-direction:column;gap:8px}
+/* …and toasts stay above the scrim, because saveHeight answers a bad value with
+   a toast and it has to be readable over the dialog that produced it. */
+#toasts{position:fixed;right:16px;bottom:16px;z-index:260;display:flex;flex-direction:column;gap:8px}
 .toast{background:var(--indigo);color:var(--indigo-text);padding:10px 14px;border-radius:var(--r);
   box-shadow:var(--shadow-lg);font-size:13px;max-width:340px;border-left:3px solid var(--accent);
   animation:tin 180ms ease-out}
@@ -528,6 +532,48 @@ table.tbl tr:last-child td{border-bottom:0}
 #arChips{display:flex;gap:6px;flex-wrap:wrap;font-size:11px}
 .archip{background:rgba(10,18,28,.7);border:1px solid rgba(255,255,255,.16);border-radius:99px;
   padding:2px 8px;font-family:var(--mono);font-size:10.5px;backdrop-filter:blur(6px)}
+
+/* ---------- the field build of the capture screen: one line, one button ----------
+   A merchandiser standing in a shop can act on exactly two things: where they
+   are standing, and how they are holding the phone. Focal lengths, detector
+   timings, sensor sources, screen angles, tier letters and a choice between
+   three ways of marking a rectangle are none of those, so the field build does
+   not draw them. The elements still exist and are still written on the
+   manager/admin path — this is a change of what is PRESENTED, not of what is
+   measured or recorded. */
+#arSimple{display:none;flex-direction:column;gap:9px}
+#arHud.simple #arSimple{display:flex}
+#arHud.simple #arChips,
+#arHud.simple #arRuler,
+#arHud.simple #arTools,
+#arHud.simple #arAngles,
+#arHud.simple #arTier,
+#arHud.simple #arLevel,
+#arHud.simple #arShutterWrap{display:none}
+#arHud.simple .arbar.bottom{gap:9px;padding:14px 12px 18px}
+#arSimpleHint{font-size:13.5px;line-height:1.45;color:#dbe6f2;background:rgba(10,18,28,.74);
+  border:1px solid rgba(255,255,255,.14);border-radius:10px;padding:10px 12px;
+  display:flex;gap:11px;align-items:center;backdrop-filter:blur(6px)}
+#arSimpleHint:empty{display:none}
+#arSimpleHint b{color:#5eead4}
+#arSimpleHint .cue{flex:0 0 auto;width:30px;height:40px;color:#5eead4}
+#arSimpleWarn{font-size:13px;line-height:1.45;font-weight:650;color:#2a1a00;background:#fbbf24;
+  border-radius:10px;padding:9px 12px}
+#arSimpleWarn:empty{display:none}
+/* The button carries the arming progress as a fill rather than a separate ring:
+   it still cannot be pressed until every gate has held for the full ARM_MS, but
+   the waiting reads as the button filling up instead of as an instrument. */
+#arSimpleBtn{display:block;width:100%;border:0;border-radius:12px;padding:15px 16px;
+  font-size:16px;font-weight:800;letter-spacing:.01em;color:#022f2b;cursor:pointer;
+  font-family:inherit;background:#2dd4bf}
+#arSimpleBtn:disabled{cursor:not-allowed;color:#cbd5e1;
+  background:linear-gradient(90deg,rgba(45,212,191,.5) 0 var(--p,0%),#39424f var(--p,0%) 100%)}
+#arSimpleFoot{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+#arSimpleFoot:empty{display:none}
+#arSimpleFoot .rough{flex:1;min-width:150px;font-size:11.5px;line-height:1.35;color:#cbd5e1}
+#arSimpleAlt{display:block;width:100%;background:none;border:0;color:#9fb2c6;font-family:inherit;
+  font-size:12px;text-decoration:underline;padding:3px 0 0;cursor:pointer;text-align:center}
+#arSimpleAlt:empty{display:none}
 
 @media (max-width:1180px){ .split{grid-template-columns:1fr} }
 @media (max-width:900px){
@@ -1136,6 +1182,84 @@ const FLOOR_STEP_GAP_MS       = 260;    // two peaks closer together than this a
 const FLOOR_RAISE_GRACE_MS    = 600;    // raising the phone off the floor line is itself a wrist
                                         // movement that reads like a small step; don't charge it
 const FLOOR_CAL_KEY           = "niva.floorcal.v1";
+
+/* ---- h from the person, not from a walk round the shop ----
+   The tape calibration above is the best answer and stays the best answer, but
+   it costs a tape measure, a clear wall and five minutes, so in practice it was
+   skipped and every capture ran on the 1.45 m default at ± 8.5 % — over budget
+   before the angle term is even counted.
+
+   A stature typed once on the profile sits between the two.
+
+   A RATIO, NOT A SUBTRACTION.
+   The obvious move is h = stature − (some constant). It is wrong, and wrong in
+   a way that gets worse at the ends of the range where it matters most. Human
+   body proportions are stable as FRACTIONS of stature, not as fixed distances:
+   a 1.90 m adult's shoulder is not 37 cm below the top of their head while a
+   1.50 m adult's is too — both sit at roughly the same PROPORTION of their own
+   height. A flat offset therefore under-reads tall people and over-reads short
+   ones, systematically, and no amount of widening the error bar fixes a bias.
+
+       h  =  stature · HOLD_RATIO
+
+   HOLD_RATIO IS ONLY VALID BECAUSE THE UI GIVES THE INSTRUCTION.
+   A ratio describes a POSTURE. "Neck / shoulder level" is 0.82 of stature;
+   "eye level" is 0.936. Neither is a fact about a person holding a phone until
+   somebody tells them where to hold it — a merchandiser left to their own
+   devices will frame a wall from anywhere between the sternum and the eyes,
+   which is a 15 % spread and useless. So the capture screen says, in words and
+   with a small figure, "hold the phone up at neck level", and THAT is what
+   makes this number mean anything. If the instruction is ever removed from the
+   UI, this constant stops being derived and becomes a guess: change both or
+   neither.
+
+   Switching posture is deliberately one line — reassign HOLD_RATIO below.
+
+   THE UNCERTAINTY, DERIVED RATHER THAN QUOTED.
+   Three independent terms, in metres, added in quadrature and divided by h at
+   the end so the relative figure comes out stature-dependent on its own:
+
+       σ_h = √( (HOLD_RATIO·σ_stature)²      … they mis-state their own height
+              + (stature·σ_ratio)²           … their proportions are not the mean
+              + σ_comply² )                  … they do not hit the landmark exactly
+
+       σ_h/h  = what GEO.floorLineError consumes, unchanged
+
+   That lands near ± 4 % for a median adult — comfortably better than the ± 8.5 %
+   stated default and honestly worse than a ± 2.3 % tape calibration, which is
+   the ordering the UI is allowed to claim. Nothing here is hardcoded into the
+   error bar; statureHold() computes it and floorResolveHeight() propagates it. */
+const HOLD_RATIO_NECK       = 0.82;   // neck / shoulder (acromial) height as a fraction of
+                                      //   stature — the posture the capture screen INSTRUCTS
+const HOLD_RATIO_EYE        = 0.936;  // eye height as a fraction of stature — the posture you
+                                      //   would use if the screen said "hold it up to your eyes"
+const HOLD_RATIO            = HOLD_RATIO_NECK;   // ← the one line to change
+const HOLD_RATIO_SIGMA      = 0.011;  // between-person spread of that ratio, absolute on the
+                                      //   ratio itself (~1.3 % of it). Proportions vary far less
+                                      //   than statures do, which is the whole reason for a ratio
+const HOLD_COMPLY_SIGMA_M   = 0.05;   // how precisely someone actually puts the phone on the
+                                      //   landmark they were just told to use. The single largest
+                                      //   term, and the one the on-screen instruction shrinks
+const STATURE_SIGMA_M       = 0.02;   // how well people know their own height
+const STATURE_MIN_CM        = 120;    // matches the CHECK in 0006_profile_height.sql
+const STATURE_MAX_CM        = 220;
+const HEIGHT_ASK_KEY        = "niva.heightask.v1";  // per-user "not now", so it asks once
+
+/* stature (cm) -> the phone-holding height and its 1σ, or null if the stature is
+   outside the band the database itself will accept. Pure, so the self-test can
+   pin both the ratio and the propagation. `ratio` is an override for the
+   posture, used by the self-test to check the eye-level swap without editing a
+   constant; production always passes nothing and gets HOLD_RATIO. */
+function statureHold(cm, ratio){
+  const S = Number(cm)/100;
+  const R = (ratio > 0) ? Number(ratio) : HOLD_RATIO;
+  if(!(isFinite(S) && cm >= STATURE_MIN_CM && cm <= STATURE_MAX_CM)) return null;
+  const hM = S*R;
+  const sigmaM = Math.sqrt(Math.pow(R*STATURE_SIGMA_M, 2)
+                         + Math.pow(S*HOLD_RATIO_SIGMA, 2)
+                         + Math.pow(HOLD_COMPLY_SIGMA_M, 2));
+  return { hM: hM, sigmaM: sigmaM, relSigma: sigmaM/hM, ratio: R, statureCm: Number(cm) };
+}
 
 /* ---- detector budget ----
    The numbers the "degrade gracefully" rule is measured against. */
@@ -2867,6 +2991,35 @@ const Blobs = (function(){
   };
 })();
 
+/* ---------- the profile column list, and the one column that may be absent ----------
+   `height_cm` arrives with supabase/migrations/0006_profile_height.sql. Naming
+   it in a select against a project that has not applied 0006 yet is a 400 from
+   PostgREST ("column profiles.height_cm does not exist") — and that select is
+   the one that runs at SIGN-IN, so getting this wrong locks every user out of a
+   database that is otherwise perfectly healthy.
+
+   So it is asked for optimistically ONCE, and the first refusal that names the
+   column downgrades the list for the rest of the session. The app then behaves
+   exactly as it did before 0006: no stature is known, h falls back to the badged
+   default, and the height question is not asked (there is nowhere to put the
+   answer). Nothing is silently dropped — profileHeightSupported() is what the
+   UI reads before offering to store anything. */
+let PROFILE_COLS_FULL = "id,full_name,role,title,region,is_active,height_cm";
+let PROFILE_COLS_BASE = "id,full_name,role,title,region,is_active";
+let PROFILE_HEIGHT_COL = true;
+function profileCols(){ return PROFILE_HEIGHT_COL ? PROFILE_COLS_FULL : PROFILE_COLS_BASE; }
+function profileHeightSupported(){ return PROFILE_HEIGHT_COL; }
+/* True when this error is "that column is not there", and nothing else. A
+   network failure, a 401 or an RLS-filtered empty result must NOT downgrade. */
+function profileHeightMissing(err){
+  if(!PROFILE_HEIGHT_COL || !err) return false;
+  if(err.kind === "offline" || err.kind === "timeout" || err.kind === "auth" || err.retryable) return false;
+  const s = [err.message, err.details, err.hint, err.code].join(" ");
+  if(!/height_cm/.test(s)) return false;
+  PROFILE_HEIGHT_COL = false;
+  return true;
+}
+
 /* ==========================================================
    2e. Session — GoTrue email + password
    ------------------------------------------------------------
@@ -2988,17 +3141,43 @@ const Session = (function(){
     loadProfile: function(){
       const uid = Session.userId();
       if(!uid) return Promise.reject(SbError("auth", "No session."));
-      return REST.select("profiles", "select=id,full_name,role,title,region,is_active&id=eq." +
-                          encodeURIComponent(uid) + "&limit=1")
-        .then(function(rows){
-          if(!rows.length){
-            throw SbError("permanent", "Signed in, but this account has no profile row in the project.",
-                          { nivaCode: "NIVA_NO_PROFILE" });
-          }
-          profile = rows[0];
-          persist();
-          return profile;
-        });
+      const q = function(cols){
+        return REST.select("profiles", "select=" + cols + "&id=eq." +
+                            encodeURIComponent(uid) + "&limit=1");
+      };
+      const take = function(rows){
+        if(!rows.length){
+          throw SbError("permanent", "Signed in, but this account has no profile row in the project.",
+                        { nivaCode: "NIVA_NO_PROFILE" });
+        }
+        /* A downgraded read must not erase a height this device already knows
+           about and may still have queued — only a read that actually carried
+           the column is allowed to overwrite it. */
+        const prev = profile;
+        profile = rows[0];
+        if(!profileHeightSupported() && prev && prev.height_cm != null)
+          profile.height_cm = prev.height_cm;
+        persist();
+        return profile;
+      };
+      return q(profileCols()).then(take, function(err){
+        if(!profileHeightMissing(err)) throw err;
+        return q(profileCols()).then(take);
+      });
+    },
+
+    /* Merge a patch into the cached profile row. The ONLY caller is the height
+       question; `role` is filtered out here as well as by the server's guard
+       trigger, so a bug in a future caller cannot make the client believe it
+       has a role the database never granted. */
+    mergeProfile: function(patch){
+      if(!profile || !patch) return null;
+      Object.keys(patch).forEach(function(k){
+        if(k === "role" || k === "id") return;
+        profile[k] = patch[k];
+      });
+      persist();
+      return profile;
     },
 
     /* Called by the outbox / repo when a request comes back 401. Does not drop
@@ -3211,6 +3390,7 @@ const Outbox = (function(){
         return REST.patch("notifications",
           "id=in.(" + it.payload.ids.map(encodeURIComponent).join(",") + ")",
           { read_at: it.payload.at }).then(function(){});
+      case "profile.patch":  return runProfilePatch(it);
       case "image.delete":
         return REST.remove("task_images", "id=eq." + encodeURIComponent(it.payload.id))
           .then(function(){}, function(e){ if(e.kind === "permanent" || e.status === 404) return; throw e; });
@@ -3318,6 +3498,39 @@ const Outbox = (function(){
               if(err.kind === "conflict"){ Sync.onUploaded(it); return; }   // already there
               throw err;
             });
+  }
+
+  /* The user's own profile row — today, only `height_cm`.
+     Idempotent for free: it is a PATCH to a fixed value, so a retry whose
+     response was lost writes the same number again.
+
+     TWO refusals are treated as "done" rather than as failures the user has to
+     look at, and neither hides a lost write:
+
+       · the column does not exist  — 0006_profile_height.sql has not been
+         applied to this project. The value stays on the device and in force
+         locally; there is simply nowhere on the server to put it. Parking this
+         in the sync panel would show a permanent red "1 failed" that no
+         merchandiser can act on.
+       · zero rows came back        — RLS matched nothing, which for a PATCH of
+         one's OWN row means the session is not who it thinks it is. Re-reading
+         the profile is the honest response, not retrying forever.
+
+     Anything else — a transport failure, a 5xx, the role-escalation guard —
+     propagates exactly like every other op and surfaces in the sync panel. */
+  function runProfilePatch(it){
+    return REST.patch("profiles", "id=eq." + encodeURIComponent(it.payload.id), it.payload.patch)
+      .then(function(rows){
+        if(!rows.length) return Session.loadProfile().then(function(){}, function(){});
+        Sync.onProfilePatched(it, rows[0]);
+      }, function(err){
+        if(profileHeightMissing(err)){
+          toast("Your height is saved on this phone. The server has not been updated for it yet — "
+              + "ask your manager to apply the latest database migration.", true);
+          return;
+        }
+        throw err;
+      });
   }
 
   /* audit_events has a server-assigned identity PK, so it is the one write we
@@ -3800,7 +4013,10 @@ const num = v => (v == null || v === "") ? null : Number(v);
 
 function mapProfile(r){
   return { id:r.id, name:r.full_name, role:r.role, title:r.title||"",
-           region:r.region||null, active: r.is_active !== false };
+           region:r.region||null, active: r.is_active !== false,
+           /* undefined (not null) when the project predates 0006 — "we did not
+              ask" is a different fact from "they have not said". */
+           heightCm: (r.height_cm == null ? null : Number(r.height_cm)) };
 }
 function mapCampaign(r){
   return { id:r.id, code:r.code, name:r.name, brand:r.brand,
@@ -3859,7 +4075,7 @@ function refEvidenceFromNote(note, p){
    height came from a calibration or from the stated default.
    Deliberately ASCII — a note is plain text on a round trip through Postgres,
    an outbox blob and a render cache, and none of those need a degree sign. */
-const FLOOR_NOTE_RE = /\[floor h=([\d.]+)m\/([\d.]+)% ang=([\d.]+)deg\/([\d.]+)deg err=([\d.]+)% \(height ([\d.]+) \/ pitch ([\d.]+)\) age=([\d.]+)s cal=(device|default)\]/;
+const FLOOR_NOTE_RE = /\[floor h=([\d.]+)m\/([\d.]+)% ang=([\d.]+)deg\/([\d.]+)deg err=([\d.]+)% \(height ([\d.]+) \/ pitch ([\d.]+)\) age=([\d.]+)s cal=(device|stature|default)\]/;
 function floorEvidenceFromNote(note, p){
   if(!note) return p;
   const m = FLOOR_NOTE_RE.exec(note);
@@ -3872,6 +4088,7 @@ function floorEvidenceFromNote(note, p){
   p.errorPct          = Number(m[5]);
   p.errorTerms        = { height:Number(m[6]), pitch:Number(m[7]) };
   p.floorHeldS        = Number(m[8]);
+  p.floorHeightSrc    = m[9];
   p.floorCalibrated   = (m[9] === "device");
   return p;
 }
@@ -4182,8 +4399,18 @@ const Repo = (function(){
   }
 
   function fetchMasters(){
+    /* Same optimistic-then-downgrade dance as Session.loadProfile: a project
+       without 0006 applied must not lose its whole master read over one
+       column. See profileCols() for why the column can legitimately be absent. */
+    const profiles = function(){
+      return REST.select("profiles", "select=" + profileCols() + "&order=full_name")
+        .catch(function(err){
+          if(!profileHeightMissing(err)) throw err;
+          return REST.select("profiles", "select=" + profileCols() + "&order=full_name");
+        });
+    };
     return Promise.all([
-      REST.select("profiles",  "select=id,full_name,role,title,region,is_active&order=full_name"),
+      profiles(),
       REST.select("stores",    "select=*&order=name"),
       REST.select("campaigns", "select=*&order=starts_on.desc")
     ]).then(function(r){
@@ -4423,6 +4650,18 @@ const Sync = {
       t.placement = bestPlacement(t.afterImages);
     }else if(row.kind === "before"){ t.beforeImage = mapImage(row, t.storeCode, 0); }
     else if(row.kind === "poster"){ t.posterArt = mapImage(row, t.storeCode, 0); }
+    save(); scheduleRender();
+  },
+  /* The server's copy of the caller's own profile row is now authoritative for
+     whatever it just accepted. Adopt it rather than assuming the PATCH landed
+     verbatim — the guard trigger is allowed to rewrite a column on the way in,
+     and if it ever does, the app should be showing what the database has. */
+  onProfilePatched: function(it, row){
+    if(!row || row.id !== Session.userId()) return;
+    Session.mergeProfile(row);
+    const i = USERS.map(function(u){ return u.id; }).indexOf(row.id);
+    if(i >= 0) USERS[i] = mapProfile(row);
+    state.profiles = USERS;
     save(); scheduleRender();
   },
   onUploaded: function(it){
@@ -6015,8 +6254,10 @@ function placementBlock(p, t){
     + (p.method === "floor-line"
         ? '<div class="prow"><span class="pl">Phone height <span style="opacity:.65">h in d = h / tan θ</span></span>'
           + '<span><b>'+(p.floorHeightM == null ? "—" : Number(p.floorHeightM).toFixed(2)+' m')+'</b>'
-          + '<span class="chip '+(p.floorCalibrated ? "pass" : "fail")+'" style="margin-left:6px">'
-          + (p.floorCalibrated ? "MEASURED ON THIS PHONE" : "ROUGH DEFAULT")+'</span></span></div>'
+          + '<span class="chip '+(p.floorCalibrated ? "pass" : (p.floorHeightSrc === "stature" ? "neutral" : "fail"))+'" style="margin-left:6px">'
+          + (p.floorCalibrated ? "MEASURED ON THIS PHONE"
+              : p.floorHeightSrc === "stature" ? "FROM THEIR STATED HEIGHT"
+              : "ROUGH DEFAULT")+'</span></span></div>'
           + '<div class="prow"><span class="pl">Aim below horizontal <span style="opacity:.65">θ</span></span>'
           + '<span><b>'+(p.floorThetaDeg == null ? "—" : Number(p.floorThetaDeg).toFixed(1)+'°')+'</b>'
           + (p.floorThetaSigmaDeg != null ? ' <span style="opacity:.6">± '+Number(p.floorThetaSigmaDeg).toFixed(2)+'°</span>' : '')
@@ -6896,10 +7137,14 @@ const ARC = {
   /* Floor-line trigonometry. Everything the method knows lives here so the HUD,
      the record builder and the diagnostics panel can read it without any of
      them reaching into the sampling loop. */
-  floor:{ on:false, hM:null, hRelSigma:null, hSrc:"", calibrated:false,
+  floor:{ on:false, hM:null, hRelSigma:null, hSrc:"", hSrcKey:"default", calibrated:false,
           samples:[], theta:null, thetaSigma:null, thetaRaw:null,
           live:null, hold:null, state:"none", why:"", warn:"",
           calibrating:null,
+          /* the two-step field flow: "measure" (line on the floor join) then
+             "frame" (phone up, poster drawn). Only the merchandiser UI uses it;
+             the manager HUD is unchanged and ignores it. */
+          step:"measure",
           motion:{ on:false, onMot:null, seen:false, since:0, steps:0,
                    peak:0, stir:0, lastPeakAt:0 } },
   assumeSquare:false,
@@ -7417,9 +7662,13 @@ function arcStartPanel(caps){
                             "reference scaling will be estimated"));
     if(MOCKUP){
       const fcal = floorCalGet();
-      rows += line(!!fcal, "Phone height calibrated (floor-line)",
-                   fcal ? (Number(fcal.hM).toFixed(2)+" m ± "
+      const scm  = myStatureCm();
+      const sh   = statureHold(scm);
+      rows += line(!!fcal || !!sh, "Phone height h known (floor-line)",
+                   fcal ? ("tape calibration " + Number(fcal.hM).toFixed(2)+" m ± "
                            +(Number(fcal.relSigma||FLOOR_DEFAULT_H_SIGMA)*100).toFixed(1)+"%")
+                        : sh ? ("stature " + scm + " cm × " + HOLD_RATIO.toFixed(3) + " = "
+                                + sh.hM.toFixed(2) + " m ± " + (sh.relSigma*100).toFixed(1) + "%")
                         : ("default "+FLOOR_DEFAULT_H_M.toFixed(2)+" m, ± "
                            +(FLOOR_DEFAULT_H_SIGMA*100).toFixed(0)+"% — over the 5% budget on its own"));
     }
@@ -7449,16 +7698,16 @@ function arcStartPanel(caps){
     /* MOCKUP MODE, NO ARCore. The wall is bare, so there is nothing on it to
        measure against — but the floor is already there. Nothing to tape up and
        nothing to carry, which was the whole complaint about the A4 sheet. */
+    /* Two sentences, two steps. This is the last screen before the camera and
+       the merchandiser reads it standing in a shop, so it says what they will
+       do, not how it works. */
     how = '<div class="hint" style="margin:0 0 12px;font-size:13px;line-height:1.55">'
-      + '<b>This phone can’t measure the wall by itself, so it measures off the floor instead.</b> '
-      + 'Tilt the phone down until the line on screen sits where the wall meets the floor — from how far '
-      + 'down you tilted, it works out how far back you are standing. Nothing to tape up.'
-      + '<br><br>The first time on this phone it will ask you to set your height: stand a tape-measured '
-      + 'distance from any wall, aim at the floor line, done. Skip it and sizes will be roughly right '
-      + 'rather than right.'
-      + '<br><br><b>If the bottom of the wall is hidden</b> — shelving, stacked stock, a plinth — the floor '
-      + 'line isn’t there to aim at. Tape one plain A4 sheet flat on the wall instead; that path is still '
-      + 'one tap away.'
+      + '<b>1. Measure.</b> Hold the phone up at neck level and tilt it down until the line on screen '
+      + 'sits where the wall meets the floor. Press the button.'
+      + '<br><b>2. Frame.</b> Straighten the phone up without moving your feet. The poster appears on '
+      + 'the wall at its real size. Press the button again to take the photo.'
+      + '<br><br>Nothing to tape up and nothing to carry. If the bottom of the wall is hidden — shelving, '
+      + 'stacked stock, a plinth — there is a link on the camera screen to use an A4 sheet instead.'
       + '</div>';
   } else if(caps.media && plain){
     how = '<div class="hint" style="margin:0 0 12px;font-size:13px;line-height:1.55">'
@@ -7489,13 +7738,18 @@ function arcStartPanel(caps){
   /* Calibration costs a tape measure and five minutes. It only pays for itself
      on the camera path, so it is not put in front of someone who is about to
      use AR and will never touch a reference. */
+  /* OPTIONAL REFINEMENTS, and nothing more than that. The tape calibration used
+     to be pushed at the merchandiser on the capture screen itself, in a banner
+     they could not dismiss. It is worth roughly ± 2.3 % against the ± 4 % the
+     stature estimate already gives, so it is a refinement, not a prerequisite —
+     it lives here, behind the word "optional", and never interrupts a capture.
+     Managers and admins keep the technical labels. */
   if(caps.media && (!plain || !caps.xr)){
     if(MOCKUP)
       btns += '<button class="btn ghost" data-arc="floorcal">'
-            + (plain ? "Set my height once (needs a tape measure)" : "Calibrate phone height (floor-line)…")+'</button>';
+            + (plain ? "Optional: measure this phone exactly (tape measure)" : "Calibrate phone height (floor-line)…")+'</button>';
     btns += '<button class="btn ghost" data-arc="calib">'
-          + (plain ? (MOCKUP ? "Set the camera up once (sharper overlay)" : "Set this phone up once (needs a tape measure)")
-                   : "Calibrate lens (focal length)…")+'</button>';
+          + (plain ? "Optional: sharpen the poster size (tape measure)" : "Calibrate lens (focal length)…")+'</button>';
   }
   btns += '<button class="btn ghost" data-arc="close">Cancel</button>';
 
@@ -7629,12 +7883,23 @@ function arcShell(t){
     +     '<div id="arDetBar"></div>'
     +     '<div class="arstat" id="arDist">Waiting for a reading…</div>'
     +     '<div id="arRuler"><div id="arRulerBand"></div><div id="arRulerTicks"></div><div id="arNeedle" style="left:50%"></div></div>'
-    +     '<div class="arrow2">'
+    +     '<div class="arrow2" id="arAngles">'
     +       '<div class="arstat" id="arPitch">TILT —</div>'
     +       '<div class="arstat" id="arRoll">ROLL —</div>'
     +       '<div class="arstat" id="arYaw">YAW —</div>'
     +     '</div>'
     +     '<div class="arrow2" id="arTools"></div>'
+    /* The field build. Every node here is empty and hidden unless #arHud carries
+       .simple, and the instrument panel above is hidden when it does. One
+       instruction, one warning (only when there is something to warn about),
+       one button. */
+    +     '<div id="arSimple">'
+    +       '<div id="arSimpleHint"></div>'
+    +       '<div id="arSimpleWarn"></div>'
+    +       '<button id="arSimpleBtn" class="pe" disabled></button>'
+    +       '<div id="arSimpleFoot"></div>'
+    +       '<button id="arSimpleAlt" class="pe" data-arc="floorfallback"></button>'
+    +     '</div>'
     +     '<div id="arShutterWrap">'
     +       '<svg id="arArm" viewBox="0 0 78 78"><circle class="trk" cx="39" cy="39" r="35"></circle>'
     +         '<circle class="prg" cx="39" cy="39" r="35" stroke-dasharray="'+C.toFixed(1)+'" stroke-dashoffset="'+C.toFixed(1)+'"></circle></svg>'
@@ -8507,22 +8772,156 @@ function floorCalClear(){
    uncertainty when it is solved (tape error + angle error), the same way the
    focal calibration does — so a merchandiser who calibrated properly gets a
    tighter error bar than one who did not, without anyone editing a constant. */
+/* The stature on the signed-in user's own profile row, in cm, or null. Read
+   through Session so a shared handset can never hand one merchandiser another
+   merchandiser's height — that is exactly why the number lives on `profiles`
+   and not in localStorage next to the device calibration. */
+function myStatureCm(){
+  let p = null;
+  try{ p = Session.profile(); }catch(e){ p = null; }
+  const v = (p && p.height_cm != null) ? Number(p.height_cm) : null;
+  return (v != null && isFinite(v) && v >= STATURE_MIN_CM && v <= STATURE_MAX_CM) ? v : null;
+}
+
+/* THREE sources for h, in strict order of how much they are worth, and the one
+   in force always says which it is:
+
+     1. a tape calibration ON THIS DEVICE   — measured, ~± 2.3 %
+     2. the user's own stature × HOLD_RATIO — derived,  ~± 4 %
+     3. the stated default                  — a guess,  ± 8.5 %
+
+   The calibration wins where it exists because it is a measurement of this
+   person holding THIS phone, and it already carries its own solved uncertainty.
+   Nothing is a constant: whichever branch runs writes hRelSigma, and
+   GEO.floorLineError consumes it unchanged. */
 function floorResolveHeight(){
   const f = ARC.floor, c = floorCalGet();
   if(c){
     f.hM = Number(c.hM);
     f.hRelSigma = (c.relSigma > 0) ? Number(c.relSigma) : FLOOR_DEFAULT_H_SIGMA;
     f.calibrated = true;
+    f.hSrcKey = "device";
     f.hSrc = "measured on this phone — " + f.hM.toFixed(2) + " m, solved from "
            + Number(c.distFt).toFixed(1) + " ft at " + Number(c.thetaDeg).toFixed(1) + "°, "
            + fmtD(c.ts);
-  } else {
-    f.hM = FLOOR_DEFAULT_H_M;
-    f.hRelSigma = FLOOR_DEFAULT_H_SIGMA;
-    f.calibrated = false;
-    f.hSrc = "stated default " + FLOOR_DEFAULT_H_M.toFixed(2) + " m — never measured on this phone";
+    return f;
   }
+  const st = statureHold(myStatureCm());
+  if(st){
+    f.hM = st.hM;
+    f.hRelSigma = st.relSigma;
+    f.calibrated = false;          // NOT measured on this device, and never claims to be
+    f.hSrcKey = "stature";
+    f.hSrc = "from your height — " + st.statureCm.toFixed(0) + " cm × " + st.ratio.toFixed(3)
+           + " (phone held at neck level) = " + f.hM.toFixed(2) + " m, ± "
+           + (st.relSigma*100).toFixed(1) + "%";
+    return f;
+  }
+  f.hM = FLOOR_DEFAULT_H_M;
+  f.hRelSigma = FLOOR_DEFAULT_H_SIGMA;
+  f.calibrated = false;
+  f.hSrcKey = "default";
+  f.hSrc = "stated default " + FLOOR_DEFAULT_H_M.toFixed(2) + " m — your height is not on file "
+         + "and this phone has never been measured";
   return f;
+}
+
+/* ==========================================================
+   THE ONE QUESTION
+   ------------------------------------------------------------
+   Asked once, on the first sign-in where `profiles.height_cm` is null, and
+   never again unless the user goes looking for it. It is a question, not an
+   onboarding flow: one field, two buttons, and skipping it is a real answer
+   that costs a bigger error bar and nothing else.
+
+   Merchandisers are prompted; managers and admins are not, because nobody who
+   only approves photographs needs to tell the app how tall they are. The menu
+   entry is offered to everyone, so a manager who does field work can still set
+   theirs.
+
+   The "already asked" flag is per USER and lives on the device: a shared
+   handset must not decide that Sneha has been asked because Aditya was.
+   ========================================================== */
+function heightAskKey(){ return HEIGHT_ASK_KEY + ":" + (Session.userId() || "anon"); }
+function heightAsked(){
+  try{ return localStorage.getItem(heightAskKey()) === "1"; }catch(e){ return false; }
+}
+function heightMarkAsked(){
+  try{ localStorage.setItem(heightAskKey(), "1"); }catch(e){ /* private mode: it asks again, which is not harmful */ }
+}
+
+/* Offline-first, like every other write here: the number is in force for the
+   very next capture even with the radio dead, and the OUTBOX is what eventually
+   tells the server. Nothing PATCHes profiles directly. */
+function saveHeight(cm){
+  const uid = Session.userId();
+  if(!uid){ return false; }
+  const v = Math.round(Number(cm));
+  const st = statureHold(v);
+  if(!st){
+    toast("Enter a height between " + STATURE_MIN_CM + " and " + STATURE_MAX_CM + " cm.", true);
+    return false;
+  }
+  Session.mergeProfile({ height_cm: v });
+  for(let i = 0; i < USERS.length; i++) if(USERS[i].id === uid) USERS[i].heightCm = v;
+  state.profiles = USERS;
+  heightMarkAsked();
+  save();
+  Outbox.push("profile.patch", { id: uid, patch: { height_cm: v } },
+              { label: "Save your height (" + v + " cm)" });
+  /* If the capture screen is already open, the new h takes effect on the next
+     frame rather than on the next capture. */
+  if(ARC.open && ARC.floor.on) floorResolveHeight();
+  closeModal();
+  toast("Thanks. Distance is now worked out from a phone height of " + st.hM.toFixed(2)
+      + " m (± " + (st.relSigma*100).toFixed(1) + "%) instead of a standard guess.");
+  scheduleRender();
+  return true;
+}
+
+function askHeight(manual){
+  if(!signedIn()) return;
+  if(!profileHeightSupported()){
+    if(manual) toast("This project's database cannot store your height yet — ask your manager to apply "
+                   + "the latest migration. Sizes will stay rough until then.", true);
+    return;
+  }
+  const cur = myStatureCm();
+  openModal({
+    title: manual ? "Your height" : "One quick question",
+    body: '<p style="margin:0 0 12px;font-size:13.5px;line-height:1.55;color:var(--text-2)">'
+        + 'To show a poster at its real size the app has to know how high off the floor you hold '
+        + 'the phone. It works that out from your height — <b>you only answer this once</b>.'
+        + '</p>'
+        + '<div class="field" style="max-width:220px"><label class="fl" for="hq_cm">How tall are you? (cm)</label>'
+        + '<input id="hq_cm" type="number" inputmode="numeric" step="1" min="' + STATURE_MIN_CM + '" '
+        + 'max="' + STATURE_MAX_CM + '" value="' + (cur || "") + '" placeholder="e.g. 170"></div>'
+        + '<div class="hint" style="margin-top:10px">Hold the phone up at <b>neck level</b> when you take a '
+        + 'measurement — that is the position this works from. Skip the question and the app falls back to a '
+        + 'standard guess, marks every capture <b>rough</b>, and still works.</div>',
+    actions: [
+      { label:"Save", cls:"btn primary", act: function(){
+          const el = $("#hq_cm");
+          saveHeight(el ? el.value : null);
+        } },
+      { label: manual ? "Cancel" : "Skip for now", cls:"btn ghost", act: function(){
+          if(!manual) heightMarkAsked();
+          closeModal();
+        } }
+    ]
+  });
+}
+
+/* Called once the profile is known — at boot and after a sign-in. Deliberately
+   silent about every reason not to ask, because "we already asked", "there is
+   nowhere to store it" and "this user does not take photographs" are all
+   perfectly normal. */
+function maybeAskHeight(){
+  if(!signedIn() || !profileHeightSupported()) return;
+  if(myRole() !== "Merchandiser") return;
+  if(myStatureCm() != null) return;
+  if(heightAsked()) return;
+  askHeight(false);
 }
 
 /* ---- the gravity vector, from whichever sensor is actually reporting ---- */
@@ -8685,8 +9084,15 @@ function floorStep(){
   /* Latch only once the angle has STOPPED MOVING. A reading taken mid-swing is
      the one thing a held value must never be. Every fresh latch also restarts
      the movement account, so "have you moved?" is always measured from the
-     reading that is actually on screen. */
-  if(f.thetaSigma != null && f.thetaSigma <= FLOOR_LATCH_SIGMA_DEG){
+     reading that is actually on screen.
+
+     ONCE THE TWO-STEP FLOW HAS MOVED ON TO FRAMING, LATCHING STOPS. The phone
+     is on its way up to the wall; anywhere on that arc it can sit still for a
+     moment at an angle that is inside the band but is NOT aimed at the floor
+     join, and re-latching there would quietly replace a good reading with a
+     fictional one. The manager HUD never leaves step "measure", so its
+     behaviour is exactly what it was. */
+  if(f.step !== "frame" && f.thetaSigma != null && f.thetaSigma <= FLOOR_LATCH_SIGMA_DEG){
     f.hold = { distFt:dFt, theta:f.theta, thetaSigma:sTh, err:err, at:now };
     floorMotionMark();
   }
@@ -8719,6 +9125,14 @@ function floorHoldState(){
   return { ok:true, code:"held", age:age, why:"", warn:warn };
 }
 
+/* Three words for the three sources of h, for the provenance string that lands
+   on the placement's distance_source column. */
+function floorHSrcShort(f){
+  return f.hSrcKey === "device"  ? "measured on this phone"
+       : f.hSrcKey === "stature" ? "from their stated height"
+       : "stated default";
+}
+
 /* ---- what the rest of the app sees ----
    Writes the SAME fields arcMeasureTierB writes, so arcGates(), the HUD, the
    ruler, the arming ring and arcBuildRecord are all untouched. There is exactly
@@ -8731,7 +9145,10 @@ function floorMeasure(){
   ARC.meas.homPitchDeg = null;
   ARC.meas.floorReading = null;
 
-  if(f.live){
+  /* In the framing step a "live" reading is by definition not a reading of the
+     floor join — the phone is pointed at the wall. Only the value captured when
+     the button was pressed may be used, and it is labelled HELD. */
+  if(f.live && f.step !== "frame"){
     f.state = "live"; f.warn = "";
     ARC.meas.distFt = f.live.distFt;
     ARC.meas.refError = f.live.err;
@@ -8739,7 +9156,7 @@ function floorMeasure(){
     ARC.meas.floorReading = f.live;
     ARC.meas.distSrc = "floor-line, LIVE — reticle on the wall/floor join at "
       + f.live.theta.toFixed(1) + "° below horizontal, height "
-      + f.hM.toFixed(2) + " m (" + (f.calibrated ? "measured on this phone" : "stated default") + ")";
+      + f.hM.toFixed(2) + " m (" + floorHSrcShort(f) + ")";
     return;
   }
   const h = floorHoldState();
@@ -8752,7 +9169,7 @@ function floorMeasure(){
     ARC.meas.floorReading = f.hold;
     ARC.meas.distSrc = "floor-line, HELD — measured " + (h.age/1000).toFixed(1)
       + " s earlier at " + f.hold.theta.toFixed(1) + "° below horizontal, height "
-      + f.hM.toFixed(2) + " m (" + (f.calibrated ? "measured on this phone" : "stated default") + ")"
+      + f.hM.toFixed(2) + " m (" + floorHSrcShort(f) + ")"
       + (f.motion.seen ? (f.motion.steps ? "; MOVED since" : "; no step detected since")
                        : "; this device reports no movement data");
     return;
@@ -8767,6 +9184,41 @@ function floorMeasure(){
   ARC.meas.distSrc = (h.code === "none") ? (f.why || h.why) : h.why;
 }
 
+/* ---- step 1 of the field flow: take the reading and move on to framing ----
+   The press does three things, and each of them is the honest version of
+   something the old screen did implicitly:
+
+     · it FREEZES the live reading. From here on floorStep stops latching, so
+       nothing that happens while the phone is being raised can quietly replace
+       a good measurement with one taken half way up the wall.
+     · it RESTARTS the movement account, so "have you moved?" is measured from
+       this reading and not from some earlier latch.
+     · it RECORDS the squareness attestation. The instruction the merchandiser
+       just read says "stand square to the wall"; pressing the button after
+       reading it is the statement, and the record still says the yaw was stated
+       rather than measured (yaw_verified = false). See arcFieldUI. */
+function arcFloorTakeReading(){
+  const f = ARC.floor, t = ARC.task;
+  if(!f.live){ toast(arcPlainFloorWhy(f), true); return; }
+  /* Freezing a reading taken from the wrong spot would only mean being told to
+     walk and then to measure again. Refuse it here as well as in the button's
+     enabled state, so a stray tap cannot get past it. */
+  const d = f.live.distFt - t.standoffFt;
+  if(Math.abs(d) > t.standoffTolFt){
+    toast(d < 0 ? ("Move back " + Math.abs(d).toFixed(1) + " ft first — you are too close to the wall.")
+                : ("Move in " + d.toFixed(1) + " ft first — you are too far from the wall."), true);
+    return;
+  }
+  f.hold = { distFt:f.live.distFt, theta:f.live.theta, thetaSigma:f.live.thetaSigma,
+             err:f.live.err, at:Date.now() };
+  f.step = "frame";
+  f.samples.length = 0;
+  floorMotionMark();
+  ARC.assumeSquare = true;
+  ARC.armT0 = 0; ARC.armed = false;
+  toast("Measured " + f.live.distFt.toFixed(1) + " ft. Straighten the phone up — keep your feet where they are.");
+}
+
 /* ---- entering and leaving the mode ---- */
 function floorInit(){
   const f = ARC.floor;
@@ -8775,6 +9227,7 @@ function floorInit(){
   f.theta = null; f.thetaSigma = null; f.thetaRaw = null;
   f.state = "none"; f.why = ""; f.warn = ""; f.code = "none";
   f.calibrating = null;
+  f.step = "measure";
   f.motion.seen = false; f.motion.g = null;
   floorMotionMark();
   floorResolveHeight();
@@ -8784,7 +9237,7 @@ function floorRelease(){
   const f = ARC.floor;
   f.on = false;
   f.samples = []; f.live = null; f.hold = null; f.calibrating = null;
-  f.theta = null; f.thetaSigma = null;
+  f.theta = null; f.thetaSigma = null; f.step = "measure";
   floorMotionDetach();
 }
 
@@ -8796,13 +9249,22 @@ function floorRelease(){
 function floorCalPanel(){
   const c = floorCalGet();
   const plain = (myRole() === "Merchandiser");
-  arcPanel('<h2>' + (plain ? "Teach it how tall you are" : "Calibrate phone height (floor-line)") + '</h2>'
+  const st = statureHold(myStatureCm());
+  arcPanel('<h2>' + (plain ? "Optional: measure this phone exactly" : "Calibrate phone height (floor-line)") + '</h2>'
     + '<p>' + (plain
-        ? 'It works out distance from how far down you tilt the phone — so it needs to know how high off '
-          + 'the floor you hold it. You only do this once on this phone.'
+        ? (st
+            ? 'The app already works your phone height out from your height (' + st.hM.toFixed(2)
+              + ' m, give or take ' + (st.relSigma*100).toFixed(0) + '%), and that is good enough for a '
+              + 'mock-up. This measures it exactly instead. It needs a tape measure and about five '
+              + 'minutes, and you never have to do it.'
+            : 'It works out distance from how far down you tilt the phone, so it needs to know how high '
+              + 'off the floor you hold it. Easier: answer the one height question in the menu. This is '
+              + 'the exact version, and it needs a tape measure.')
         : 'Floor-line distance is <span class="mono">d = h / tan θ</span>. θ comes from the phone; '
           + '<span class="mono">h</span> is solved here from one known distance, and its uncertainty is '
-          + 'recorded with it and carried into every later error bar.') + '</p>'
+          + 'recorded with it and carried into every later error bar. A saved calibration takes '
+          + 'precedence over the stature estimate (stature × <span class="mono">'
+          + HOLD_RATIO.toFixed(3) + '</span>).') + '</p>'
     + '<ol><li>Find a wall with clear floor at the bottom of it.</li>'
     + '<li>Measure a distance from that wall with a tape (or use a fixture you know the size of) and stand there.</li>'
     + '<li>Tap start, then tilt the phone down until the line sits exactly where the wall meets the floor.</li>'
@@ -8898,13 +9360,21 @@ function floorBarHtml(){
   /* --- the height in force. Shouted about while it is a guess, because that is
          the single term that puts the reading over the 5 % budget; once it is
          measured it lives quietly in the chip strip instead. --- */
-  if(!f.calibrated){
+  if(f.hSrcKey === "default"){
     rows.push(row("warn",
       '<b>ROUGH</b> — using a standard ' + f.hM.toFixed(2) + ' m ('
       + (f.hM*M_TO_FT).toFixed(1) + ' ft) phone height, not yours. That alone is worth ± '
       + (FLOOR_DEFAULT_H_SIGMA*100).toFixed(0) + '%.',
-      '<button class="arbtn pe on" data-arc="floorcal">'
-        + (plain ? "Set my height" : "Calibrate height") + '</button>'));
+      '<button class="arbtn pe on" data-arc="askheight">'
+        + (plain ? "Tell it my height" : "Set stature") + '</button>'
+      + '<button class="arbtn pe" data-arc="floorcal">'
+        + (plain ? "Measure exactly" : "Calibrate height") + '</button>'));
+  } else if(f.hSrcKey === "stature"){
+    rows.push(row("",
+      'h <b>' + f.hM.toFixed(2) + ' m</b> derived from stature × ' + HOLD_RATIO.toFixed(3)
+      + ' (neck level, as instructed) — ± ' + (f.hRelSigma*100).toFixed(1) + '%.',
+      '<button class="arbtn pe" data-arc="floorcal">'
+        + (plain ? "Measure exactly" : "Calibrate height") + '</button>'));
   }
 
   /* --- the live / held distinction, said plainly --- */
@@ -8998,6 +9468,11 @@ function floorBuildRecord(p){
   p.floorHeightM   = +Number(f.hM).toFixed(3);
   p.floorHeightPct = +(f.hRelSigma*100).toFixed(2);
   p.floorCalibrated = !!f.calibrated;
+  /* "device" (tape) / "stature" (profile height × HOLD_RATIO) / "default".
+     floorCalibrated stays === (key "device") so every existing reader — the
+     review screen's chip, the KPI notes, an already-stored note — keeps meaning
+     what it meant before a third source existed. */
+  p.floorHeightSrc = f.hSrcKey || (f.calibrated ? "device" : "default");
   p.floorHeightSource = f.hSrc;
   p.floorMotionSeen = !!f.motion.seen;
   if(r){
@@ -9018,10 +9493,15 @@ function floorNotes(p, notes){
   if(p.method !== "floor-line") return;
   notes.push("Distance came from FLOOR-LINE TRIGONOMETRY (d = h / tan θ) — nothing of a known size was in "
     + "frame and nothing was taped to the wall. It assumes the floor is level and the wall vertical.");
-  if(!p.floorCalibrated)
+  if(p.floorHeightSrc === "stature")
+    notes.push("The phone height was DERIVED from the merchandiser's own stated stature (× "
+      + HOLD_RATIO.toFixed(3) + ", the neck/shoulder fraction the capture screen instructs them to hold "
+      + "at), NOT measured on this device. It is worth ± " + Number(p.floorHeightPct).toFixed(1)
+      + "% — better than the stated default and looser than a tape calibration.");
+  else if(!p.floorCalibrated)
     notes.push("The phone height was the stated default of " + FLOOR_DEFAULT_H_M.toFixed(2) + " m, NOT measured "
-      + "on this device. That single term is worth ± " + (FLOOR_DEFAULT_H_SIGMA*100).toFixed(1)
-      + "% and dominates the error bar above.");
+      + "on this device and not derived from anyone's height. That single term is worth ± "
+      + (FLOOR_DEFAULT_H_SIGMA*100).toFixed(1) + "% and dominates the error bar above.");
   if(p.floorThetaDeg != null && p.floorThetaDeg < FLOOR_SHALLOW_WARN_DEG)
     notes.push("Aimed only " + p.floorThetaDeg.toFixed(1) + "° below horizontal, near the shallow end of the "
       + "usable band, where the answer moves " + p.floorFtPerDeg + " ft per degree of aim.");
@@ -9036,7 +9516,7 @@ function floorNotes(p, notes){
       + "% ang=" + p.floorThetaDeg.toFixed(2) + "deg/" + p.floorThetaSigmaDeg.toFixed(2)
       + "deg err=" + p.errorPct.toFixed(2) + "% (height " + p.errorTerms.height.toFixed(2)
       + " / pitch " + p.errorTerms.pitch.toFixed(2) + ") age=" + p.floorHeldS.toFixed(1)
-      + "s cal=" + (p.floorCalibrated ? "device" : "default") + "]");
+      + "s cal=" + (p.floorHeightSrc || (p.floorCalibrated ? "device" : "default")) + "]");
 }
 
 /* gate evaluation — one place, used by the HUD, the shutter and the record */
@@ -9126,13 +9606,241 @@ function arcTick(){
   arcDrawOverlay(g);
 }
 
+/* ==========================================================
+   THE FIELD BUILD OF THE CAPTURE SCREEN
+   ------------------------------------------------------------
+   Two steps and nothing else.
+
+     STEP 1 — MEASURE.  Camera view, ONE horizontal line, ONE button. Stand
+       square to the wall, hold the phone up at neck level, put the line where
+       the wall meets the floor, press. That press captures the depression angle
+       and solves d = h / tan θ.
+
+     STEP 2 — FRAME.  Straighten the phone up without moving your feet. The
+       poster is drawn on the wall at its true size. One button takes the photo.
+
+   Between them, one plain line says whether they are standing in the right
+   place. Warnings appear only when something is actually wrong.
+
+   WHY THE HOLD INSTRUCTION IS PART OF THE MEASUREMENT, not decoration:
+   h is derived as stature × HOLD_RATIO, and HOLD_RATIO describes a POSTURE
+   (neck/shoulder level, 0.82 of stature). The number is only worth its ± 4 %
+   because the person was told where to hold the phone. Removing the instruction
+   would not make the screen simpler, it would make the distance a guess — so
+   the instruction and the little figure beside it are shown on every capture,
+   not once during onboarding. See HOLD_RATIO in section 1.
+
+   WHY PRESSING "MEASURE" IS ALSO THE SQUARENESS ATTESTATION:
+   floor-line trigonometry measures distance and nothing else, and a bare wall
+   has no keystone to read yaw from, so squareness can only ever be stated. The
+   old screen asked for it in a separate permanent red panel ("CAN'T TELL IF
+   YOU'RE SQUARE ON") that a merchandiser had to dismiss on every capture. Here
+   the step-1 instruction says "stand square to the wall" and pressing the
+   button after reading it is the statement. The record is unchanged and still
+   honest: yaw_verified stays false, yawAssumed stays true, and the placement
+   note still says the squareness was confirmed by eye and not measured. */
+function arcFieldUI(){ return myRole() === "Merchandiser"; }
+
+/* A stick figure holding a phone level with its neck, with a dashed datum line
+   through both. Inline because there is no asset pipeline and no CDN. */
+const HOLD_CUE_SVG =
+  '<svg class="cue" viewBox="0 0 30 40" fill="none" stroke="currentColor" stroke-width="1.5" '
+  + 'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+  + '<circle cx="9" cy="6.5" r="4"/>'
+  + '<path d="M9 10.5v12"/>'
+  + '<path d="M9 22.5l-3.5 11M9 22.5l3.5 11"/>'
+  + '<path d="M9 14h5.5l3-1.5"/>'
+  + '<rect x="17.5" y="9" width="7.5" height="10.5" rx="1.4"/>'
+  + '<path d="M2 14h26" stroke-dasharray="2 2.5" opacity=".55"/>'
+  + '</svg>';
+
+/* The tilt/roll gates, said the way a person holding a phone would say them.
+   Returns [] when nothing is wrong, which is the only time they are shown. */
+function arcPlainAttitude(g){
+  const w = [];
+  if(g.pitch == null || g.roll == null){
+    w.push("This phone is not telling the app how it is being held.");
+    return w;
+  }
+  if(!g.pitchOk) w.push(g.pitch < 0
+    ? "The phone is leaning forward — bring the top of it back towards you."
+    : "The phone is leaning back — tip the top of it away from you.");
+  if(!g.rollOk) w.push("The phone is tipped to one side — level it up.");
+  return w;
+}
+/* Why there is no reading, in words a merchandiser can act on. */
+function arcPlainFloorWhy(f){
+  switch(f.code){
+    case "nosensor": return "This phone has not given the app a tilt reading yet.";
+    case "up":       return "Tilt the phone down — the line is above the floor.";
+    case "shallow":  return "Tilt further down, until the line sits right where the wall meets the floor.";
+    case "steep":    return "That is the floor by your own feet — raise the phone a little.";
+    case "moving":   return "Hold still for a moment.";
+    case "range":    return "That does not look like the bottom of a wall — check the line is on the join.";
+    default:         return "Put the line where the wall meets the floor.";
+  }
+}
+
+function arcRenderSimple(g, prog){
+  const t = ARC.task;
+  const f = ARC.floor;
+  const floorMode = (ARC.tier === "B" && ARC.mode === "floor");
+  const measuring = floorMode && f.step === "measure";
+  const hint = arcEl("arSimpleHint"), warnEl = arcEl("arSimpleWarn"),
+        btn  = arcEl("arSimpleBtn"),  foot   = arcEl("arSimpleFoot"),
+        alt  = arcEl("arSimpleAlt"),  dEl    = arcEl("arDist");
+
+  /* ---- the one line about where they are standing ---- */
+  if(dEl){
+    if(g.distance == null){
+      /* No number, so no line about the number. Whatever is wrong is already
+         being said once, in the warning slot, and saying "no distance yet"
+         underneath it is the kind of duplication this screen exists to remove.
+         The XR path is the exception: there "looking for the wall" is an
+         instruction (keep moving the phone), not a restatement. */
+      const looking = (ARC.tier === "A");
+      dEl.className = "arstat";
+      dEl.style.display = looking ? "" : "none";
+      dEl.innerHTML = looking ? "Looking for the wall — move the phone slowly" : "";
+    } else {
+      dEl.style.display = "";
+      const ok = Math.abs(g.delta) <= t.standoffTolFt;
+      dEl.className = "arstat " + (ok ? "ok" : "no");
+      /* A HELD reading is not a live one, and the field build must not let the
+         big green number imply the phone is still looking at the floor. Same
+         tag the instrument panel uses, worded for someone standing in a shop.
+         The moment it goes stale or they take a step, floorHoldState pulls the
+         distance out from under this and the warning slot says why. */
+      const held = (ARC.meas.heldMs != null)
+        ? '<span class="heldtag">MEASURED A MOMENT AGO</span> ' : '';
+      dEl.innerHTML = held + (ok
+        ? esc("Good spot — you are " + g.distance.toFixed(1) + " ft back")
+        : (g.delta < 0 ? esc("Move back " + Math.abs(g.delta).toFixed(1) + " ft")
+                       : esc("Move in "   + g.delta.toFixed(1) + " ft")));
+    }
+  }
+
+  /* ---- the instruction ---- */
+  let hintHtml = "";
+  if(measuring){
+    hintHtml = HOLD_CUE_SVG
+      + '<span>Stand square to the wall and <b>hold the phone up at neck level</b>. '
+      + 'Tilt it down until the line sits where the wall meets the floor, then press Measure.</span>';
+  } else if(floorMode){
+    hintHtml = '<span>Now <b>straighten the phone up</b> without moving your feet. '
+      + 'The poster is drawn on the wall at its real size.</span>';
+  } else if(ARC.tier === "A"){
+    hintHtml = '<span>Point at the empty wall and walk to where the line above tells you. '
+      + 'Hold the phone straight and the poster appears at its real size.</span>';
+  } else {
+    /* Which rectangle to point at is an INSTRUCTION, not the preset chip the
+       field build removed: that chip said "a4 sheet 210 x 297 mm - taped flat"
+       on every frame, forever. This says it once, in the words that tell them
+       where to look, and follows whatever reference is actually in force - the
+       installed poster on a verification after-shot, the taped sheet otherwise. */
+    const refWord = (ARC.refPreset === "poster") ? "the poster on the wall" : "the A4 sheet";
+    hintHtml = '<span>Keep all of ' + refWord + ' in shot and hold the phone straight. '
+      + 'The poster is drawn at its real size once you are in the right spot.</span>';
+  }
+  if(hint && hint.dataset.h !== hintHtml){ hint.dataset.h = hintHtml; hint.innerHTML = hintHtml; }
+
+  /* ---- warnings: only what is wrong, right now ---- */
+  const warn = [];
+  const footBtns = [];
+  /* iOS will not hand out DeviceOrientation without a user gesture, and the
+     gesture has to be a real tap on a real button. Without this the field build
+     would be a dead end on every iPhone, so it is the one control that survives
+     in both steps — and it disappears the moment the sensors are live. */
+  if(!ARC.sensors.on && ARC.tier !== "A")
+    footBtns.push('<button class="arbtn pe on" data-arc="sensors">Turn on the motion sensors</button>');
+  if(measuring){
+    if(!f.live) warn.push(arcPlainFloorWhy(f));
+  } else {
+    if(floorMode && g.distance == null){
+      /* HELD went stale or they walked. floorHoldState already worked out
+         which; say it in one clause and offer the only useful action. */
+      warn.push(f.state === "moved" ? "You moved — measure again."
+              : f.state === "stale" ? "That measurement is too old — measure again."
+              : "The measurement no longer holds — measure again.");
+    } else if(floorMode && f.warn){
+      warn.push(f.warn);
+    }
+    arcPlainAttitude(g).forEach(function(s){ warn.push(s); });
+    if(!ARC.assumeLevel && (g.pitch == null || g.roll == null))
+      footBtns.push('<button class="arbtn pe" data-arc="assume">I am holding it straight</button>');
+    /* Only offered while the DETECTOR is the thing that is failing. Once they
+       are dragging the four handles themselves, offering to hand them the
+       handles again is noise. */
+    if(!floorMode && ARC.tier === "B" && ARC.mode === "auto" && !ARC.det.locked)
+      footBtns.push('<button class="arbtn pe" data-arc="detmanual">Outline it by hand</button>');
+  }
+  /* The height in force, said once and QUIETLY — and only while it is the
+     stated default, which is the one case the merchandiser can fix. It goes in
+     the footer rather than the amber warning, because it is a standing caveat
+     about accuracy and not something to do right now; mixing it into the
+     warning line would bury the instruction that IS urgent. */
+  if(floorMode && f.hSrcKey === "default"){
+    footBtns.push('<span class="rough">Sizes are rough — the app is guessing how high you hold the phone.</span>'
+      + '<button class="arbtn pe on" data-arc="askheight">Tell it my height</button>');
+  }
+  const warnHtml = warn.length ? esc(warn.join(" ")) : "";
+  if(warnEl && warnEl.dataset.h !== warnHtml){ warnEl.dataset.h = warnHtml; warnEl.innerHTML = warnHtml; }
+  const footHtml = footBtns.join("");
+  if(foot && foot.dataset.h !== footHtml){ foot.dataset.h = footHtml; foot.innerHTML = footHtml; }
+
+  /* ---- the one button ---- */
+  if(btn){
+    let label, act, on, p = 0;
+    if(measuring){
+      /* THE WALKING HAPPENS HERE, while the reading is LIVE and the floor line
+         is still in view — that is the one moment the distance responds to the
+         merchandiser's feet. So the button waits for them to be in the band
+         rather than letting them freeze a reading they will then be told to
+         walk away from. The line above ("Move back 0.9 ft") is what they act
+         on; this button simply is not offered until it says they are there. */
+      label = "Measure"; act = "floormeasure"; on = !!(f.live && g.distOk);
+    } else if(floorMode && g.distance == null){
+      label = "Measure again"; act = "floorremeasure"; on = true;
+    } else {
+      label = "Take the photo"; act = "shoot"; on = !!ARC.armed; p = prog;
+    }
+    if(btn.dataset.l !== label){ btn.dataset.l = label; btn.textContent = label; }
+    if(btn.dataset.arc !== act) btn.dataset.arc = act;
+    btn.disabled = !on;
+    btn.style.setProperty("--p", (p*100).toFixed(0) + "%");
+  }
+
+  /* ---- the fallback, one unobtrusive line, only where it applies ----
+     Two-way, because a merchandiser who taps it by mistake would otherwise be
+     stuck taping paper to a wall for the rest of the capture: the only other
+     route back is the mode buttons, and those are exactly what the field build
+     removed. Never a co-equal choice — one underlined line, and only on the
+     phones that have no ARCore. */
+  let altTxt = "", altAct = "floorfallback";
+  if(floorMode){
+    altTxt = "Can’t see where the wall meets the floor?";
+  } else if(MOCKUP && ARC.tier === "B"){
+    altTxt = "Back to measuring off the floor";
+    altAct = "modefloor";
+  }
+  if(alt && alt.dataset.h !== altTxt){
+    alt.dataset.h = altTxt;
+    alt.textContent = altTxt;
+    alt.dataset.arc = altAct;
+    alt.style.display = altTxt ? "" : "none";
+  }
+}
+
 function arcRenderHud(g, prog){
   const t = ARC.task;
+  const simple = arcFieldUI();
+  const hud = arcEl("arHud");
+  if(hud) hud.classList.toggle("simple", simple);
   const n1 = v => (v==null||!isFinite(v)) ? "—" : Number(v).toFixed(1);
   const tierKey = arcTierKey();
   const tm = tierMeta(tierKey);
   const badge = arcEl("arTier");
-  if(badge){
+  if(badge && !simple){
     badge.className = "tierbadge " + tm.cls;
     /* Tier letters are a reviewer's vocabulary. The person holding the phone is
        told what the phone is doing instead. The tier itself is unchanged and
@@ -9157,7 +9865,8 @@ function arcRenderHud(g, prog){
      look identical otherwise. */
   const err = ARC.meas.refError;
   const eTxt = err ? ('  ·  ± ' + err.pct.toFixed(1) + '%') : '';
-  if(dEl){
+  if(dEl && !simple){
+    dEl.style.display = "";
     if(g.distance == null){
       dEl.className = "arstat";
       dEl.innerHTML = (ARC.tier === "A" ? "LOOKING FOR THE WALL — move the phone slowly" : "NO READING")
@@ -9186,12 +9895,12 @@ function arcRenderHud(g, prog){
   // ruler
   const lo = 0, hi = Math.max(t.standoffFt*2, t.standoffFt + 4);
   const pct = v => clamp((v - lo)/(hi - lo), 0, 1)*100;
-  const band = arcEl("arRulerBand");
+  const band = simple ? null : arcEl("arRulerBand");
   if(band){
     const a = pct(t.standoffFt - t.standoffTolFt), b = pct(t.standoffFt + t.standoffTolFt);
     band.style.left = a.toFixed(2)+"%"; band.style.width = Math.max(1.2, b-a).toFixed(2)+"%";
   }
-  const ticks = arcEl("arRulerTicks");
+  const ticks = simple ? null : arcEl("arRulerTicks");
   if(ticks && ticks.dataset.built !== "1"){
     let h = "";
     for(let v=0; v<=hi; v+=(hi>14?4:2)){
@@ -9199,12 +9908,12 @@ function arcRenderHud(g, prog){
     }
     ticks.innerHTML = h; ticks.dataset.built = "1";
   }
-  const nd = arcEl("arNeedle");
+  const nd = simple ? null : arcEl("arNeedle");
   if(nd) nd.style.left = (g.distance == null ? 50 : pct(g.distance)).toFixed(2)+"%";
 
   // angles
   const setStat = function(id, ok, text, sub){
-    const el = arcEl(id); if(!el) return;
+    const el = simple ? null : arcEl(id); if(!el) return;
     el.className = "arstat " + (ok === null ? "" : (ok ? "ok" : "no"));
     el.innerHTML = esc(text) + (sub ? '<span class="sub">'+esc(sub)+'</span>' : "");
   };
@@ -9233,7 +9942,7 @@ function arcRenderHud(g, prog){
     + "° — move round so you face the wall");
 
   // bubble level
-  const bub = arcEl("arBubble");
+  const bub = simple ? null : arcEl("arBubble");
   if(bub){
     const rng = Math.max(12, t.angleTolDeg*4);
     const bx = clamp((g.roll  || 0)/rng, -1, 1) * 34;
@@ -9243,17 +9952,17 @@ function arcRenderHud(g, prog){
   }
   // arming ring + shutter
   const C = 2*Math.PI*35;
-  const arm = arcEl("arArm");
+  const arm = simple ? null : arcEl("arArm");
   const prg = arm ? arm.querySelector(".prg") : null;
   if(prg) prg.setAttribute("stroke-dashoffset", (C*(1-prog)).toFixed(1));
-  const sh = arcEl("arShutter");
+  const sh = simple ? null : arcEl("arShutter");
   if(sh){
     sh.disabled = !ARC.armed;
     sh.className = "pe" + (ARC.armed ? " armed" : "");
     sh.title = ARC.armed ? "Capture" : "Shutter locks until every gate holds for " + (ARM_MS/1000).toFixed(1) + " s";
   }
   // chips + tools
-  const chips = arcEl("arChips");
+  const chips = simple ? null : arcEl("arChips");
   if(chips){
     const bits = [];
     bits.push('<span class="archip">f ' + (ARC.tier==="A"
@@ -9281,6 +9990,7 @@ function arcRenderHud(g, prog){
     chips.innerHTML = bits.join("");
   }
   arcRenderDetBar();
+  if(simple){ arcRenderSimple(g, prog); return; }
   const tools = arcEl("arTools");
   const attitudeLive = (g.pitch != null && g.roll != null && !g.attitudeAssumed);
   const key = [ARC.tier, ARC.mode, ARC.sensors.on?1:0, ARC.assumeLevel?1:0,
@@ -9473,7 +10183,13 @@ function arcRenderDetBar(){
   const d = ARC.det;
   let html = "";
   if(ARC.tier === "B" && ARC.mode === "floor"){
-    html = floorBarHtml();
+    /* The floor-line status bar IS the diagnostic console the field build
+       exists to get rid of — the ROUGH banner, the LIVE/HELD row with its error
+       percentage, the squareness panel and the spelled-out fallback. In the
+       field build every one of those facts is either shown as one plain line by
+       arcRenderSimple or is not something a merchandiser can act on. Managers
+       and admins keep the bar verbatim. */
+    html = arcFieldUI() ? "" : floorBarHtml();
   } else if(ARC.tier === "B" && ARC.mode === "auto"){
     const pct = Math.round(d.conf*100);
     const meter = '<span class="conf'+(d.conf >= DET_LOCK_CONF ? ' hi' : '')+'">'
@@ -9500,6 +10216,15 @@ function arcRenderDetBar(){
         + '<button class="arbtn pe on" data-arc="detconfirm">Use this</button>'
         + '<button class="arbtn pe" data-arc="detmanual">Adjust by hand</button>'
         + '<button class="arbtn pe" data-arc="detreject">No</button></div>';
+    } else if(pd){
+      /* Field build: the reference's catalogue label ("a4 sheet 210 × 297 mm —
+         taped flat") is the preset chip in prose. The merchandiser was told
+         which sheet to tape up on the screen before this one; here they only
+         need to know what to point at. The "outline by hand" escape lives in
+         the footer next to the button, not on a second row. */
+      html = '<div class="detrow"><span class="detmsg">'
+        + esc(d.note || ("Get all of " + (ARC.refPreset === "poster" ? "the poster" : "the sheet")
+              + " in shot, well lit, and hold still.")) + '</span></div>';
     } else {
       html = '<div class="detrow"><span class="detmsg">'
         + esc(d.note || "Point the camera so the whole " + arcRefDef().label.toLowerCase()
@@ -9543,7 +10268,12 @@ function arcDrawOverlay(g){
   ctx.moveTo(ccx, ccy-14); ctx.lineTo(ccx, ccy+14); ctx.stroke();
   ctx.restore();
 
-  if(ARC.mode === "floor" && ARC.tier === "B") floorDrawReticle(ctx, cw, ch, g);
+  /* The reticle belongs to the measuring step. In the field build's framing step
+     the phone is pointed at the wall and a line across the middle of the frame
+     would be pointing at nothing. */
+  const floorFraming = (ARC.mode === "floor" && ARC.tier === "B"
+                        && arcFieldUI() && ARC.floor.step === "frame");
+  if(ARC.mode === "floor" && ARC.tier === "B" && !floorFraming) floorDrawReticle(ctx, cw, ch, g);
 
   if(ARC.mode === "auto" && ARC.tier === "B"){
     const d = ARC.det, q = d.locked ? d.quad : d.cand;
@@ -9585,6 +10315,9 @@ function arcDrawOverlay(g){
   }
 
   if(g.distance == null) return;
+  /* Step 1 is a measurement, not a preview. The phone is aimed at the floor, so
+     drawing the poster there would lay it on the ground. */
+  if(arcFieldUI() && ARC.tier === "B" && ARC.mode === "floor" && ARC.floor.step === "measure") return;
 
   // XR draws straight in CSS px; camera tiers project in video px then map across.
   const nn = arcNudgeNorm();
@@ -10881,10 +11614,17 @@ document.getElementById("arlayer").addEventListener("click", function(e){
     case "floorcalsave":  floorCalSave(); break;
     case "floorcalcancel":ARC.floor.calibrating = null; break;
     case "floorcalclear": floorCalClear(); floorResolveHeight();
-                          toast("Height cleared — back to the rough default."); floorCalPanel(); break;
+                          toast("Calibration cleared — " + ARC.floor.hSrc + ".");
+                          floorCalPanel(); break;
     case "floorcalback":  arcPanel(null); if(ARC.tier === "B") arcLoop(); break;
     case "floorremeasure": ARC.floor.hold = null; ARC.floor.samples = [];
+                           ARC.floor.step = "measure";
                            toast("Tilt down onto the floor line again."); break;
+    /* The field build's single button is ONE element whose data-arc is swapped
+       between the two steps by arcRenderSimple, rather than two buttons on
+       screen at once. */
+    case "floormeasure":arcFloorTakeReading(); break;
+    case "askheight":   askHeight(true); break;
     case "floorfallback": floorRelease(); ARC.mode = "auto"; ARC.handles = [];
                           arcRenderHandles(); arcDetInit();
                           toast("Switched to the A4 sheet — tape one flat on the wall and keep it in shot.");
@@ -11731,6 +12471,115 @@ function runSelfTest(){
       GEO.floorLineError({ h:1.45, heightRelSigma:0.023, thetaDeg:FLOOR_MIN_DEPRESSION,
                            thetaSigmaDeg:0.6 }).pct.toFixed(2) + " % — reported, but loudly");
 
+    /* --- 3b. h from stature: the RATIO derivation and its error propagation ---
+       The thing being pinned is that h is a FRACTION of stature and not a fixed
+       subtraction, because a subtraction is biased at both ends of the height
+       range and no error bar fixes a bias. The uncertainty constants are pinned
+       too: they are an error budget, and a silent change to one of them should
+       break a test rather than quietly move every capture's reported accuracy. */
+    (function statureTests(){
+      const s170 = statureHold(170), s150 = statureHold(150), s190 = statureHold(190);
+      T("stature: h = stature × HOLD_RATIO at 170 cm", s170.hM, 1.70*HOLD_RATIO, 1e-12,
+        "1.70 × " + HOLD_RATIO + " = " + (1.70*HOLD_RATIO).toFixed(4) + " m");
+      T("stature: …and at 150 cm", s150.hM, 1.50*HOLD_RATIO, 1e-12);
+      T("stature: …and at 190 cm", s190.hM, 1.90*HOLD_RATIO, 1e-12);
+      T("stature: h/stature is the SAME at every height — that is what a ratio means",
+        (s150.hM/1.50 === s170.hM/1.70) && (s170.hM/1.70 === s190.hM/1.90), true);
+      /* The discriminating case. A flat offset would make this difference the
+         full 0.40 m of stature difference; a ratio scales it by HOLD_RATIO. */
+      T("stature: 40 cm of extra stature moves h by 40 cm × the ratio, NOT by 40 cm",
+        s190.hM - s150.hM, 0.40*HOLD_RATIO, 1e-12,
+        "a subtraction would give 0.4000; a ratio gives " + (0.40*HOLD_RATIO).toFixed(4));
+      T("stature: a flat-offset model would disagree by over 7 cm across the range",
+        Math.abs((s190.hM - s150.hM) - 0.40) > 0.07, true,
+        null, "the bias a constant offset bakes in at the ends of the range");
+
+      /* Posture is a one-line change, and the two documented postures differ. */
+      const eye170 = statureHold(170, HOLD_RATIO_EYE);
+      T("stature: the eye-level posture is a ratio swap and nothing else",
+        eye170.hM, 1.70*HOLD_RATIO_EYE, 1e-12);
+      T("stature: eye level sits above neck level, as it must", eye170.hM > s170.hM, true,
+        null, HOLD_RATIO_EYE + " vs " + HOLD_RATIO_NECK);
+      T("stature: HOLD_RATIO defaults to the posture the capture screen instructs",
+        HOLD_RATIO, HOLD_RATIO_NECK, 0, "\"hold the phone up at neck level\"");
+
+      /* --- the error budget --- */
+      const hand = Math.sqrt(Math.pow(HOLD_RATIO*STATURE_SIGMA_M, 2)
+                           + Math.pow(1.70*HOLD_RATIO_SIGMA, 2)
+                           + Math.pow(HOLD_COMPLY_SIGMA_M, 2));
+      T("stature error: sigma_h is the quadrature sum of the three terms, in metres",
+        s170.sigmaM, hand, 1e-12);
+      T("stature error: …and is SMALLER than adding them linearly",
+        s170.sigmaM < (HOLD_RATIO*STATURE_SIGMA_M + 1.70*HOLD_RATIO_SIGMA + HOLD_COMPLY_SIGMA_M), true,
+        null, "catches a sum where a quadrature sum belongs");
+      T("stature error: the relative figure is sigma_h / h, ~4 % for a median adult",
+        s170.relSigma, 0.040061, 1e-5,
+        (s170.relSigma*100).toFixed(2) + " % — pins the three constants");
+      T("stature error: it is relatively WORSE for a shorter person",
+        s150.relSigma > s170.relSigma && s170.relSigma > s190.relSigma, true, null,
+        (s150.relSigma*100).toFixed(2) + " % / " + (s170.relSigma*100).toFixed(2)
+          + " % / " + (s190.relSigma*100).toFixed(2) + " % at 150 / 170 / 190 cm");
+      T("stature error: better than the stated default it replaces",
+        s170.relSigma < FLOOR_DEFAULT_H_SIGMA, true, null,
+        (s170.relSigma*100).toFixed(2) + " % vs " + (FLOOR_DEFAULT_H_SIGMA*100).toFixed(1) + " %");
+      T("stature error: and honestly WORSE than a tape calibration, at every height",
+        [s150, s170, s190].every(function(s){ return s.relSigma > 0.023; }), true, null,
+        "0.023 is the calibrated figure the 5 % budget was proved against");
+
+      /* --- propagation into the distance the merchandiser is actually shown --- */
+      const fieldErrPct = function(h, hRel){
+        const th = GEO.deg(Math.atan(h/GEO.ftToM(6)));
+        return GEO.floorLineError({ h:h, heightRelSigma:hRel, thetaDeg:th,
+                 thetaSigmaDeg:arcQuad(FLOOR_PITCH_SIGMA_FLOOR, FLOOR_AIM_SIGMA_DEG) }).pct;
+      };
+      const eStat = fieldErrPct(s170.hM, s170.relSigma);
+      const eCal  = fieldErrPct(s170.hM, 0.023);
+      const eDef  = fieldErrPct(FLOOR_DEFAULT_H_M, FLOOR_DEFAULT_H_SIGMA);
+      T("stature: a median adult at 6 ft meets the 5 % field budget", eStat <= 5, true, null,
+        eStat.toFixed(2) + " % at " + GEO.deg(Math.atan(s170.hM/GEO.ftToM(6))).toFixed(1) + " deg");
+      T("stature: …strictly between the tape-calibrated and the default paths",
+        eCal < eStat && eStat < eDef, true, null,
+        "tape " + eCal.toFixed(2) + " % < stature " + eStat.toFixed(2)
+          + " % < default " + eDef.toFixed(2) + " %");
+      T("stature: nothing is hardcoded — the height term IS the propagated sigma",
+        GEO.floorLineError({ h:s170.hM, heightRelSigma:s170.relSigma, thetaDeg:45,
+                             thetaSigmaDeg:0 }).rel, s170.relSigma, 1e-12);
+      T("stature: the shortest adult in the band is still reported honestly, not hidden",
+        fieldErrPct(s150.hM, s150.relSigma) < 6, true, null,
+        fieldErrPct(s150.hM, s150.relSigma).toFixed(2)
+          + " % at 150 cm — over 5 %, and the record says so rather than rounding it away");
+
+      /* --- the band the database itself enforces --- */
+      T("stature: below the CHECK constraint is refused, not clamped",
+        statureHold(STATURE_MIN_CM - 1), null);
+      T("stature: above it is refused too", statureHold(STATURE_MAX_CM + 1), null);
+      T("stature: the boundaries themselves are accepted",
+        !!statureHold(STATURE_MIN_CM) && !!statureHold(STATURE_MAX_CM), true);
+      T("stature: a missing height is not a zero height", statureHold(null), null);
+      T("stature: a value typed in inches is refused", statureHold(68), null,
+        null, "the mistake a bare number input actually produces");
+      T("stature: a value typed in millimetres is refused", statureHold(1720), null);
+      T("stature: nonsense is refused", statureHold("tall"), null);
+
+      /* --- provenance survives the round trip through placements.note --- */
+      const nStat = "[floor h=1.394m/4.01% ang=37.32deg/0.60deg err=4.56% (height 4.01 / pitch 2.19) "
+                  + "age=2.0s cal=stature]";
+      const pStat = floorEvidenceFromNote(nStat, {});
+      T("stature note: the third source round-trips", pStat.floorHeightSrc, "stature", 0);
+      T("stature note: …and never claims to be a device calibration",
+        pStat.floorCalibrated, false);
+      T("stature note: the height and its sigma come back off the tag",
+        pStat.floorHeightM === 1.394 && pStat.floorHeightPct === 4.01, true);
+      const pDev = floorEvidenceFromNote(
+        "[floor h=1.500m/2.30% ang=39.00deg/0.60deg err=3.10% (height 2.30 / pitch 2.08) "
+        + "age=1.0s cal=device]", {});
+      T("stature note: an existing device-calibrated note is unchanged by the new source",
+        pDev.floorCalibrated === true && pDev.floorHeightSrc === "device", true);
+      T("stature note: the three sources are worded differently for the reviewer",
+        floorHSrcShort({hSrcKey:"device"}) !== floorHSrcShort({hSrcKey:"stature"})
+        && floorHSrcShort({hSrcKey:"stature"}) !== floorHSrcShort({hSrcKey:"default"}), true);
+    })();
+
     /* --- 4. depression is roll-invariant; the HUD pitch is not --- */
     // gravity for a camera aiming 40° down, held perfectly upright
     const dep = 40, sd = Math.sin(GEO.rad(dep)), cd = Math.cos(GEO.rad(dep));
@@ -12065,6 +12914,7 @@ function afterSignIn(){
   renderGate();
   render();
   legacyDataNotice();
+  maybeAskHeight();
   Outbox.kick();
   Poller.start();
   Repo.prime().then(function(){ render(); }, function(err){
@@ -12424,9 +13274,19 @@ function toggleMenu(){
       + '<button class="menuitem" data-act="diagnostics">AR capture diagnostics</button>'
       + '<button class="menuitem" data-act="capsmodal">Capture capability report</button>'
     : '';
+  /* Where the height question lives once it has been answered or skipped. It is
+     one line in a menu, not a settings screen, because there is exactly one
+     number behind it. */
+  const hcm = myStatureCm();
+  const height = profileHeightSupported()
+    ? '<button class="menuitem" data-act="myheight">'
+      + (hcm ? "Your height — " + hcm + " cm" : "Set your height (sizes are rough without it)")
+      + '</button>'
+    : '';
   $("#pops").innerHTML = '<div class="pop" style="width:268px"><div class="ph">Menu</div>'
     + '<button class="menuitem" data-act="syncpanel">Sync status — '+esc(s.label)+'</button>'
     + '<button class="menuitem" data-act="resyncnow">Refresh from server</button>'
+    + height
     + tools
     + '<button class="menuitem" data-act="signout">Sign out</button>'
     + '<div style="padding:10px 12px;border-top:1px solid var(--border);font-size:11.5px;color:var(--text-3)">'
@@ -12628,6 +13488,7 @@ document.addEventListener("click", function(e){
     case "signout":    closePops(); closeModal(); doSignOut(); break;
     case "syncpanel":  closePops(); openSyncPanel(); break;
     case "resyncnow":  closePops(); Outbox.kick(); Poller.now(); toast("Refreshing from the server."); break;
+    case "myheight":   closePops(); askHeight(true); break;
     case "clearlocal": closePops(); doClearLocal(); break;
     case "statemodal": {
       closePops();
@@ -12725,7 +13586,7 @@ function boot(){
       /* Refresh the profile too: a role can have been changed by an admin
          since this device last synced, and the cached copy must not outrank
          the server's. */
-      Session.loadProfile().then(function(){ renderChrome(); }, function(){});
+      Session.loadProfile().then(function(){ renderChrome(); maybeAskHeight(); }, function(){});
       Repo.refresh(true).then(function(){ render(); }, function(err){
         if(err && err.kind !== "auth" && err.kind !== "offline" && !state.everSynced)
           toast("Could not reach the server: " + errText(err), true);

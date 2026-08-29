@@ -272,6 +272,48 @@ select pg_temp.must_be_blocked(
   format('update public.profiles set role = ''Admin'' where id = %L',
          current_setting('niva.t_s2')));
 
+-- --- 0006: height_cm ---------------------------------------------------
+-- profiles_update_self is a ROW policy, so it already covers a column added
+-- later. What has to be proved is that covering it does not open a route to a
+-- role: the two writes travel in the same statement and the guard trigger takes
+-- the whole statement down, height included. Skipped with a notice on a
+-- database that has not applied 0006 yet, so this file still runs against
+-- 0001–0005 alone.
+do $$
+begin
+  if not exists (select 1 from information_schema.columns
+                  where table_schema = 'public' and table_name = 'profiles'
+                    and column_name = 'height_cm') then
+    raise notice 'SKIP  A15a-A15e profiles.height_cm — 0006_profile_height.sql not applied';
+    return;
+  end if;
+
+  perform pg_temp.must_succeed(
+    'A15a merchandiser CAN set their own height_cm',
+    format('update public.profiles set height_cm = 173 where id = %L',
+           current_setting('niva.t_s1')));
+
+  perform pg_temp.must_be_blocked(
+    'A15b merchandiser CANNOT set someone else''s height_cm',
+    format('update public.profiles set height_cm = 199 where id = %L',
+           current_setting('niva.t_s2')));
+
+  perform pg_temp.must_be_blocked(
+    'A15c a role change smuggled alongside a height change takes the whole statement down',
+    format('update public.profiles set height_cm = 174, role = ''Admin'' where id = %L',
+           current_setting('niva.t_s1')));
+
+  perform pg_temp.ok(
+    'A15d  …and that refused statement wrote no height either',
+    (select height_cm from public.profiles
+      where id = current_setting('niva.t_s1')::uuid) = 173);
+
+  perform pg_temp.must_raise(
+    'A15e a height typed in inches is refused by the CHECK constraint',
+    format('update public.profiles set height_cm = 68 where id = %L',
+           current_setting('niva.t_s1')));
+end $$;
+
 select pg_temp.must_be_blocked(
   'A16 merchandiser CANNOT update an audit row',
   format('update public.audit_events set detail = ''tampered'' where id = %s',
