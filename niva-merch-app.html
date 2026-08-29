@@ -551,6 +551,10 @@ table.tbl tr:last-child td{border-bottom:0}
 #arHud.simple #arLevel,
 #arHud.simple #arShutterWrap{display:none}
 #arHud.simple .arbar.bottom{gap:9px;padding:14px 12px 18px}
+/* The ONE extra line the fit maths earns: how much wall is in view, or where to
+   stand so the poster fits. Quiet, under the distance line, never a chip. */
+#arSee{font-size:12px;line-height:1.4;color:#b8c7d8;padding:0 2px}
+#arSee:empty{display:none}
 #arSimpleHint{font-size:13.5px;line-height:1.45;color:#dbe6f2;background:rgba(10,18,28,.74);
   border:1px solid rgba(255,255,255,.14);border-radius:10px;padding:10px 12px;
   display:flex;gap:11px;align-items:center;backdrop-filter:blur(6px)}
@@ -1110,6 +1114,50 @@ const ANGLE_TOL_DEG   = 5;     // ± per axis
 const ARM_MS          = 800;   // gates must hold continuously this long
 const ASSUMED_HFOV_DEG= 66;    // last-resort smartphone horizontal FOV
 
+/* ---- MOCKUP MODE: the standoff comes from the POSTER, not from a constant ----
+
+   STANDOFF_FT above is a VERIFICATION number and stays one. It says "photograph
+   the installed poster from 6 ft" because that is the spec the evidence is
+   measured against, and a manager may override it per task. In MOCKUP mode
+   there is no installed poster and no evidence: a merchandiser is holding a
+   phone in front of a BARE wall, and the only thing that matters is whether the
+   artwork can be DRAWN COMPLETE on it. That is a property of the poster and the
+   lens, not of a policy — so it is derived, not configured.
+
+   A frame `px` pixels wide with focal length f sees, at a perpendicular
+   distance d,
+
+       S_visible = d · px / f                      (GEO.visibleSpan)
+
+   At 6 ft a 66°-HFOV phone therefore sees about 7.8 ft of wall, and a 9 × 8 ft
+   poster CANNOT be drawn complete from there. The old fixed gate was not merely
+   wrong for that task, it was unsatisfiable — which is exactly what the
+   merchandiser hit. Rearranged, the distance at which a poster W wide fills a
+   chosen fraction of the frame is
+
+       d = f · W / (fill · px)                     (GEO.distanceForFill)
+
+   giving the two numbers this mode uses instead of a constant:
+
+     · RECOMMENDED — fill = FRAME_FILL_TARGET. The poster is big in frame with
+       room around it to see the wall it is sitting on. 9 × 8 ft on a portrait
+       phone lands at 9.9 ft.
+     · MINIMUM — fill = 1, the poster exactly filling the frame. Below this the
+       capture is not off-spec, it is IMPOSSIBLE, and it is the only hard block
+       left in mockup mode. 9 × 8 ft lands at 6.9 ft, which is why 6 ft could
+       never have worked.
+
+   Everything from the minimum outwards is allowed: the merchandiser stands
+   where the wall lets them stand. */
+const FRAME_FILL_TARGET = 0.70;   // poster/frame width fraction at the recommended distance
+const FRAME_FILL_FULL   = 1.00;   // …and at the minimum workable distance
+/* The one place a recommendation must be quoted before any camera is open — the
+   brief a merchandiser reads before walking into the store. Portrait, at the
+   assumed lens, because that is the phone the app falls back to. The LIVE
+   capture screen never uses this: it measures the frame it actually has. */
+const NOMINAL_FRAME_W   = 1080;
+const NOMINAL_FRAME_H   = 1920;
+
 /* ---- reference-scale error budget ----
    Distance from a reference is D = f·W/w_px, so every one of these is a
    RELATIVE standard deviation feeding a quadrature sum. They are declared here
@@ -1603,6 +1651,103 @@ const GEO = (function(){
   function pixelWidthFromAngle(theta, focalPx){ return 2*focalPx*Math.tan(theta/2); }
   function posterPixelWidth(W, D, focalPx){ return focalPx*W/D; }
 
+  /* ---- how much wall is in frame, and where to stand for a given poster ----
+
+     The same pinhole relation as everything above, read the other way round. A
+     frame `px` pixels wide with focal length f subtends 2·atan(px/2f), so on a
+     plane a perpendicular distance d away it spans
+
+         S_visible = d · px / f
+
+     exactly — px/f is a TANGENT, not a small-angle approximation, and d·tan is
+     the true span on a plane parallel to the sensor. Everything below is that
+     identity rearranged: a poster W wide occupies the fraction W/S_visible of
+     the frame, and the distance at which it occupies a chosen fraction is
+     d = f·W/(fill·px).
+
+     THE FIT TEST IS NOT A PREDICTION ABOUT THE LENS. It is fed the SAME f that
+     posterQuad() is drawn with, so "the poster fits in view" is the statement
+     that the quad the overlay draws lands inside the frame. If f is wrong the
+     drawing and the test are wrong together, and stay consistent — which is the
+     only guarantee worth having on a fleet where f is an assumed 66 %.        */
+  const FIT_EPS = 1e-9;   // exactly-fills must count as fitting, not as 1 + 1 ulp
+  function fitsWithin(need, have){
+    if(!isFinite(need) || !isFinite(have)) return false;
+    return have + FIT_EPS >= need;
+  }
+  function visibleSpan(d, px, focalPx){
+    if(!(d > 0) || !(px > 0) || !(focalPx > 0)) return NaN;
+    return d*px/focalPx;
+  }
+  function distanceForFill(spanFt, fillFrac, px, focalPx){
+    if(!(spanFt > 0) || !(fillFrac > 0) || !(px > 0) || !(focalPx > 0)) return NaN;
+    return focalPx*spanFt/(fillFrac*px);
+  }
+  /* Recommended and minimum standoff for one poster in one frame.
+
+     BOTH DIMENSIONS ARE CHECKED and the FURTHER of the two wins, because a
+     poster that fits across the frame but runs off the top is not in the shot.
+     On the phone the field build actually runs on — portrait, wide FOV across
+     the narrow dimension — the width is what binds, and a 9 × 8 ft poster comes
+     out at 9.9 ft. Turn the same frame on its side and the height binds and the
+     answer grows, which is correct and not a special case. */
+  function posterStandoff(o){
+    const fx = (o.fx > 0) ? o.fx : NaN;
+    const fy = (o.fy > 0) ? o.fy : fx;
+    const fill = (o.fill > 0 && o.fill <= 1) ? o.fill : FRAME_FILL_TARGET;
+    const dw = distanceForFill(o.widthFt,  fill, o.frameW, fx);
+    const dh = distanceForFill(o.heightFt, fill, o.frameH, fy);
+    const wOk = isFinite(dw), hOk = isFinite(dh);
+    if(!wOk && !hOk) return { recommendedFt:NaN, minimumFt:NaN, limit:null, fill:fill };
+    const rec = (wOk && hOk) ? Math.max(dw, dh) : (wOk ? dw : dh);
+    const mw = distanceForFill(o.widthFt,  FRAME_FILL_FULL, o.frameW, fx);
+    const mh = distanceForFill(o.heightFt, FRAME_FILL_FULL, o.frameH, fy);
+    const min = (isFinite(mw) && isFinite(mh)) ? Math.max(mw, mh) : (isFinite(mw) ? mw : mh);
+    return { recommendedFt: rec, minimumFt: min, fill: fill,
+             limit: (wOk && hOk) ? (dw >= dh ? "width" : "height") : (wOk ? "width" : "height"),
+             recommendedWidthFt: dw, recommendedHeightFt: dh };
+  }
+  /* What one distance actually buys: the wall span in view, and whether the
+     poster is inside it. `limit` names the dimension that is tightest — the one
+     the merchandiser has to be told about. */
+  function viewFit(o){
+    const fx = (o.fx > 0) ? o.fx : NaN;
+    const fy = (o.fy > 0) ? o.fy : fx;
+    const vw = visibleSpan(o.distanceFt, o.frameW, fx);
+    const vh = visibleSpan(o.distanceFt, o.frameH, fy);
+    const fillW = (vw > 0) ? o.widthFt/vw  : Infinity;
+    const fillH = (vh > 0) ? o.heightFt/vh : Infinity;
+    const fitsWidth  = fitsWithin(o.widthFt,  vw);
+    const fitsHeight = fitsWithin(o.heightFt, vh);
+    return {
+      visibleWFt: vw, visibleHFt: vh,
+      fillW: fillW, fillH: fillH,
+      fitsWidth: fitsWidth, fitsHeight: fitsHeight,
+      fits: fitsWidth && fitsHeight,
+      limit: (fillW >= fillH) ? "width" : "height"
+    };
+  }
+  /* The real span between two marks the merchandiser dragged onto the wall.
+     Each mark is a pixel column (or row); its angle off the optical axis is
+     α = atan((x − c)/f), and on a plane a perpendicular distance d away the
+     lateral offset of that ray is d·tan α, so
+
+         span = d · (tan α_b − tan α_a)
+
+     Written through the angles on purpose: it is the form that makes the
+     standing assumption visible — d is the PERPENDICULAR distance and the wall
+     is parallel to the sensor, which is the squareness the capture gates
+     already require and the merchandiser already attests. It also hands back
+     the two α's, which is what a reviewer needs to see how far off-axis the
+     marks were. */
+  function spanFromPixels(d, a, b, centre, focalPx){
+    if(!(d > 0) || !(focalPx > 0)) return null;
+    if(!isFinite(a) || !isFinite(b) || !isFinite(centre)) return null;
+    const aa = Math.atan((a - centre)/focalPx), ab = Math.atan((b - centre)/focalPx);
+    return { ft: Math.abs(d*(Math.tan(ab) - Math.tan(aa))),
+             alphaADeg: deg(aa), alphaBDeg: deg(ab) };
+  }
+
   /* ---- small vector helpers ---- */
   function vlen(v){ return Math.sqrt(v[0]*v[0]+v[1]*v[1]+v[2]*v[2]); }
   function vnorm(v){ const m = vlen(v) || 1; return [v[0]/m, v[1]/m, v[2]/m]; }
@@ -1903,6 +2048,8 @@ const GEO = (function(){
     focalFromFov:focalFromFov, fovFromFocal:fovFromFocal,
     distanceFromWidth:distanceFromWidth, focalFromCalibration:focalFromCalibration,
     angularSize:angularSize, pixelWidthFromAngle:pixelWidthFromAngle, posterPixelWidth:posterPixelWidth,
+    fitsWithin:fitsWithin, visibleSpan:visibleSpan, distanceForFill:distanceForFill,
+    posterStandoff:posterStandoff, viewFit:viewFit, spanFromPixels:spanFromPixels,
     vlen:vlen, vnorm:vnorm, vdot:vdot, vcross:vcross, quatRotate:quatRotate,
     normalToAngles:normalToAngles, anglesToNormal:anglesToNormal,
     gravityFromOrientation:gravityFromOrientation, applyScreenAngle:applyScreenAngle,
@@ -4092,6 +4239,37 @@ function floorEvidenceFromNote(note, p){
   p.floorCalibrated   = (m[9] === "device");
   return p;
 }
+/* THE MOCKUP FIT EVIDENCE rides in placements.note for the same reason [ref …]
+   and [floor …] do, and the reason is not tidiness: there is no column for any
+   of it, a PostgREST insert naming an unknown column fails 400 PGRST204, and
+   the outbox treats a 400 as PERMANENT — so a client that got ahead of its
+   database would LOSE captures rather than degrade. Everything needed to
+   re-derive the decision is in the tag: what the frame covered, the two derived
+   distances, the combined 1σ, whether the poster fitted the FRAME, and
+   separately whether it fitted the WALL the merchandiser marked (or that they
+   never marked one), and whether they were told it did not fit and shot it
+   anyway. `wall=none` and `onwall=unknown` are the honest values when check (b)
+   was never run; a zero wall height means the ceiling/skirting pair was left
+   alone, which is not the same as a wall 0 ft tall.
+   ASCII throughout — a note is plain text on a round trip through Postgres, an
+   outbox blob and a render cache. */
+const FIT_NOTE_RE = /\[fit see=([\d.]+)x([\d.]+)ft rec=([\d.]+)ft min=([\d.]+)ft err=([\d.]+)% view=(yes|no) wall=(?:none|([\d.]+)x([\d.]+)ft) onwall=(yes|no|unknown) ack=(yes|no)\]/;
+function fitEvidenceFromNote(note, p){
+  if(!note) return p;
+  const m = FIT_NOTE_RE.exec(note);
+  if(!m) return p;
+  p.visibleWFt       = Number(m[1]);
+  p.visibleHFt       = Number(m[2]);
+  p.fitRecommendedFt = Number(m[3]);
+  p.fitMinimumFt     = Number(m[4]);
+  p.fitRelPct        = Number(m[5]);
+  p.fitsInView       = (m[6] === "yes");
+  p.wallWFt          = m[7] == null ? null : Number(m[7]);
+  p.wallHFt          = (m[8] == null || Number(m[8]) === 0) ? null : Number(m[8]);
+  p.fitsOnWall       = (m[9] === "unknown") ? null : (m[9] === "yes");
+  p.wallOverflowAck  = (m[10] === "yes");
+  return p;
+}
 function mapPlacement(r){
   if(!r) return null;
   const p = {
@@ -4111,6 +4289,7 @@ function mapPlacement(r){
   };
   refEvidenceFromNote(p.note, p);
   floorEvidenceFromNote(p.note, p);
+  fitEvidenceFromNote(p.note, p);
   /* The method is a second axis and has no column of its own. Floor-line says
      so in the note; everything else is implied by the tier it already carries,
      so rows written before methods existed still classify correctly. */
@@ -5837,7 +6016,17 @@ function viewReview(p){
     + (MOCKUP && t.placement && t.placement.distanceFt != null
         ? '<dt>Shot from</dt><dd class="num">'+Number(t.placement.distanceFt).toFixed(1)+' ft from the wall</dd>'
         : '')
-    +   '<dt>'+byMode("Asked to stand","Target standoff")+'</dt><dd class="num">'+Number(t.standoffFt).toFixed(1)+' ft ± '+t.standoffTolFt+' ft</dd>'
+    + (MOCKUP && t.placement && t.placement.fitsOnWall != null
+        ? '<dt>Wall they marked</dt><dd class="num">'+Number(t.placement.wallWFt).toFixed(1)
+          + (t.placement.wallHFt ? ' × '+Number(t.placement.wallHFt).toFixed(1) : '')+' ft '
+          + '<span class="chip '+(t.placement.fitsOnWall ? "pass" : "fail")+'">'
+          + (t.placement.fitsOnWall ? "POSTER FITS" : "POSTER OVERFLOWS")+'</span></dd>'
+        : '')
+    +   '<dt>'+byMode("Asked to stand","Target standoff")+'</dt><dd class="num">'
+    +   (MOCKUP
+          ? 'about '+fmtRoughFt(taskStandoff(t).recommendedFt, taskStandoff(t).recommendedFt*FOCAL_SIGMA_ASSUMED)+' ft'
+            + ' <span style="color:var(--text-3)">derived from the poster</span>'
+          : Number(t.standoffFt).toFixed(1)+' ft ± '+t.standoffTolFt+' ft')+'</dd>'
     +   '<dt>Angle tolerance</dt><dd class="num">± '+t.angleTolDeg+'°</dd>'
     + '</dl></div></div>';
 
@@ -6182,6 +6371,10 @@ function storeInfoCard(t){
 /* The manager-authored capture spec, as the merchandiser sees it. */
 function captureBriefCard(t){
   const art = t.posterArt && t.posterArt.src ? resolveImg(t.posterArt.src) : "";
+  /* MOCKUP: the distance is a consequence of the artwork's size and the phone's
+     lens, so it is computed here rather than read off the task. Verification
+     still quotes the manager's spec, tolerance and all. */
+  const so = taskStandoff(t);
   return '<div class="card" style="margin-bottom:14px"><div class="hd"><h3>'
     + byMode("What is being mocked up","Guided capture brief")+'</h3>'
     + '<div style="flex:1"></div><span class="hint" style="margin:0">set by '+esc(userById(t.managerId).name)+'</span></div>'
@@ -6189,7 +6382,13 @@ function captureBriefCard(t){
     + (art ? '<div class="posterthumb"><img alt="poster artwork" src="'+art+'"></div>' : '')
     + '<div style="flex:1;min-width:180px"><dl class="kv">'
     +   '<dt>Poster</dt><dd class="num">'+t.widthFt+' ft × '+t.heightFt+' ft</dd>'
-    +   '<dt>Stand back</dt><dd class="num">'+Number(t.standoffFt).toFixed(1)+' ft <span style="color:var(--text-3)">± '+t.standoffTolFt+' ft</span></dd>'
+    +   '<dt>Stand back</dt><dd class="num">'
+    +   (so.derived
+          ? 'about '+fmtRoughFt(so.recommendedFt, so.recommendedFt*so.relSigma)+' ft'
+            + ' <span style="color:var(--text-3)">or more — under '
+            + fmtRoughFt(so.minimumFt, so.minimumFt*so.relSigma)
+            + ' ft the poster will not fit in the picture</span>'
+          : Number(t.standoffFt).toFixed(1)+' ft <span style="color:var(--text-3)">± '+t.standoffTolFt+' ft</span>')+'</dd>'
     +   '<dt>Squareness</dt><dd class="num">± '+t.angleTolDeg+'° on tilt, roll and yaw</dd>'
     +   '<dt>Hold steady</dt><dd class="num">'+(ARM_MS/1000).toFixed(1)+' s before the shutter arms</dd>'
     + '</dl></div></div>'
@@ -6229,8 +6428,16 @@ function placementBlock(p, t){
     + '<div class="phd"><span class="big">'+n2(p.distanceFt)+' ft</span>'
     +   '<span style="font-size:11.5px;opacity:.75">measured</span>'
     +   '<div style="flex:1"></div><span class="tierbadge '+tm.cls+'">'+esc(p.tierLabel||tm.label)+'</span></div>'
-    + row("Standoff distance", n2(p.distanceFt)+' ft <span style="opacity:.6">vs '+nt(tgt)+' ± '+nt(p.tolFt)+'</span>',
-          p.distanceOk, delta==null?"":"("+(delta>=0?"+":"")+delta.toFixed(2)+" ft)")
+    + ((MOCKUP && p.fitMinimumFt != null)
+        /* MOCKUP: there is no spec to be within, so quoting one would be a
+           fiction. The pass/fail is the fit, and the two derived numbers are
+           what it was decided against. */
+        ? row("Distance from the wall",
+              n2(p.distanceFt)+' ft <span style="opacity:.6">fits from '+nt(p.fitMinimumFt)
+                +' ft out · best near '+nt(p.fitRecommendedFt)+' ft</span>',
+              p.distanceOk)
+        : row("Standoff distance", n2(p.distanceFt)+' ft <span style="opacity:.6">vs '+nt(tgt)+' ± '+nt(p.tolFt)+'</span>',
+              p.distanceOk, delta==null?"":"("+(delta>=0?"+":"")+delta.toFixed(2)+" ft)"))
     + row("Tilt (pitch)",  n1(p.pitchDeg)+'°', p.pitchOk, "± "+nt(p.angleTolDeg)+"°")
     + row("Roll",          n1(p.rollDeg)+'°',  p.rollOk,  "± "+nt(p.angleTolDeg)+"°")
     + row("Yaw (obliqueness)", p.yawVerified ? n1(p.yawDeg)+'°' : '<span style="opacity:.6">not measured</span>',
@@ -6251,6 +6458,27 @@ function placementBlock(p, t){
     + '<div class="prow"><span class="pl">How the distance was measured</span>'
     +   '<span><span class="tierbadge '+methodMeta(p.method || methodFromTier(p.tier)).cls+'">'
     +   esc(p.methodLabel || methodMeta(p.method || methodFromTier(p.tier)).label)+'</span></span></div>'
+    /* The two fit checks, never merged: what the CAMERA could see, and what the
+       merchandiser said the WALL was. The second is blank unless they ran it,
+       and says so, because "not asked" is not "passed". */
+    + (p.visibleWFt != null
+        ? '<div class="prow"><span class="pl">Wall in view when shot <span style="opacity:.65">from the lens and the distance</span></span>'
+          + '<span><b>'+Number(p.visibleWFt).toFixed(1)+' × '+Number(p.visibleHFt).toFixed(1)+' ft</b>'
+          + (p.fitRelPct != null ? ' <span style="opacity:.6">± '+Number(p.fitRelPct).toFixed(0)+' %</span>' : '')
+          + '<span class="chip '+(p.fitsInView ? "pass" : "fail")+'" style="margin-left:6px">'
+          + (p.fitsInView ? "POSTER FITS THE FRAME" : "POSTER RAN OFF THE FRAME")+'</span></span></div>'
+        : '')
+    + (p.fitMinimumFt != null
+        ? '<div class="prow"><span class="pl">Wall the merchandiser marked <span style="opacity:.65">the wall\u2019s own edges</span></span>'
+          + '<span>'
+          + (p.fitsOnWall == null
+              ? '<span class="chip neutral plain">not marked</span>'
+              : '<b>'+Number(p.wallWFt).toFixed(1)+(p.wallHFt ? ' × '+Number(p.wallHFt).toFixed(1) : '')+' ft</b>'
+                + '<span class="chip '+(p.fitsOnWall ? "pass" : "fail")+'" style="margin-left:6px">'
+                + (p.fitsOnWall ? "POSTER FITS THE WALL" : "POSTER OVERFLOWS THE WALL")+'</span>'
+                + (p.wallOverflowAck ? '<span class="chip neutral plain" style="margin-left:6px">shot anyway, deliberately</span>' : ''))
+          + '</span></div>'
+        : '')
     + (p.method === "floor-line"
         ? '<div class="prow"><span class="pl">Phone height <span style="opacity:.65">h in d = h / tan θ</span></span>'
           + '<span><b>'+(p.floorHeightM == null ? "—" : Number(p.floorHeightM).toFixed(2)+' m')+'</b>'
@@ -6533,7 +6761,8 @@ function fieldHistory(t){
 }
 /* Instructions, dimensions and history: needed sometimes, not every time. */
 function fieldExtras(t){
-  const stand = Number(t.standoffFt);
+  const so = taskStandoff(t);
+  const stand = Number(so.recommendedFt);
   const paces = isFinite(stand) ? Math.max(1, Math.round(stand / 2.5)) : 3;
   let h = '';
   if(t.instructions){
@@ -6548,7 +6777,13 @@ function fieldExtras(t){
              'The poster is <b class="num">'+t.widthFt+' ft × '+t.heightFt+' ft</b>, going on the '
              + esc(t.displayType)+'.<br><br>')
     + 'When you take the photo, stand about <b class="num">'+(isFinite(stand)?stand.toFixed(0):"8")+' feet</b> back '
-    + '(roughly '+paces+' big steps) and hold the phone straight. The camera screen tells you when you are '
+    + '(roughly '+paces+' big steps) and hold the phone straight. '
+    + (so.derived && isFinite(so.minimumFt)
+        ? 'That is worked out from the size of this poster — further back is fine, but closer than about '
+          + '<b class="num">'+fmtRoughFt(so.minimumFt, so.minimumFt*so.relSigma)+' feet</b> and it will not '
+          + 'fit in the picture at all. '
+        : '')
+    + 'The camera screen tells you when you are '
     + 'in the right spot — you do not need to measure anything yourself.'
     + '</div></details>';
   h += '<details class="disc"><summary>'+icon("clock")+'What has happened so far</summary>'
@@ -7148,6 +7383,13 @@ const ARC = {
           motion:{ on:false, onMot:null, seen:false, since:0, steps:0,
                    peak:0, stir:0, lastPeakAt:0 } },
   assumeSquare:false,
+  /* OPTIONAL, AND NEVER A STEP. Distance and lens say how much wall is in
+     FRAME; nothing in a single view says where the wall ENDS — it may be
+     narrower than the frame, and no amount of intrinsics will reveal that. So
+     the wall's own edges are the merchandiser's answer, given by dragging lines
+     onto them, and `result` is what that answer measured. */
+  wall:{ on:false, xL:0, xR:0, yT:0, yB:0, movedX:false, movedY:false,
+         result:null, ack:false },
   handles:[], quad:[],
   meas:{ distFt:null, yawDeg:null, yawVerified:false, distSrc:"", depthUsed:false, wallSeen:false },
   nudge:{x:0,y:0}, armT0:0, armed:false, posterImg:null, panel:null, busy:false,
@@ -7757,7 +7999,9 @@ function arcStartPanel(caps){
     + '<p>'+esc(t.storeName)+' · <span class="mono">'+esc(t.storeCode)+'</span><br>'
     + (plain
         ? byMode('Poster <b class="num">'+t.widthFt+' × '+t.heightFt+' ft</b>. Find an empty wall big enough '
-                 + 'for it, then stand about <b class="num">'+Number(t.standoffFt).toFixed(1)+' ft</b> back '
+                 + 'for it, then stand about <b class="num">'
+                 + fmtRoughFt(taskStandoff(t).recommendedFt, taskStandoff(t).recommendedFt*FOCAL_SIGMA_ASSUMED)
+                 + ' ft</b> back '
                  + 'and hold the phone straight. The screen tells you when you are in the right spot.',
                  'Poster <b class="num">'+t.widthFt+' × '+t.heightFt+' ft</b>. Stand about '
                  + '<b class="num">'+Number(t.standoffFt).toFixed(1)+' ft</b> back and hold the phone straight. '
@@ -7791,6 +8035,8 @@ function arcOpen(taskId, phase){
   ARC.nudge = {x:0, y:0}; ARC.capture = null; ARC.busy = false;
   ARC.meas = { distFt:null, yawDeg:null, yawVerified:false, distSrc:"", depthUsed:false, wallSeen:false };
   ARC.mode = "two"; ARC.handles = []; ARC.quad = [];
+  ARC.wall = { on:false, xL:0, xR:0, yT:0, yB:0, movedX:false, movedY:false,
+               result:null, ack:false };
   /* MOCKUP MODE: the wall is empty by definition, so there is never a poster in
      frame to scale from — the A4 sheet is the reference whenever a reference is
      needed at all. Verification mode keeps the phase rule: an after-shot has
@@ -7894,6 +8140,7 @@ function arcShell(t){
        instruction, one warning (only when there is something to warn about),
        one button. */
     +     '<div id="arSimple">'
+    +       '<div id="arSee"></div>'
     +       '<div id="arSimpleHint"></div>'
     +       '<div id="arSimpleWarn"></div>'
     +       '<button id="arSimpleBtn" class="pe" disabled></button>'
@@ -9489,6 +9736,62 @@ function floorBuildRecord(p){
     p.floorFtPerDeg = +Math.abs(GEO.mToFt(GEO.floorLineDDdTheta(f.hM, r.theta))*GEO.D2R).toFixed(3);
   }
 }
+/* MOCKUP MODE ONLY, so a verification record is byte-identical to what it was
+   before any of this existed. */
+function fitBuildRecord(p, g){
+  const fit = g && g.fit;
+  if(!fit || !isFinite(fit.recommendedFt)) return;
+  p.fitRecommendedFt = +fit.recommendedFt.toFixed(2);
+  p.fitMinimumFt     = +fit.minimumFt.toFixed(2);
+  p.fitRelPct        = +(fit.relSigma*100).toFixed(1);
+  p.fitLensEstimated = !!fit.intr.estimated;
+  if(fit.view){
+    p.visibleWFt = +fit.view.visibleWFt.toFixed(2);
+    p.visibleHFt = +fit.view.visibleHFt.toFixed(2);
+    p.fitsInView = !!fit.view.fits;
+  }
+  /* Check (b), and only if it was actually run. Nothing is inferred from (a). */
+  const w = ARC.wall && ARC.wall.result;
+  if(w){
+    p.wallWFt          = +w.widthFt.toFixed(2);
+    p.wallHFt          = w.heightFt == null ? null : +w.heightFt.toFixed(2);
+    p.fitsOnWall       = !!w.fits;
+    p.wallOverflowAck  = !!ARC.wall.ack;
+    p.wallDistanceFt   = +w.distanceFt.toFixed(2);
+  }
+}
+function fitNotes(p, notes){
+  if(!MOCKUP || p.fitRecommendedFt == null) return;
+  if(p.visibleWFt != null)
+    notes.push("The frame covered about " + p.visibleWFt.toFixed(1) + " x " + p.visibleHFt.toFixed(1)
+      + " ft of wall at this distance, +/- " + p.fitRelPct.toFixed(0) + "% (lens and distance combined"
+      + (p.fitLensEstimated ? ", and the lens on this phone was never calibrated" : "") + "). "
+      + "The standoff was DERIVED FROM THE POSTER, not from a fixed target: "
+      + p.fitRecommendedFt.toFixed(1) + " ft is where a " + p.posterWFt + " x " + p.posterHFt
+      + " ft poster fills " + Math.round(FRAME_FILL_TARGET*100) + "% of the frame, and below "
+      + p.fitMinimumFt.toFixed(1) + " ft it cannot be drawn complete at all.");
+  if(p.fitsOnWall === false)
+    notes.push("THE POSTER DOES NOT FIT THE WALL. The merchandiser marked the usable wall as "
+      + p.wallWFt.toFixed(1) + " ft wide" + (p.wallHFt ? " and " + p.wallHFt.toFixed(1) + " ft tall" : "")
+      + "; the poster is " + p.posterWFt + " x " + p.posterHFt + " ft. "
+      + (p.wallOverflowAck
+          ? "They were shown the overflow and captured the mockup anyway, so a manager can see it."
+          : "The overflow was measured but not acknowledged on the device."));
+  else if(p.fitsOnWall === true)
+    notes.push("The merchandiser marked the wall's own edges — " + p.wallWFt.toFixed(1) + " ft wide"
+      + (p.wallHFt ? " by " + p.wallHFt.toFixed(1) + " ft tall" : "")
+      + ", measured from " + Number(p.wallDistanceFt).toFixed(1) + " ft through the same lens — and the poster fits.");
+  else
+    notes.push("The wall's own EDGES WERE NOT MARKED. Nothing here says the wall is wide enough, only "
+      + "that the poster fitted inside the camera frame; a frame can be looking at a narrow pier.");
+  notes.push("[fit see=" + Number(p.visibleWFt || 0).toFixed(2) + "x" + Number(p.visibleHFt || 0).toFixed(2)
+    + "ft rec=" + p.fitRecommendedFt.toFixed(2) + "ft min=" + p.fitMinimumFt.toFixed(2)
+    + "ft err=" + p.fitRelPct.toFixed(1) + "% view=" + (p.fitsInView ? "yes" : "no")
+    + " wall=" + (p.wallWFt == null ? "none"
+        : p.wallWFt.toFixed(2) + "x" + Number(p.wallHFt || 0).toFixed(2) + "ft")
+    + " onwall=" + (p.fitsOnWall == null ? "unknown" : (p.fitsOnWall ? "yes" : "no"))
+    + " ack=" + (p.wallOverflowAck ? "yes" : "no") + "]");
+}
 function floorNotes(p, notes){
   if(p.method !== "floor-line") return;
   notes.push("Distance came from FLOOR-LINE TRIGONOMETRY (d = h / tan θ) — nothing of a known size was in "
@@ -9519,6 +9822,254 @@ function floorNotes(p, notes){
       + "s cal=" + (p.floorHeightSrc || (p.floorCalibrated ? "device" : "default")) + "]");
 }
 
+/* ==========================================================
+   POSTER FIT — where to stand, how much wall is in view, and
+   whether the artwork can be drawn complete
+   ------------------------------------------------------------
+   TWO CHECKS THAT ARE NOT THE SAME CHECK, and are deliberately kept apart:
+
+     (a) DOES IT FIT IN VIEW?  Automatic, every frame, no extra step. Poster
+         against the frame at the current distance, from the intrinsics alone.
+         Failing it is not a failure — it is "move back", and it is the ONLY
+         hard block left in mockup mode, because below the minimum the poster
+         genuinely cannot be drawn complete.
+
+     (b) DOES IT FIT ON THE WALL?  Optional, on request, and it needs a human.
+         The camera cannot see where a wall ENDS: a frame 12 ft across may be
+         looking at a 7 ft pier with a doorway either side, and every number in
+         (a) is still perfectly true. So the merchandiser drags lines onto the
+         edges and THAT is converted through the same intrinsics. Failing it
+         raises an alert, and is dismissible: a mockup of a poster that plainly
+         overflows the wall is often the most useful thing to send a manager.
+
+   (a) can never answer (b) and (b) is never assumed from (a). A capture that
+   passed (a) with (b) never asked records exactly that, in words.
+   ========================================================== */
+
+/* A number is only as precise as the error bar under it. Round to a step no
+   finer than the 1σ uncertainty, so "12.9 ft" is never printed off a lens the
+   app has not measured and a distance worth ± 13 %. */
+function roundToSigma(v, sigma){
+  if(!isFinite(v)) return NaN;
+  const s = isFinite(sigma) ? Math.abs(sigma) : 0;
+  const step = (s >= 1) ? 1 : (s >= 0.35 ? 0.5 : 0.1);
+  return Math.round(v/step)*step;
+}
+function fmtRoughFt(v, sigma){
+  if(!isFinite(v)) return "—";
+  const s = isFinite(sigma) ? Math.abs(sigma) : 0;
+  const r = roundToSigma(v, s);
+  return (s >= 1) ? r.toFixed(0) : r.toFixed(1);
+}
+/* How well the DISTANCE is known, straight out of the existing error machinery
+   — floor-line writes GEO.floorLineError into ARC.meas.refError, reference
+   scaling writes DET.errorEstimate into the same field, and both carry `rel`.
+   The XR path has no modelled distance error anywhere in this app, so it
+   contributes nothing rather than a number invented here; the focal term below
+   still applies to it. */
+function arcDistRelSigma(){
+  const e = ARC.meas.refError;
+  return (e && isFinite(e.rel)) ? e.rel : 0;
+}
+/* THE CAPTURE FRAME — not the preview, and the difference is not pedantry.
+
+   #arStage renders the camera with object-fit:cover, so the preview is a CROP
+   of what the shutter records: on a 9:16 stage showing a 1080×1920 stream the
+   two agree, but on any other pairing the preview loses a band off one axis.
+   The MOCKUP THE MANAGER RECEIVES is arcComposite's rasterisation of the FULL
+   source frame, and the poster overlay is already projected in source pixels
+   and mapped across (arcDrawOverlay maps video px → CSS, and a quad may
+   legitimately extend past the stage edge). So the frame the fit is decided in
+   has to be the one the artwork is finally drawn into; deciding it in the
+   cropped preview would send the merchandiser several feet further back than
+   the deliverable requires, which is the same species of mistake as the fixed
+   6 ft standoff.
+
+   fy = fx. Square pixels, and the whole overlay path takes a single focal
+   length (arcPosterGeometry, arcIsoIntr); the one place two focals exist is
+   arcComposite's aspect compensation, which is downstream of this. */
+function arcViewIntrinsics(){
+  if(ARC.tier === "A"){
+    const ci = ARC.xr.camIntr, cam = ARC.xr.cam;
+    if(ci && ci.fx > 0 && cam && cam.w > 0)
+      return { fx:ci.fx, fy:(ci.fy > 0 ? ci.fy : ci.fx), w:cam.w, h:cam.h,
+               relSigma:FOCAL_SIGMA_FLOOR, estimated:false,
+               src:"XR view projection matrix, rasterised over the raw camera image" };
+    if(ARC.xr.focalPx > 0 && ARC.xr.vpW > 0)
+      return { fx:ARC.xr.focalPx, fy:ARC.xr.focalPx, w:ARC.xr.vpW, h:ARC.xr.vpH,
+               relSigma:FOCAL_SIGMA_FLOOR, estimated:false, src:"XR view projection matrix" };
+  } else if(ARC.tier === "B"){
+    const m = arcMap();
+    const f = (ARC.focal && ARC.focal.f > 0) ? ARC.focal.f : GEO.focalFromFov(m.vw, ASSUMED_HFOV_DEG);
+    return { fx:f, fy:f, w:m.vw, h:m.vh,
+             relSigma:(ARC.focal && ARC.focal.relSigma > 0) ? ARC.focal.relSigma : FOCAL_SIGMA_ASSUMED,
+             estimated:!(ARC.focal && ARC.focal.estimated === false),
+             src:(ARC.focal && ARC.focal.src) || ("assumed " + ASSUMED_HFOV_DEG + "° HFOV") };
+  }
+  /* No camera and no XR — tier C, or a stage that has not started yet. The gate
+     still has to answer, so it answers off the stage at the assumed lens. */
+  const st = arcEl("arStage");
+  const w = st ? st.clientWidth : NOMINAL_FRAME_W, h = st ? st.clientHeight : NOMINAL_FRAME_H;
+  const f = GEO.focalFromFov(w, ASSUMED_HFOV_DEG);
+  return { fx:f, fy:f, w:w, h:h, relSigma:FOCAL_SIGMA_ASSUMED, estimated:true,
+           src:"assumed " + ASSUMED_HFOV_DEG + "° HFOV" };
+}
+/* A nominal portrait phone at the assumed lens — see NOMINAL_FRAME_W. */
+function nominalIntrinsics(){
+  const f = GEO.focalFromFov(NOMINAL_FRAME_W, ASSUMED_HFOV_DEG);
+  return { fx:f, fy:f, w:NOMINAL_FRAME_W, h:NOMINAL_FRAME_H,
+           relSigma:FOCAL_SIGMA_ASSUMED, estimated:true,
+           src:"assumed " + ASSUMED_HFOV_DEG + "° HFOV, portrait "
+               + NOMINAL_FRAME_W + "×" + NOMINAL_FRAME_H };
+}
+/* Where the merchandiser is TOLD to stand, before any camera is open.
+   VERIFICATION MODE IS UNTOUCHED: there the manager's per-task standoff and
+   tolerance are the spec the evidence is measured against, and they win. */
+function taskStandoff(t){
+  if(!MOCKUP || !t) return { recommendedFt: t ? Number(t.standoffFt) : STANDOFF_FT,
+                             minimumFt: null, derived: false, relSigma: 0 };
+  const I = nominalIntrinsics();
+  const st = GEO.posterStandoff({ widthFt:t.widthFt, heightFt:t.heightFt,
+    frameW:I.w, frameH:I.h, fx:I.fx, fy:I.fy, fill:FRAME_FILL_TARGET });
+  return { recommendedFt:st.recommendedFt, minimumFt:st.minimumFt,
+           limit:st.limit, derived:true, relSigma:I.relSigma };
+}
+/* The live assessment, against the frame that is actually on screen. Null-safe:
+   with no task it returns null, with no reading it still returns the two
+   distances (which is what the guidance line needs while they walk). */
+function arcFit(distanceFt){
+  const t = ARC.task;
+  if(!t) return null;
+  const I = arcViewIntrinsics();
+  if(!(I.fx > 0) || !(I.w > 0) || !(I.h > 0)) return null;
+  const st = GEO.posterStandoff({ widthFt:t.widthFt, heightFt:t.heightFt,
+    frameW:I.w, frameH:I.h, fx:I.fx, fy:I.fy, fill:FRAME_FILL_TARGET });
+  const d = (distanceFt != null && isFinite(distanceFt) && distanceFt > 0) ? distanceFt : null;
+  const view = d == null ? null
+    : GEO.viewFit({ distanceFt:d, widthFt:t.widthFt, heightFt:t.heightFt,
+                    frameW:I.w, frameH:I.h, fx:I.fx, fy:I.fy });
+  /* The visible-wall figure inherits BOTH uncertainties — it is d·px/f, so the
+     relative error of d and the relative error of f add in quadrature, the same
+     way every other error in this file combines. On an uncalibrated phone the
+     focal term alone is ± 12 %, which is why the readout says "about" and is
+     rounded to a step no finer than its own error bar. */
+  const rel = arcQuad(I.relSigma, arcDistRelSigma());
+  /* AND THE PREVIEW, which is a CROP of the capture frame (object-fit:cover).
+     The gate is decided in the capture frame because that is the mockup the
+     manager receives — but between the true minimum and the point where the
+     preview catches up, the merchandiser watches the artwork run off both
+     edges of a screen that is telling them they are in a good spot. That is
+     worth one sentence, and it is the same sentence either way: the fit is not
+     in doubt, only which of the two frames they are looking at. */
+  const stage = arcEl("arStage");
+  const cw = stage ? stage.clientWidth : 0, ch = stage ? stage.clientHeight : 0;
+  const fCss = arcDisplayFocalCss();
+  const preview = (d != null && cw > 0 && ch > 0 && fCss > 0)
+    ? GEO.viewFit({ distanceFt:d, widthFt:t.widthFt, heightFt:t.heightFt,
+                    frameW:cw, frameH:ch, fx:fCss, fy:fCss })
+    : null;
+  return {
+    intr: I, recommendedFt: st.recommendedFt, minimumFt: st.minimumFt, limit: st.limit,
+    view: view, preview: preview, relSigma: rel,
+    seeWSigma: view ? view.visibleWFt*rel : null,
+    seeHSigma: view ? view.visibleHFt*rel : null,
+    recSigma: st.recommendedFt*I.relSigma
+  };
+}
+
+/* ---- (b) the wall's own edges ---- */
+function arcWallStart(){
+  const st = arcEl("arStage");
+  const w = st ? st.clientWidth : 360, h = st ? st.clientHeight : 640;
+  const W = ARC.wall;
+  if(!W.movedX){ W.xL = w*0.18; W.xR = w*0.82; }
+  if(!W.movedY){ W.yT = h*0.12; W.yB = h*0.88; }
+  W.on = true;
+}
+function arcWallCancel(){ ARC.wall.on = false; }
+/* Which of the four lines a finger is going for. Nearest wins; the verticals
+   and the horizontals compete on their own axis, so a tap anywhere sensible
+   grabs the line the merchandiser meant. */
+function arcWallPick(x, y){
+  const w = ARC.wall;
+  const c = [ ["L", Math.abs(x - w.xL)], ["R", Math.abs(x - w.xR)],
+              ["T", Math.abs(y - w.yT)], ["B", Math.abs(y - w.yB)] ];
+  c.sort(function(a, b){ return a[1] - b[1]; });
+  return c[0][0];
+}
+/* Pixel offsets -> real feet, through the same intrinsics the poster is drawn
+   with. Returns null until the vertical pair has actually been dragged: two
+   lines left at their defaults are not a measurement of anything, and recording
+   them as one would be a lie the manager could not detect. */
+function arcWallMeasure(){
+  const t = ARC.task, w = ARC.wall, g = ARC.lastGates;
+  const d = g ? g.distance : null;
+  if(!t || !(d > 0) || !w.movedX) return null;
+  const I = arcViewIntrinsics();
+  /* The marks are CSS pixels on the STAGE, so they are converted with the
+     STAGE's focal length and the stage centre — and the answer is the same one
+     the capture frame would give, because object-fit:cover scales pixels and
+     focal length by the identical factor and (x_b − x_a)/f is invariant under
+     it. The principal point maps to the stage centre for the same reason. */
+  const st = arcEl("arStage");
+  const cw = st ? st.clientWidth : I.w, ch = st ? st.clientHeight : I.h;
+  const fCss = arcDisplayFocalCss();
+  const sw = GEO.spanFromPixels(d, w.xL, w.xR, cw/2, fCss);
+  if(!sw) return null;
+  const sh = w.movedY ? GEO.spanFromPixels(d, w.yT, w.yB, ch/2, fCss) : null;
+  const heightFt = sh ? sh.ft : null;
+  const fitsWidth  = GEO.fitsWithin(t.widthFt, sw.ft);
+  const fitsHeight = heightFt == null ? null : GEO.fitsWithin(t.heightFt, heightFt);
+  return { widthFt: sw.ft, heightFt: heightFt, distanceFt: d,
+           alphaLeftDeg: sw.alphaADeg, alphaRightDeg: sw.alphaBDeg,
+           fitsWidth: fitsWidth, fitsHeight: fitsHeight,
+           fits: fitsWidth && fitsHeight !== false,
+           estimated: !!I.estimated,
+           relSigma: arcQuad(I.relSigma, arcDistRelSigma()), ts: Date.now() };
+}
+function arcWallCheck(){
+  const r = arcWallMeasure();
+  if(!r){
+    toast(ARC.wall.movedX ? "There is no distance right now — measure again first."
+                          : "Drag the two lines onto the edges of the wall first.", true);
+    return;
+  }
+  const t = ARC.task;
+  ARC.wall.result = r;
+  ARC.wall.on = false;
+  const n1 = v => Number(v).toFixed(1);
+  if(r.fits){
+    ARC.wall.ack = false;
+    toast("It fits — you marked " + n1(r.widthFt) + " ft of wall"
+      + (r.heightFt != null ? " by " + n1(r.heightFt) + " ft" : "")
+      + " and the poster is " + t.widthFt + " × " + t.heightFt + " ft.");
+    return;
+  }
+  ARC.wall.ack = false;
+  const said = [];
+  if(r.fitsWidth === false)
+    said.push('This poster is <b class="num">' + t.widthFt + ' ft</b> wide but the wall is only '
+      + '<b class="num">' + n1(r.widthFt) + ' ft</b>.');
+  if(r.fitsHeight === false)
+    said.push('It is <b class="num">' + t.heightFt + ' ft</b> tall and the wall is only '
+      + '<b class="num">' + n1(r.heightFt) + ' ft</b>.');
+  openModal({
+    title: "The poster is bigger than this wall",
+    body: '<p>' + said.join(" ") + '</p>'
+      + '<p>Worked out from ' + n1(r.distanceFt) + ' ft away, off the lines you put on the wall edges'
+      + (r.estimated ? ' and a lens this phone has never had measured — so treat it as approximate' : '')
+      + '.</p>'
+      + '<p>You can still take the mockup. It is usually the clearest way to show your manager '
+      + 'that the artwork does not fit here.</p>',
+    actions: [
+      { label:"Mock it up anyway", cls:"btn primary", act:function(){
+          ARC.wall.ack = true; closeModal();
+          toast("Recorded — the mockup will say the poster overflows this wall.", true); } },
+      { label:"Mark the wall again", cls:"btn", act:function(){ closeModal(); arcWallStart(); } }
+    ]
+  });
+}
+
 /* gate evaluation — one place, used by the HUD, the shutter and the record */
 function arcGates(){
   const t = ARC.task, s = ARC.sensors;
@@ -9546,10 +10097,25 @@ function arcGates(){
   let yaw = ARC.meas.yawVerified ? ARC.meas.yawDeg : null;
   let yawAssumed = false;
   if(ARC.assumeSquare && yaw == null){ yaw = 0; yawAssumed = true; }
+  /* THE STANDOFF GATE — the one thing mockup mode changes about it.
+
+     VERIFICATION is untouched: the capture is evidence measured against the
+     manager's spec, so it still has to be taken from t.standoffFt ± tol, and
+     both fields still come from the task.
+
+     MOCKUP replaces that band with the only question the mode can actually ask:
+     can the artwork be drawn complete from here? Any distance at or beyond the
+     minimum passes — the merchandiser stands where the wall lets them stand —
+     and the block below the minimum is not a policy, it is arithmetic. `fit` is
+     computed in both modes because the visible-wall readout is honest
+     information either way; only the gate is mode-dependent. */
+  const fit = arcFit(d);
   const g = {
     distance: d, delta: (d==null?null:d - t.standoffFt),
+    fit: fit,
     pitch: pitch, roll: roll, yaw: yaw, yawAssumed: yawAssumed,
-    distOk: d != null && Math.abs(d - t.standoffFt) <= tol,
+    distOk: MOCKUP ? !!(d != null && fit && fit.view && fit.view.fits)
+                   : (d != null && Math.abs(d - t.standoffFt) <= tol),
     pitchOk: pitch != null && Math.abs(pitch) <= atol,
     rollOk:  roll  != null && Math.abs(roll)  <= atol,
     yawOk:   yaw   != null && Math.abs(yaw)   <= atol,
@@ -9688,7 +10254,10 @@ function arcRenderSimple(g, prog){
   const measuring = floorMode && f.step === "measure";
   const hint = arcEl("arSimpleHint"), warnEl = arcEl("arSimpleWarn"),
         btn  = arcEl("arSimpleBtn"),  foot   = arcEl("arSimpleFoot"),
-        alt  = arcEl("arSimpleAlt"),  dEl    = arcEl("arDist");
+        alt  = arcEl("arSimpleAlt"),  dEl    = arcEl("arDist"),
+        seeEl = arcEl("arSee");
+  const fit = g.fit;
+  const marking = !!ARC.wall.on;
 
   /* ---- the one line about where they are standing ---- */
   if(dEl){
@@ -9704,7 +10273,13 @@ function arcRenderSimple(g, prog){
       dEl.innerHTML = looking ? "Looking for the wall — move the phone slowly" : "";
     } else {
       dEl.style.display = "";
-      const ok = Math.abs(g.delta) <= t.standoffTolFt;
+      /* MOCKUP: the line is derived from the poster, so it can say WHY. "Move
+         back 0.9 ft" was an instruction to hit a number nobody could see; "you
+         can only see 7.8 ft of wall" is the reason, in the unit the merchandiser
+         is standing in. VERIFICATION keeps the ± band verbatim — there the
+         number IS the spec. */
+      const useFit = MOCKUP && fit && fit.view;
+      const ok = useFit ? fit.view.fits : (Math.abs(g.delta) <= t.standoffTolFt);
       dEl.className = "arstat " + (ok ? "ok" : "no");
       /* A HELD reading is not a live one, and the field build must not let the
          big green number imply the phone is still looking at the floor. Same
@@ -9713,16 +10288,57 @@ function arcRenderSimple(g, prog){
          distance out from under this and the warning slot says why. */
       const held = (ARC.meas.heldMs != null)
         ? '<span class="heldtag">MEASURED A MOMENT AGO</span> ' : '';
-      dEl.innerHTML = held + (ok
-        ? esc("Good spot — you are " + g.distance.toFixed(1) + " ft back")
-        : (g.delta < 0 ? esc("Move back " + Math.abs(g.delta).toFixed(1) + " ft")
-                       : esc("Move in "   + g.delta.toFixed(1) + " ft")));
+      let dTxt;
+      if(useFit){
+        const v = fit.view;
+        dTxt = v.fits
+          ? "Good spot — you are " + g.distance.toFixed(1) + " ft back"
+          : (v.limit === "width"
+              ? "Move back — from here you can only see "
+                + fmtRoughFt(v.visibleWFt, fit.seeWSigma) + " ft of wall"
+              : "Move back — from here you can only see "
+                + fmtRoughFt(v.visibleHFt, fit.seeHSigma) + " ft of wall top to bottom");
+      } else {
+        dTxt = ok
+          ? "Good spot — you are " + g.distance.toFixed(1) + " ft back"
+          : (g.delta < 0 ? "Move back " + Math.abs(g.delta).toFixed(1) + " ft"
+                         : "Move in "   + g.delta.toFixed(1) + " ft");
+      }
+      dEl.innerHTML = held + esc(dTxt);
     }
+  }
+
+  /* ---- the ONE extra line the fit maths earns ----
+     Either how much wall is in view, or — when it is not enough — where to
+     stand so the poster fits. Never both: one short sentence, plain text, no
+     chip and no diagnostic strip. "about" is not politeness; on an
+     uncalibrated phone the focal term alone is ± 12 %, and fmtRoughFt rounds
+     the figure to a step no finer than its own error bar so the sentence
+     cannot claim precision the measurement chain does not have. */
+  if(seeEl){
+    let seeTxt = "";
+    if(fit){
+      if(g.distance != null && fit.view && (!MOCKUP || fit.view.fits)){
+        seeTxt = (MOCKUP && fit.preview && !fit.preview.fits)
+          ? ("Off the edges of the screen, but still in the photo — step back to about "
+             + fmtRoughFt(fit.recommendedFt, fit.recSigma) + " ft.")
+          : ("You can see about " + fmtRoughFt(fit.view.visibleWFt, fit.seeWSigma)
+             + " × " + fmtRoughFt(fit.view.visibleHFt, fit.seeHSigma)
+             + " ft of wall from here.");
+      } else if(MOCKUP && isFinite(fit.recommendedFt)){
+        seeTxt = "For a " + t.widthFt + " × " + t.heightFt + " ft poster, stand about "
+               + fmtRoughFt(fit.recommendedFt, fit.recSigma) + " ft back.";
+      }
+    }
+    if(seeEl.dataset.h !== seeTxt){ seeEl.dataset.h = seeTxt; seeEl.textContent = seeTxt; }
   }
 
   /* ---- the instruction ---- */
   let hintHtml = "";
-  if(measuring){
+  if(marking){
+    hintHtml = '<span>Drag the two upright lines onto the <b>left and right edges of the wall</b>. '
+      + 'If the height is tight, drag the top and bottom ones onto the ceiling and the skirting.</span>';
+  } else if(measuring){
     hintHtml = HOLD_CUE_SVG
       + '<span>Stand square to the wall and <b>hold the phone up at neck level</b>. '
       + 'Tilt it down until the line sits where the wall meets the floor, then press Measure.</span>';
@@ -9747,6 +10363,7 @@ function arcRenderSimple(g, prog){
   /* ---- warnings: only what is wrong, right now ---- */
   const warn = [];
   const footBtns = [];
+  if(marking && g.distance == null) warn.push("The measurement no longer holds — measure again.");
   /* iOS will not hand out DeviceOrientation without a user gesture, and the
      gesture has to be a real tap on a real button. Without this the field build
      would be a dead end on every iPhone, so it is the one control that survives
@@ -9791,7 +10408,12 @@ function arcRenderSimple(g, prog){
   /* ---- the one button ---- */
   if(btn){
     let label, act, on, p = 0;
-    if(measuring){
+    if(marking){
+      /* The wall-marking detour borrows the one button rather than adding a
+         second: the flow is still measure, then frame, then shoot. */
+      label = "Check the fit"; act = "wallcheck";
+      on = !!(g.distance != null && ARC.wall.movedX);
+    } else if(measuring){
       /* THE WALKING HAPPENS HERE, while the reading is LIVE and the floor line
          is still in view — that is the one moment the distance responds to the
          merchandiser's feet. So the button waits for them to be in the band
@@ -9817,8 +10439,17 @@ function arcRenderSimple(g, prog){
      removed. Never a co-equal choice — one underlined line, and only on the
      phones that have no ARCore. */
   let altTxt = "", altAct = "floorfallback";
-  if(floorMode){
+  if(marking){
+    altTxt = "Cancel"; altAct = "wallcancel";
+  } else if(floorMode && (measuring || !MOCKUP)){
     altTxt = "Can’t see where the wall meets the floor?";
+  } else if(floorMode){
+    /* STEP 2 ONLY, and still exactly one underlined line — the same
+       presentation the A4 fallback gets, because it is the same kind of thing:
+       an escape hatch most captures never need. The A4 fallback is about
+       MEASURING and belongs to step 1, where it stays; "Measure again" is the
+       route back to it from here. */
+    altTxt = "Check the wall is wide enough"; altAct = "wallmark";
   } else if(MOCKUP && ARC.tier === "B"){
     altTxt = "Back to measuring off the floor";
     altAct = "modefloor";
@@ -10314,10 +10945,13 @@ function arcDrawOverlay(g){
     ctx.lineTo(ARC.handles[1][0], ARC.handles[1][1]); ctx.stroke(); ctx.restore();
   }
 
-  if(g.distance == null) return;
+  if(g.distance == null){ if(ARC.wall.on) arcDrawWall(ctx, cw, ch); return; }
   /* Step 1 is a measurement, not a preview. The phone is aimed at the floor, so
      drawing the poster there would lay it on the ground. */
-  if(arcFieldUI() && ARC.tier === "B" && ARC.mode === "floor" && ARC.floor.step === "measure") return;
+  if(arcFieldUI() && ARC.tier === "B" && ARC.mode === "floor" && ARC.floor.step === "measure"){
+    if(ARC.wall.on) arcDrawWall(ctx, cw, ch);
+    return;
+  }
 
   // XR draws straight in CSS px; camera tiers project in video px then map across.
   const nn = arcNudgeNorm();
@@ -10353,6 +10987,49 @@ function arcDrawOverlay(g){
       : "poster unlocks when all gates pass", ccx, ccy + 26);
     ctx.restore();
   }
+  /* Last, so the wall edges sit ON TOP of the artwork they are being compared
+     against — the whole point is to see the overhang. */
+  if(ARC.wall.on) arcDrawWall(ctx, cw, ch);
+}
+/* The four draggable edges, plus the live span they enclose. The horizontal
+   pair is drawn faint until it has been moved, because until then it is a
+   default and not an answer — and arcWallMeasure refuses to report a height
+   it was never given. */
+function arcDrawWall(ctx, cw, ch){
+  const w = ARC.wall, t = ARC.task;
+  const midY = ch/2, midX = cw/2;
+  ctx.save();
+  ctx.lineWidth = 2; ctx.strokeStyle = "rgba(251,191,36,.95)"; ctx.setLineDash([9,6]);
+  ctx.beginPath(); ctx.moveTo(w.xL, 0); ctx.lineTo(w.xL, ch);
+  ctx.moveTo(w.xR, 0); ctx.lineTo(w.xR, ch); ctx.stroke();
+  ctx.globalAlpha = w.movedY ? 1 : 0.3;
+  ctx.beginPath(); ctx.moveTo(0, w.yT); ctx.lineTo(cw, w.yT);
+  ctx.moveTo(0, w.yB); ctx.lineTo(cw, w.yB); ctx.stroke();
+  ctx.globalAlpha = 1; ctx.setLineDash([]);
+  ctx.fillStyle = "rgba(251,191,36,.95)";
+  [w.xL, w.xR].forEach(function(x){
+    ctx.beginPath(); ctx.arc(x, midY, 9, 0, 2*Math.PI); ctx.fill();
+  });
+  ctx.globalAlpha = w.movedY ? 1 : 0.45;
+  [w.yT, w.yB].forEach(function(y){
+    ctx.beginPath(); ctx.arc(midX, y, 9, 0, 2*Math.PI); ctx.fill();
+  });
+  ctx.globalAlpha = 1;
+  const r = arcWallMeasure();
+  if(r && t){
+    const label = r.widthFt.toFixed(1) + " ft wide"
+      + (r.heightFt != null ? " × " + r.heightFt.toFixed(1) + " ft tall" : "")
+      + "  ·  poster " + t.widthFt + " × " + t.heightFt + " ft";
+    ctx.font = "800 12px ui-monospace, Menlo, monospace";
+    ctx.textAlign = "center";
+    const tw = ctx.measureText(label).width;
+    const y = Math.max(20, midY - 26);
+    ctx.fillStyle = "rgba(6,10,16,.82)";
+    ctx.fillRect(midX - tw/2 - 8, y - 13, tw + 16, 20);
+    ctx.fillStyle = r.fits ? "#5eead4" : "#fbbf24";
+    ctx.fillText(label, midX, y + 2);
+  }
+  ctx.restore();
 }
 
 /* ---------- stage interaction: handle drag + poster nudge ---------- */
@@ -10362,6 +11039,15 @@ function arcBindStage(){
   let drag = null;
   st.addEventListener("pointerdown", function(e){
     if(ARC.panel) return;
+    /* While the wall is being marked the stage belongs to the four lines: the
+       poster nudge would otherwise swallow every drag. */
+    if(ARC.wall.on){
+      const r0 = st.getBoundingClientRect();
+      drag = { kind:"wall", which: arcWallPick(e.clientX - r0.left, e.clientY - r0.top) };
+      try{ st.setPointerCapture(e.pointerId); }catch(err){}
+      e.preventDefault();
+      return;
+    }
     const h = e.target.closest ? e.target.closest("[data-arch]") : null;
     if(h){ drag = { kind:"handle", i:Number(h.dataset.arch) }; }
     else  { drag = { kind:"nudge", x:e.clientX, y:e.clientY, nx:ARC.nudge.x, ny:ARC.nudge.y }; }
@@ -10371,7 +11057,15 @@ function arcBindStage(){
   st.addEventListener("pointermove", function(e){
     if(!drag) return;
     const r = st.getBoundingClientRect();
-    if(drag.kind === "handle"){
+    if(drag.kind === "wall"){
+      const w = ARC.wall;
+      const x = clamp(e.clientX - r.left, 0, r.width);
+      const y = clamp(e.clientY - r.top,  0, r.height);
+      if(drag.which === "L"){ w.xL = Math.min(x, w.xR - 24); w.movedX = true; }
+      else if(drag.which === "R"){ w.xR = Math.max(x, w.xL + 24); w.movedX = true; }
+      else if(drag.which === "T"){ w.yT = Math.min(y, w.yB - 24); w.movedY = true; }
+      else { w.yB = Math.max(y, w.yT + 24); w.movedY = true; }
+    } else if(drag.kind === "handle"){
       ARC.handles[drag.i] = [ clamp(e.clientX - r.left, 4, r.width-4), clamp(e.clientY - r.top, 4, r.height-4) ];
       arcRenderHandles();
     } else {
@@ -10686,6 +11380,7 @@ function arcBuildRecord(g, tierKey, focalPx, captureMode, camInfo){
                        corner:+(e.terms.corner*100).toFixed(2), barrel:+(e.terms.barrel*100).toFixed(2) };
     }
   }
+  if(MOCKUP) fitBuildRecord(p, g);
   /* `pass` is unchanged: every gate held, it was not typed in by hand, and the
      tilt/roll were really measured. A yaw the merchandiser stated by eye does
      NOT fail the capture — it was never measurable on a bare wall — but it is
@@ -10720,6 +11415,7 @@ function arcBuildRecord(g, tierKey, focalPx, captureMode, camInfo){
       : "Focal length is an assumed " + ASSUMED_HFOV_DEG + "° HFOV. Calibrate the device for a real number.");
   }
   floorNotes(p, notes);
+  fitNotes(p, notes);
   if(p.captureMode === "handover" && isARTier(tierKey))
     notes.push("Photographed after the AR session handed the camera back, so the frame is a fraction of a second later than the measurement.");
   if(camInfo && camInfo.aspectAgrees === false)
@@ -10983,6 +11679,15 @@ function arcAttach(){
     + " · f " + (p.focalPx||"—") + " px from " + p.focalSource
     + " · distance from " + p.distanceSource
     + " · geofence " + (p.geofencePass?"PASS":"FAIL") + " " + p.geofenceM + " m"
+    + (p.fitRecommendedFt != null
+        ? " · frame saw " + Number(p.visibleWFt).toFixed(1) + "×" + Number(p.visibleHFt).toFixed(1)
+          + " ft of wall (derived standoff " + p.fitRecommendedFt.toFixed(1) + " ft, minimum "
+          + p.fitMinimumFt.toFixed(1) + " ft) [" + (p.fitsInView ? "FITS FRAME" : "OFF FRAME") + "]"
+          + " · wall " + (p.fitsOnWall == null ? "not marked"
+              : Number(p.wallWFt).toFixed(1) + " ft ["
+                + (p.fitsOnWall ? "POSTER FITS" : "POSTER OVERFLOWS"
+                    + (p.wallOverflowAck ? ", SHOT ANYWAY" : "")) + "]")
+        : "")
     + " · overall " + (p.pass ? "VERIFIED" : "NOT VERIFIED"),
     { lat:c.geo.lat, lng:c.geo.lng });
   /* notification_kind is a database enum, so the stored value stays exactly
@@ -11618,12 +12323,15 @@ document.getElementById("arlayer").addEventListener("click", function(e){
                           floorCalPanel(); break;
     case "floorcalback":  arcPanel(null); if(ARC.tier === "B") arcLoop(); break;
     case "floorremeasure": ARC.floor.hold = null; ARC.floor.samples = [];
-                           ARC.floor.step = "measure";
+                           ARC.floor.step = "measure"; ARC.wall.on = false;
                            toast("Tilt down onto the floor line again."); break;
     /* The field build's single button is ONE element whose data-arc is swapped
        between the two steps by arcRenderSimple, rather than two buttons on
        screen at once. */
     case "floormeasure":arcFloorTakeReading(); break;
+    case "wallmark":    arcWallStart(); break;
+    case "wallcheck":   arcWallCheck(); break;
+    case "wallcancel":  arcWallCancel(); break;
     case "askheight":   askHeight(true); break;
     case "floorfallback": floorRelease(); ARC.mode = "auto"; ARC.handles = [];
                           arcRenderHandles(); arcDetInit();
@@ -12721,6 +13429,169 @@ function runSelfTest(){
           "45 deg (the minimum) -> " + FLOOR_MIN_DEPRESSION + " deg, ending at "
             + worst.toFixed(2) + " %");
       })();
+    })();
+  })();
+
+  /* --- POSTER FIT: the derived standoff, the visible wall, the two checks ---
+     Everything here is pure and frame-agnostic, so the SAME numbers hold in
+     both APP_MODEs; the one mode-dependent assertion is taskStandoff's
+     contract, which is asserted as a contract rather than as a number. */
+  (function(){
+    const NW = NOMINAL_FRAME_W, NH = NOMINAL_FRAME_H;
+    const fN = GEO.focalFromFov(NW, ASSUMED_HFOV_DEG);         // 831.527 px
+    const nom = function(wFt, hFt, fill){
+      return GEO.posterStandoff({ widthFt:wFt, heightFt:hFt, frameW:NW, frameH:NH,
+                                  fx:fN, fy:fN, fill:fill });
+    };
+    const seen = function(dFt, wFt, hFt){
+      return GEO.viewFit({ distanceFt:dFt, widthFt:wFt, heightFt:hFt,
+                           frameW:NW, frameH:NH, fx:fN, fy:fN });
+    };
+
+    /* ---- visible wall from intrinsics ---- */
+    T("focalFromFov(1080px, 66°) — the nominal portrait phone", fN, 831.5271, 1e-3);
+    T("visibleSpan: 6 ft away a 66° phone sees only 7.79 ft of wall",
+      GEO.visibleSpan(6, NW, fN), 7.7929, 1e-3,
+      "d·px/f — the exact reason a 9 ft poster could not be shot from the old 6 ft standoff");
+    T("visibleSpan is linear in distance",
+      GEO.visibleSpan(12, NW, fN)/GEO.visibleSpan(6, NW, fN), 2, 1e-12);
+    T("visibleSpan agrees with posterPixelWidth on the frame fraction",
+      GEO.posterPixelWidth(9, 10, fN)/NW, 9/GEO.visibleSpan(10, NW, fN), 1e-12,
+      "f·W/d over px  ==  W over d·px/f");
+    T("visibleSpan rejects a nonsense distance", isFinite(GEO.visibleSpan(0, NW, fN)), false,
+      null, "guarded, not silently Infinity");
+    T("distanceForFill inverts visibleSpan",
+      GEO.visibleSpan(GEO.distanceForFill(9, 0.7, NW, fN), NW, fN), 9/0.7, 1e-9);
+
+    /* ---- recommended / minimum standoff, several poster sizes ---- */
+    const s98 = nom(9, 8);
+    T("standoff 9×8 ft: recommended 9.90 ft", s98.recommendedFt, 9.8991, 1e-3,
+      "f·W/(0.70·px) — the user's failing case, and it is nowhere near 6 ft");
+    T("standoff 9×8 ft: minimum 6.93 ft", s98.minimumFt, 6.9294, 1e-3, "the poster exactly fills the frame");
+    T("standoff 9×8 ft: the width is what binds on a portrait frame", s98.limit, "width");
+    T("standoff 9×8 ft: the OLD fixed 6 ft standoff was below the minimum",
+      STANDOFF_FT < s98.minimumFt, true, null,
+      "6 ft < " + s98.minimumFt.toFixed(2) + " ft — the gate was unsatisfiable, not merely wrong");
+    const s43 = nom(4, 3);
+    T("standoff 4×3 ft: recommended 4.40 ft", s43.recommendedFt, 4.3996, 1e-3);
+    T("standoff 4×3 ft: minimum 3.08 ft", s43.minimumFt, 3.0797, 1e-3);
+    const s310 = nom(3, 10);
+    T("standoff 3×10 ft: a TALL poster is height-limited, not width-limited", s310.limit, "height");
+    T("standoff 3×10 ft: recommended 6.19 ft comes from the height", s310.recommendedFt, 6.1870, 1e-3,
+      "width alone would have said 3.30 ft, and the top would have run off frame");
+    T("standoff 3×10 ft: minimum 4.33 ft", s310.minimumFt, 4.3309, 1e-3);
+    const s124 = nom(12, 4);
+    T("standoff 12×4 ft: recommended 13.20 ft", s124.recommendedFt, 13.1988, 1e-3);
+    T("recommended is always further out than the minimum",
+      [s98, s43, s310, s124].every(function(x){ return x.recommendedFt > x.minimumFt; }), true, null,
+      "fill target " + FRAME_FILL_TARGET + " < 1");
+    T("a width-limited poster's recommended/minimum ratio is exactly 1/fill",
+      s98.recommendedFt/s98.minimumFt, 1/FRAME_FILL_TARGET, 1e-12);
+    T("a bigger poster always needs more room",
+      nom(12, 8).recommendedFt > s98.recommendedFt && s98.recommendedFt > s43.recommendedFt, true);
+    /* Turn the same frame on its side and an 8 ft height becomes the binding
+       dimension. Correct physics, not a special case. */
+    (function(){
+      const fL = GEO.focalFromFov(1920, ASSUMED_HFOV_DEG);
+      const land = GEO.posterStandoff({ widthFt:9, heightFt:8, frameW:1920, frameH:1080,
+                                        fx:fL, fy:fL, fill:FRAME_FILL_TARGET });
+      T("standoff 9×8 ft on a LANDSCAPE frame flips to height-limited", land.limit, "height");
+      T("…and lands further back, at 15.64 ft", land.recommendedFt, 15.6431, 1e-3);
+    })();
+
+    /* ---- does it fit in view (check a) ---- */
+    const at6 = seen(6, 9, 8);
+    T("viewFit 9×8 ft at 6 ft: does NOT fit", at6.fits, false);
+    T("viewFit 9×8 ft at 6 ft: the width is the problem", at6.limit, "width");
+    T("viewFit 9×8 ft at 6 ft: 7.79 ft of wall in view", at6.visibleWFt, 7.7929, 1e-3);
+    const atRec = seen(s98.recommendedFt, 9, 8);
+    T("viewFit 9×8 ft at the recommended distance: fits", atRec.fits, true);
+    T("…filling exactly the fill target across the frame", atRec.fillW, FRAME_FILL_TARGET, 1e-12);
+    T("…and comfortably inside it top to bottom", atRec.fillH < 0.5, true,
+      null, "fillH " + atRec.fillH.toFixed(3));
+    /* THE BOUNDARY. Exactly filling the frame must COUNT as fitting — this is
+       the definition of the minimum, and a float that lands on 1+1ulp must not
+       turn a legal capture into an impossible one. */
+    const atMin = seen(s98.minimumFt, 9, 8);
+    T("viewFit at exactly the minimum: fillW is exactly 1", atMin.fillW, 1, 1e-12);
+    T("viewFit at exactly the minimum: FITS (the boundary is inclusive)", atMin.fits, true);
+    T("viewFit a hair inside the minimum: does not fit",
+      seen(s98.minimumFt*(1 - 1e-6), 9, 8).fits, false);
+    T("viewFit a hair outside the minimum: fits",
+      seen(s98.minimumFt*(1 + 1e-6), 9, 8).fits, true);
+    T("viewFit 3×10 ft at its minimum is HEIGHT-tight, not width-tight",
+      seen(s310.minimumFt, 3, 10).fillH, 1, 1e-12);
+
+    /* THE PREVIEW IS A CROP, and the two frames can disagree. A 400×914 stage
+       showing a 1080×1920 stream is scaled by cover to fill the HEIGHT, so it
+       shows less width than the shutter records — and a poster that exactly
+       fills the capture frame overflows the preview. The gate follows the
+       capture frame; the field UI says which one they are looking at. */
+    (function(){
+      const cw = 400, ch = 914, sCover = Math.max(cw/NW, ch/NH);
+      const fCss = fN*sCover;
+      const capture = seen(s98.minimumFt, 9, 8);
+      const preview = GEO.viewFit({ distanceFt:s98.minimumFt, widthFt:9, heightFt:8,
+                                    frameW:cw, frameH:ch, fx:fCss, fy:fCss });
+      T("at the minimum the poster fits the CAPTURE frame", capture.fits, true);
+      T("…and overflows the cover-cropped PREVIEW", preview.fits, false, null,
+        "preview sees " + preview.visibleWFt.toFixed(2) + " ft where the shutter records 9.00 ft");
+      T("…while at the recommended distance both agree",
+        GEO.viewFit({ distanceFt:s98.recommendedFt, widthFt:9, heightFt:8,
+                      frameW:cw, frameH:ch, fx:fCss, fy:fCss }).fits, true);
+      /* Marks are converted with the DISPLAY focal, and (Δx)/f is invariant
+         under the cover scale — so a wall marked on screen measures the same
+         as the same two features measured in capture pixels. */
+      const ox = (cw - NW*sCover)/2, toVid = function(x){ return (x - ox)/sCover; };
+      T("a span marked on the stage measures the same as it does in the capture frame",
+        GEO.spanFromPixels(10, 100, 300, cw/2, fCss).ft,
+        GEO.spanFromPixels(10, toVid(100), toVid(300), NW/2, fN).ft, 1e-9,
+        "object-fit:cover scales pixels and focal length together, so (Δx)/f is invariant");
+    })();
+
+    /* ---- the wall's own edges (check b) ---- */
+    const c0 = NW/2;
+    const sym = GEO.spanFromPixels(10, 200, 880, c0, fN);
+    T("spanFromPixels: two marks 680 px apart at 10 ft span 8.18 ft",
+      sym.ft, 8.1777, 1e-3, "d·(tan α_right − tan α_left)");
+    T("spanFromPixels: the right mark sits 22.24° off axis", sym.alphaBDeg, 22.2390, 1e-3);
+    T("spanFromPixels: symmetric marks give equal and opposite angles",
+      sym.alphaADeg, -sym.alphaBDeg, 1e-12);
+    T("spanFromPixels across the whole frame == visibleSpan",
+      GEO.spanFromPixels(10, 0, NW, c0, fN).ft, GEO.visibleSpan(10, NW, fN), 1e-9);
+    T("spanFromPixels: marks both off to one side still measure their own span",
+      GEO.spanFromPixels(10, 700, 1000, c0, fN).ft, 3.6078, 1e-3);
+    T("spanFromPixels: order of the two marks does not change the span",
+      GEO.spanFromPixels(10, 1000, 700, c0, fN).ft,
+      GEO.spanFromPixels(10, 700, 1000, c0, fN).ft, 1e-12);
+    T("spanFromPixels scales linearly with distance",
+      GEO.spanFromPixels(20, 200, 880, c0, fN).ft/sym.ft, 2, 1e-12);
+    T("spanFromPixels refuses to invent a span with no distance",
+      GEO.spanFromPixels(0, 200, 880, c0, fN), null);
+
+    /* ---- the fit comparison itself, including the exactly-fits boundary ---- */
+    T("fitsWithin: a 9 ft poster does not fit a 7.2 ft wall", GEO.fitsWithin(9, 7.2), false);
+    T("fitsWithin: a 9 ft poster fits a 9 ft wall EXACTLY", GEO.fitsWithin(9, 9), true);
+    T("fitsWithin: 0.1 ft short is short", GEO.fitsWithin(9, 8.9), false);
+    T("fitsWithin: a float hair over the boundary still fits",
+      GEO.fitsWithin(9, 9*(1 - 1e-15)), true, null, "1 ulp of slack, and no more");
+    T("fitsWithin: NaN is never a fit", GEO.fitsWithin(9, NaN), false);
+
+    /* ---- honest precision ---- */
+    T("roundToSigma: ± 1.7 ft rounds to whole feet", roundToSigma(12.857, 1.67), 13, 1e-12);
+    T("roundToSigma: ± 0.4 ft rounds to the nearest half foot", roundToSigma(12.6, 0.4), 12.5, 1e-12);
+    T("roundToSigma: a tight error bar keeps a tenth", roundToSigma(9.899, 0.1), 9.9, 1e-12);
+    T("fmtRoughFt drops the decimal once the error bar is a foot wide",
+      fmtRoughFt(12.857, 1.67), "13", null, "no false precision on an uncalibrated lens");
+
+    /* ---- and the contract the two modes agree on ---- */
+    (function(){
+      const t9 = { widthFt:9, heightFt:8, standoffFt:STANDOFF_FT };
+      const so = taskStandoff(t9);
+      T("taskStandoff derives the standoff in mockup mode and only there",
+        so.derived, MOCKUP, null, "APP_MODE = " + APP_MODE);
+      T("taskStandoff: mockup derives 9.90 ft, verification keeps the task's 6.0 ft",
+        so.recommendedFt, MOCKUP ? 9.8991 : STANDOFF_FT, 1e-3);
     })();
   })();
 
