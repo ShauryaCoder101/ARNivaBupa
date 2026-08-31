@@ -3227,21 +3227,46 @@ const Blobs = (function(){
    exactly as it did before 0006: no stature is known, h falls back to the badged
    default, and the height question is not asked (there is nowhere to put the
    answer). Nothing is silently dropped — profileHeightSupported() is what the
-   UI reads before offering to store anything. */
-let PROFILE_COLS_FULL = "id,full_name,role,title,region,is_active,height_cm";
-let PROFILE_COLS_BASE = "id,full_name,role,title,region,is_active";
+   UI reads before offering to store anything.
+
+   `phone` arrives with 0007_phone_identity.sql and is optional for exactly the
+   same reason, so the list is ASSEMBLED from parts rather than written out
+   twice per optional column — two flags already need four literals, and the
+   next one would need eight. */
+const PROFILE_COLS_CORE = "id,full_name,role,title,region,is_active";
 let PROFILE_HEIGHT_COL = true;
-function profileCols(){ return PROFILE_HEIGHT_COL ? PROFILE_COLS_FULL : PROFILE_COLS_BASE; }
+let PROFILE_PHONE_COL  = true;
+function profileCols(){
+  return PROFILE_COLS_CORE
+    + (PROFILE_HEIGHT_COL ? ",height_cm" : "")
+    + (PROFILE_PHONE_COL  ? ",phone"     : "");
+}
 function profileHeightSupported(){ return PROFILE_HEIGHT_COL; }
+function profilePhoneSupported(){ return PROFILE_PHONE_COL; }
 /* True when this error is "that column is not there", and nothing else. A
    network failure, a 401 or an RLS-filtered empty result must NOT downgrade. */
-function profileHeightMissing(err){
-  if(!PROFILE_HEIGHT_COL || !err) return false;
+function profileColMissing(err, name){
+  if(!err) return false;
   if(err.kind === "offline" || err.kind === "timeout" || err.kind === "auth" || err.retryable) return false;
   const s = [err.message, err.details, err.hint, err.code].join(" ");
-  if(!/height_cm/.test(s)) return false;
+  return new RegExp(name).test(s);
+}
+function profileHeightMissing(err){
+  if(!PROFILE_HEIGHT_COL) return false;
+  if(!profileColMissing(err, "height_cm")) return false;
   PROFILE_HEIGHT_COL = false;
   return true;
+}
+function profilePhoneMissing(err){
+  if(!PROFILE_PHONE_COL) return false;
+  if(!profileColMissing(err, "phone")) return false;
+  PROFILE_PHONE_COL = false;
+  return true;
+}
+/* Either optional column going missing is recoverable in the same way, and the
+   callers all want the same question answered: "should I just try again?" */
+function profileColRecovered(err){
+  return profileHeightMissing(err) || profilePhoneMissing(err);
 }
 
 /* ==========================================================
@@ -3255,6 +3280,96 @@ function profileHeightMissing(err){
    the local cache stay exactly where they are, and the user is asked to sign
    in again. Nothing captured in the field is ever thrown away by a token.
    ========================================================== */
+/* ==========================================================
+   2c. PHONE NUMBERS AS THE MERCHANDISER'S IDENTITY
+   ------------------------------------------------------------
+   A merchandiser signs in with a PHONE NUMBER, a password and nothing else,
+   and never types an email address — they do not have a work one, and asking
+   for a personal one to log into an employer's tool is both a support burden
+   and a data-protection question nobody needed to open.
+
+   GoTrue authenticates on an email, so the phone is mapped to a synthetic
+   address that is never delivered to and never shown:
+
+       9876543210  →  919876543210@phone.niva.internal
+
+   THE MAPPING MUST BE STABLE AND CANONICAL, because it IS the primary key of
+   the login. "98765 43210", "+91 98765-43210" and "098765 43210" are one human
+   being with one account, so every one of them has to normalise to the same
+   digits before the domain is appended — otherwise a merchandiser creates a
+   second, empty account by typing their own number differently. That is why
+   normalisation lives here, in one function, used by the login form AND by the
+   Edge Function that creates the account. THE TWO MUST AGREE: see
+   supabase/functions/create-merchandiser/index.ts, which reimplements exactly
+   this rule, and the self-tests that pin it.
+
+   Managers and admins keep ordinary email logins — they have work addresses,
+   they are few, and they are created by a person with database access. The one
+   sign-in form accepts either and decides by looking for an "@". */
+const PHONE_EMAIL_DOMAIN = "phone.niva.internal";
+const PHONE_CC_DEFAULT   = "91";     // India; the programme is single-country
+const PHONE_NSN_LEN      = 10;       // digits in a national subscriber number
+
+/* Canonical digits, or null if this cannot be a phone number. Deliberately
+   strict at the ends and forgiving in the middle: spaces, dashes, brackets and
+   a leading + are how people actually write numbers, while a wrong LENGTH is
+   almost always a typo that would otherwise mint an account nobody can sign
+   into. */
+function phoneDigits(raw){
+  let d = String(raw == null ? "" : raw).replace(/[^0-9]/g, "");
+  if(!d) return null;
+  /* NO E.164 NUMBER BEGINS WITH ZERO, so a leading one is always a trunk prefix
+     and is always dropped — before the country code goes on, and regardless of
+     whether one is already there. Both "098765 43210" and "091 98765 43210" are
+     how people write the same subscriber, and a rule that only understood the
+     first would mint a second account for the second. */
+  d = d.replace(/^0+/, "");
+  if(d.length === PHONE_NSN_LEN) d = PHONE_CC_DEFAULT + d;
+  /* Anything outside E.164's own bounds is not a number we can canonicalise. */
+  if(d.length < 11 || d.length > 15) return null;
+  return d;
+}
+function phoneToEmail(raw){
+  const d = phoneDigits(raw);
+  return d ? (d + "@" + PHONE_EMAIL_DOMAIN) : null;
+}
+/* …and back, so a profile row whose phone column predates this build — or was
+   written by hand — still shows a number rather than a synthetic address. */
+function emailToPhone(email){
+  const m = /^([0-9]{11,15})@/.exec(String(email || ""));
+  return m ? m[1] : null;
+}
+function isPhoneLogin(email){
+  return String(email || "").indexOf("@" + PHONE_EMAIL_DOMAIN) > 0;
+}
+/* How an account is NAMED back to the person holding it. The synthetic address
+   is an implementation detail of GoTrue and must never surface — showing
+   "919876543210@phone.niva.internal" on the session-expired screen would invite
+   someone to type it into the login box, where it would work by accident and
+   then not work on the next device. */
+function signInLabel(email){
+  return isPhoneLogin(email) ? phonePretty(emailToPhone(email)) : String(email || "");
+}
+/* Grouped for reading aloud over a phone line, which is what this is for. */
+function phonePretty(raw){
+  const d = phoneDigits(raw) || String(raw || "");
+  if(d.length === PHONE_CC_DEFAULT.length + PHONE_NSN_LEN && d.indexOf(PHONE_CC_DEFAULT) === 0){
+    const n = d.slice(PHONE_CC_DEFAULT.length);
+    return "+" + PHONE_CC_DEFAULT + " " + n.slice(0, 5) + " " + n.slice(5);
+  }
+  return d ? ("+" + d) : "—";
+}
+/* What the person typed into the one sign-in box: an email, or a phone. */
+function loginIdentity(typed){
+  const s = String(typed || "").trim();
+  if(!s) return { ok:false, why:"Enter your phone number and password." };
+  if(s.indexOf("@") >= 0) return { ok:true, kind:"email", email:s, shown:s };
+  const d = phoneDigits(s);
+  if(!d) return { ok:false, kind:"phone",
+                  why:"That does not look like a " + PHONE_NSN_LEN + "-digit phone number." };
+  return { ok:true, kind:"phone", email:phoneToEmail(d), phone:d, shown:phonePretty(d) };
+}
+
 const Session = (function(){
   let s = null;            // { access_token, refresh_token, expires_at, user:{id,email} }
   let profile = null;      // the profiles row — the ONLY source of role
@@ -3384,9 +3499,16 @@ const Session = (function(){
         persist();
         return profile;
       };
+      /* Two optional columns means up to two downgrades before the select is
+         one this project can answer — and this select runs AT SIGN-IN, so
+         giving up after one would lock every user out of a database missing
+         both migrations. */
       return q(profileCols()).then(take, function(err){
-        if(!profileHeightMissing(err)) throw err;
-        return q(profileCols()).then(take);
+        if(!profileColRecovered(err)) throw err;
+        return q(profileCols()).then(take, function(err2){
+          if(!profileColRecovered(err2)) throw err2;
+          return q(profileCols()).then(take);
+        });
       });
     },
 
@@ -4177,7 +4299,7 @@ let USERS     = [];   // mapProfile rows
 let CAMPAIGNS = [];   // mapCampaign rows
 let STORES    = [];   // mapStore rows
 
-const userById    = id => USERS.filter(u=>u.id===id)[0] || {id:id, name:"Unknown user", role:"—", title:""};
+const userById    = id => USERS.filter(u=>u.id===id)[0] || {id:id, name:"Unknown user", role:"—", title:"", phone:null};
 const storeById   = id => STORES.filter(s=>s.id===id)[0] || null;
 const storeByCode = c  => STORES.filter(s=>String(s.code).toUpperCase()===String(c||"").toUpperCase())[0] || null;
 const merchandisers = () => USERS.filter(u=>u.role==="Merchandiser" && u.active !== false);
@@ -4240,7 +4362,10 @@ function mapProfile(r){
            region:r.region||null, active: r.is_active !== false,
            /* undefined (not null) when the project predates 0006 — "we did not
               ask" is a different fact from "they have not said". */
-           heightCm: (r.height_cm == null ? null : Number(r.height_cm)) };
+           heightCm: (r.height_cm == null ? null : Number(r.height_cm)),
+           /* 0007. A merchandiser always has one (it IS their login); a manager
+              signing in with an email legitimately has none. */
+           phone: (r.phone == null ? null : String(r.phone)) };
 }
 function mapCampaign(r){
   return { id:r.id, code:r.code, name:r.name, brand:r.brand,
@@ -4423,6 +4548,9 @@ function mapImage(r, storeCode, idx){
     ts: r.captured_at || r.recorded_at,
     lat: num(r.lat), lng: num(r.lng), by: r.uploaded_by, device: r.device || "",
     guided: !!r.is_guided, placementId: r.placement_id || null, placement: null,
+    /* 0007. Absent on a project that has not applied it, and on every row
+       written before it — both read back as null, which is what they are. */
+    office: r.office_name || null, locSource: r.location_source || null,
     name: String(r.storage_path||"").split("/").pop()
   };
   /* seed.sql ships task_images metadata with no bytes in the bucket. Rather
@@ -4433,7 +4561,7 @@ function mapImage(r, storeCode, idx){
   return out;
 }
 function imageRow(im, taskId){
-  return {
+  const row = {
     id: im.id, task_id: taskId, kind: im.kind || "after",
     bucket_id: im.bucket || "evidence",
     storage_path: im.path, clean_storage_path: im.cleanPath || null,
@@ -4444,6 +4572,14 @@ function imageRow(im, taskId){
     captured_at: im.ts || new Date().toISOString(),
     uploaded_by: Session.userId()
   };
+  /* 0007's columns are named ONLY when there is something to put in them. A
+     PostgREST insert naming a column the project does not have fails 400, and
+     the outbox treats a 400 as permanent — so a device that captured against a
+     project still on 0006 would lose the photo rather than the office name.
+     Omitting a null costs nothing and is the same value the column defaults to. */
+  if(im.office)    row.office_name     = String(im.office);
+  if(im.locSource) row.location_source = String(im.locSource);
+  return row;
 }
 
 function mapAudit(r){
@@ -4543,7 +4679,11 @@ function taskInsertRow(t){
 let state = null;
 let view  = { name:"dashboard", params:{} };
 let ui    = { granularity:"Region", taskFilter:{q:"",status:"",region:"",campaign:""}, popOpen:null,
-              login:{ busy:false, error:"", email:"" } };
+              login:{ busy:false, error:"", email:"" },
+              /* The manager's two screens. `accounts.form` survives a re-render
+                 so a failed create does not also lose what was typed. */
+              accounts:{ busy:false, error:"", ok:"", form:{ name:"", phone:"", pw:"" } },
+              photos:{ sort:"date", dir:-1, q:"" } };
 
 function blankState(){
   return { v:3, userId:null, tasks:[], notifications:[],
@@ -4556,7 +4696,8 @@ function blankState(){
 const me = function(){
   const p = Session.profile();
   if(!p) return { id:null, name:"Not signed in", role:null, title:"" };
-  return { id:p.id, name:p.full_name || p.name || p.id, role:p.role, title:p.title || "" };
+  return { id:p.id, name:p.full_name || p.name || p.id, role:p.role, title:p.title || "",
+           phone: p.phone || null };
 };
 const myRole = function(){ const p = Session.profile(); return p ? p.role : null; };
 const signedIn = function(){ return SB_CONFIGURED && !!Session.profile() && Session.state !== "signedout"; };
@@ -4659,11 +4800,10 @@ const Repo = (function(){
        without 0006 applied must not lose its whole master read over one
        column. See profileCols() for why the column can legitimately be absent. */
     const profiles = function(){
-      return REST.select("profiles", "select=" + profileCols() + "&order=full_name")
-        .catch(function(err){
-          if(!profileHeightMissing(err)) throw err;
-          return REST.select("profiles", "select=" + profileCols() + "&order=full_name");
-        });
+      const go = function(){ return REST.select("profiles", "select=" + profileCols() + "&order=full_name"); };
+      return go()
+        .catch(function(err){ if(!profileColRecovered(err)) throw err; return go(); })
+        .catch(function(err){ if(!profileColRecovered(err)) throw err; return go(); });
     };
     return Promise.all([
       profiles(),
@@ -7193,6 +7333,10 @@ function makeAfterMeta(t, src, extra){
     cleanPath: null, cleanSrc: null,
     ts: new Date().toISOString(), lat: g.lat, lng: g.lng,
     by: me().id, device: deviceString(),
+    /* 0007. Null rather than absent so that a row written by the simulator, or
+       by the plain-upload path, is explicitly "no office was given" rather than
+       silently missing the field. */
+    office: null, locSource: null,
     placement: null, placementId: null, guided: false, local: true,
     fb: "gen:" + t.storeCode + ":AFTER:" + ((t.afterImages.length + ws(t.id).after.length) % 3)
   }, extra || {});
@@ -7474,6 +7618,9 @@ const ARC = {
           motion:{ on:false, onMot:null, seen:false, since:0, steps:0,
                    peak:0, stir:0, lastPeakAt:0 } },
   assumeSquare:false,
+  /* Where the merchandiser says they are. Asked once per capture session, then
+     stamped on every photo taken from it — see arcEnsureOffice. */
+  office:null,
   /* OPTIONAL, AND NEVER A STEP. Distance and lens say how much wall is in
      FRAME; nothing in a single view says where the wall ENDS — it may be
      narrower than the frame, and no amount of intrinsics will reveal that. So
@@ -8161,6 +8308,11 @@ function arcOpen(taskId, phase){
 }
 function arcClose(){
   ARC.open = false;
+  /* The office is a property of THIS visit, not of the device. Leaving it set
+     would file the next office's photos under the last one's name, which is
+     precisely the error the typed field exists to avoid — the remembered list
+     in localStorage is what makes retyping it cheap. */
+  ARC.office = null;
   if(ARC.raf){ cancelAnimationFrame(ARC.raf); ARC.raf = 0; }
   arcStopSensors();
   arcStopCamera();
@@ -11442,9 +11594,19 @@ function arcComposite(source, srcW, srcH, intr, g, tierKey, geo, nudgeNorm, capt
       ? "NIVA POSTER MOCKUP — ARTWORK SUPERIMPOSED, NOT INSTALLED"
       : "NIVA PLACEMENT VERIFIED CAPTURE — " + tm.label.toUpperCase()
         + (captureMode === "single-frame" ? "  [SAME-FRAME]" : captureMode === "handover" ? "  [HANDOVER]" : ""),
-    t.storeCode + "  " + t.storeName + "  ·  " + t.city + ", " + t.state,
-    new Date().toISOString() + "   GPS " + gps(geo.lat, geo.lng) + "  ±" + Math.round(geo.accuracy||0) + " m"
-      + "   geofence " + (geo.pass ? "PASS" : "FAIL") + " " + Math.round(geo.distance||0) + " m",
+    /* MOCKUP: the office the merchandiser typed is the location of record, so
+       it is what the stamp leads with. The store master is a verification-mode
+       concept and there is no store here. */
+    MOCKUP
+      ? ("OFFICE  " + (geo.office || "not stated"))
+      : (t.storeCode + "  " + t.storeName + "  ·  " + t.city + ", " + t.state),
+    new Date().toISOString()
+      + (geo.lat == null
+          /* Never print "GPS 0.00000, 0.00000" and never print a coordinate
+             nobody measured. Absence is a fact and is stamped as one. */
+          ? "   NO GPS — location stated by the merchandiser"
+          : ("   GPS " + gps(geo.lat, geo.lng) + "  ±" + Math.round(geo.accuracy||0) + " m"
+             + (MOCKUP ? "" : "   geofence " + (geo.pass ? "PASS" : "FAIL") + " " + Math.round(geo.distance||0) + " m"))),
     "DIST " + n1(g.distance) + " ft (target " + Number(t.standoffFt).toFixed(1) + " ±" + t.standoffTolFt + ")"
       + "   TILT " + n1(g.pitch) + "°   ROLL " + n1(g.roll) + "°   YAW "
       + (g.yawVerified ? n1(g.yaw) + "°" : "unverified")
@@ -11452,10 +11614,131 @@ function arcComposite(source, srcW, srcH, intr, g, tierKey, geo, nudgeNorm, capt
   ], "#5eead4");
   return { stamped: c.toDataURL("image/jpeg", 0.7), clean: clean };
 }
-/* GPS fix at shutter time, reusing the geofence rule the rest of the app uses. */
+/* ==========================================================
+   WHERE THE PHOTO WAS TAKEN
+   ------------------------------------------------------------
+   The manager sorts photos by location, so a location has to exist on every
+   row — and in a small interior office the only reliable source of one is the
+   person standing in it. GPS is kept as corroboration where the handset gives
+   it, and is never a substitute: indoors it is 20-50 m at best, frequently
+   refused outright, and two offices in one commercial complex produce
+   indistinguishable fixes.
+
+   TYPED ONCE, NOT ONCE PER PHOTO. A merchandiser shoots several walls in one
+   office; asking every time would train them to dismiss the question. The
+   answer is remembered for the capture session and offered back as the default
+   next time, with the names this device has used before as a picklist so that
+   "Andheri East" does not become four spellings across four visits.
+   ========================================================== */
+const OFFICE_KEY      = "niva.offices.v1";   // names typed on this device
+const OFFICE_LAST_KEY = "niva.office.last";
+const OFFICE_MAX_KEPT = 20;
+
+function officeList(){
+  try{ const a = JSON.parse(localStorage.getItem(OFFICE_KEY) || "[]"); return Array.isArray(a) ? a : []; }
+  catch(e){ return []; }
+}
+function officeLast(){
+  try{ return localStorage.getItem(OFFICE_LAST_KEY) || ""; }catch(e){ return ""; }
+}
+function officeRemember(name){
+  const n = String(name || "").trim();
+  if(!n) return;
+  /* Case-insensitive de-dupe, most recent first: the list is a convenience,
+     and an office typed today is the one most likely wanted tomorrow. */
+  const rest = officeList().filter(function(x){ return String(x).toLowerCase() !== n.toLowerCase(); });
+  rest.unshift(n);
+  try{
+    localStorage.setItem(OFFICE_KEY, JSON.stringify(rest.slice(0, OFFICE_MAX_KEPT)));
+    localStorage.setItem(OFFICE_LAST_KEY, n);
+  }catch(e){}
+}
+
+/* Ask, and ALWAYS resolve. The photograph has already been taken by the time
+   this runs, so there is no answer — including no answer at all — that may be
+   allowed to discard it. A dismissed dialog resolves with an empty string and
+   the row simply has no office on it, which the manager's list shows honestly
+   as "—" rather than as somewhere the merchandiser never said they were. */
+function askOffice(opts){
+  opts = opts || {};
+  return new Promise(function(resolve){
+    let settled = false;
+    const finish = function(v){ if(settled) return; settled = true; resolve(String(v || "").trim()); };
+    const known = officeList();
+    const pre = officeLast();
+    openModal({
+      title: opts.required ? "Which office is this?" : "Confirm the office",
+      body:
+        (opts.required
+          ? '<p>This phone would not give a location' + (opts.why ? ' (' + esc(opts.why) + ')' : '')
+            + ', so the photo has no GPS on it. Type where you are and it will be saved with the picture.</p>'
+          : '<p>The photo will be filed under this name, and your manager sorts by it.</p>')
+        + '<div class="fieldrow" style="margin-top:10px"><label for="of_name">Office</label>'
+        + '<input id="of_name" type="text" list="of_known" autocomplete="off" '
+        + 'placeholder="e.g. Andheri East branch" value="' + esc(pre) + '"></div>'
+        + (known.length
+            ? '<datalist id="of_known">'
+              + known.map(function(n){ return '<option value="' + esc(n) + '"></option>'; }).join("")
+              + '</datalist>'
+            : '')
+        + (known.length
+            ? '<div class="hint" style="margin-top:8px">Start typing to pick one you have used before.</div>'
+            : ''),
+      actions: [{
+        label: "Save", cls: "btn primary",
+        act: function(){
+          const el = $("#of_name");
+          const v = el ? el.value : "";
+          /* Resolve BEFORE closing: closeModal fires onClose, and whichever of
+             the two lands first is the answer that counts. */
+          finish(v);
+          closeModal();
+        }
+      }],
+      onClose: function(){ finish(""); }
+    });
+    /* The keyboard should be up and the caret in the box — this is the only
+       thing on screen and it is holding up the capture. */
+    setTimeout(function(){ const el = $("#of_name"); if(el){ try{ el.focus(); el.select(); }catch(e){} } }, 30);
+  });
+}
+
+/* The office for THIS capture: asked once, then reused until the capture screen
+   is closed. `required` when the handset gave no position, because then the
+   typed name is the only location the row will ever have. */
+function arcEnsureOffice(geo){
+  const stated = !geo || geo.source === "unavailable";
+  if(ARC.office && !stated) return Promise.resolve(ARC.office);
+  if(ARC.office && stated)  return Promise.resolve(ARC.office);
+  return askOffice({ required: stated, why: geo && geo.note })
+    .then(function(name){
+      if(name){ ARC.office = name; officeRemember(name); }
+      return name;
+    });
+}
+
+/* GPS fix at shutter time, reusing the geofence rule the rest of the app uses.
+
+   MOCKUP MODE DOES NOT INVENT A POSITION. The verification build jitters a
+   coordinate near the store when the device refuses one, which is defensible
+   there — the row is labelled `simulated`, and a store's location is a known
+   fact to jitter around. Neither holds here: these mockups are shot in offices
+   that are not in the store master, so there is nothing to jitter around, and
+   the whole point of the location field is to record where somebody actually
+   was. A fabricated coordinate that a manager later sorts by is worse than no
+   coordinate at all.
+
+   So on this path a refusal RESOLVES WITH NO POSITION, and arcFinishCapture
+   asks the merchandiser to type the location instead. The row then says
+   `stated`, and everyone reading it knows which of the two it is. */
 function arcGeoFix(t){
   return new Promise(function(res){
     const fallback = function(note){
+      if(MOCKUP){
+        res({ lat:null, lng:null, accuracy:null, distance:null,
+              pass:null, source:"unavailable", note:note });
+        return;
+      }
       const sim = simCoord(t, 12 + Math.random()*40);
       res({ lat:sim.lat, lng:sim.lng, accuracy:sim.accuracy, distance:sim.distance,
             pass: sim.distance <= GEOFENCE_M, source:"simulated", note:note });
@@ -11807,14 +12090,27 @@ function arcManualShoot(){
 function arcFinishCapture(source, w, h, intr, g, tierKey, nudgeNorm, captureMode, camInfo){
   const t = ARC.task;
   const I = intr || arcIsoIntr(GEO.focalFromFov(w, ASSUMED_HFOV_DEG), w, h);
+  /* THE OFFICE IS SETTLED BEFORE THE IMAGE IS COMPOSITED, because the name is
+     stamped into the pixels along with everything else. Asking afterwards would
+     mean either a second rasterisation or a photo whose burned-in caption and
+     whose database row disagree about where it was taken. */
   return arcGeoFix(t).then(function(geo){
-    const imgs = arcComposite(source, w, h, I, g, tierKey, geo, nudgeNorm, captureMode);
-    const rec = arcBuildRecord(g, tierKey, I.fx, captureMode, camInfo);
-    rec.geofencePass = geo.pass;
-    rec.geofenceM = Math.round(geo.distance || 0);
-    ARC.capture = { imgs: imgs, rec: rec, geo: geo };
-    ARC.busy = false;
-    arcReviewPanel();
+    return arcEnsureOffice(geo).then(function(office){
+      geo.office = office || null;
+      /* `stated` is the honest label when the handset gave nothing and a person
+         supplied the location instead. With no name either, there is no
+         location at all and the row says so rather than guessing. */
+      geo.locSource = (geo.source === "unavailable")
+        ? (office ? "stated" : null)
+        : geo.source;
+      const imgs = arcComposite(source, w, h, I, g, tierKey, geo, nudgeNorm, captureMode);
+      const rec = arcBuildRecord(g, tierKey, I.fx, captureMode, camInfo);
+      rec.geofencePass = geo.pass;
+      rec.geofenceM = Math.round(geo.distance || 0);
+      ARC.capture = { imgs: imgs, rec: rec, geo: geo };
+      ARC.busy = false;
+      arcReviewPanel();
+    });
   });
 }
 function arcReviewPanel(){
@@ -11822,10 +12118,21 @@ function arcReviewPanel(){
   arcPanel('<h2>' + (p.pass ? "Placement verified" : "Capture recorded — gates not met") + '</h2>'
     + '<div class="shot" style="margin-bottom:12px"><img alt="composited capture" src="'+c.imgs.stamped+'"></div>'
     + placementBlock(p, t)
-    + '<div class="hint" style="margin-top:10px">Geofence '
-    + (c.geo.pass ? '<b style="color:var(--st-approved)">PASS</b>' : '<b style="color:var(--st-rework)">FAIL</b>')
-    + ' · ' + Math.round(c.geo.distance) + ' m from the registered store coordinates ('
-    + esc(c.geo.source) + (c.geo.note ? ' — '+esc(c.geo.note) : '') + ').</div>'
+    /* MOCKUP has no registered store to be near, so a geofence verdict would be
+       measuring against nothing. What matters is where they said they were and
+       whether the phone agreed. */
+    + (MOCKUP
+        ? '<div class="hint" style="margin-top:10px">Filed under <b>'
+          + esc(c.geo.office || "no office given") + '</b> · '
+          + (c.geo.lat == null
+              ? 'this phone gave no location'
+                + (c.geo.note ? ' (' + esc(c.geo.note) + ')' : '') + ', so that name is the record.'
+              : 'GPS ' + esc(gps(c.geo.lat, c.geo.lng)) + '.')
+          + '</div>'
+        : '<div class="hint" style="margin-top:10px">Geofence '
+          + (c.geo.pass ? '<b style="color:var(--st-approved)">PASS</b>' : '<b style="color:var(--st-rework)">FAIL</b>')
+          + ' · ' + Math.round(c.geo.distance) + ' m from the registered store coordinates ('
+          + esc(c.geo.source) + (c.geo.note ? ' — '+esc(c.geo.note) : '') + ').</div>')
     + '<div class="pfoot"><button class="btn primary" data-arc="attach">Attach to task</button>'
     + '<button class="btn" data-arc="retake">Retake</button>'
     + '<button class="btn ghost" data-arc="close">Discard</button></div>');
@@ -11842,7 +12149,8 @@ function arcAttach(){
      blob as data URLs. */
   const meta = makeAfterMeta(t, c.imgs.stamped, {
     placement: c.rec, cleanData: c.imgs.clean,
-    lat: c.geo.lat, lng: c.geo.lng, guided: true
+    lat: c.geo.lat, lng: c.geo.lng, guided: true,
+    office: c.geo.office || null, locSource: c.geo.locSource || null
   });
   w.after.push(meta);
   const p = c.rec;
@@ -12605,6 +12913,241 @@ function viewUsers(){
   html += '</tbody></table></div></div></div>';
   return { html: html };
 }
+/* ==========================================================
+   THE MANAGER'S TWO SCREENS
+   ------------------------------------------------------------
+   A manager does two things and no others: they make merchandiser accounts,
+   and they look at what those merchandisers photographed. Everything the
+   prototype put in front of them — campaigns, task assignment, approvals,
+   a shortlist, a dashboard of KPIs — is gone from their navigation.
+
+   NOTHING WAS DROPPED FROM THE DATABASE. Tasks, campaigns and the approval
+   edges are all still there, still enforced by RLS, and still reachable by an
+   Admin. That is deliberate: the client asked for a simpler screen, not for
+   the loss of every record the programme has already accumulated, and hiding
+   a view is reversible in a way that dropping six migrations of schema is not.
+   ========================================================== */
+
+/* ---- accounts: the only way a merchandiser comes into being ---- */
+function viewAccounts(){
+  const A = ui.accounts;
+  const mine = USERS.filter(function(u){ return u.role === "Merchandiser"; });
+  let html = '<div class="pagehd"><div><h1>Merchandisers</h1>'
+    + '<p>Create a login, and see who already has one. A merchandiser signs in with '
+    + 'their <b>phone number</b> and the password you set here — there is no email and '
+    + 'nothing for them to activate.</p></div></div>';
+
+  /* THE FORM. Three fields, because three is what an account is. */
+  html += '<div class="card" style="margin-bottom:14px"><div class="hd"><h3>Add a merchandiser</h3></div>'
+    + '<div class="bd">'
+    + (A.error ? '<div class="err" style="margin-bottom:12px">'+esc(A.error)+'</div>' : '')
+    + (A.ok    ? '<div class="note" style="margin-bottom:12px">'+esc(A.ok)+'</div>' : '')
+    + '<div class="formgrid">'
+    +   '<div class="fieldrow" id="f_m_name"><label for="m_name">Name</label>'
+    +     '<input id="m_name" type="text" autocomplete="off" placeholder="Aditya Kulkarni" '
+    +     'value="'+esc(A.form.name)+'"></div>'
+    +   '<div class="fieldrow" id="f_m_phone"><label for="m_phone">Phone number</label>'
+    +     '<input id="m_phone" type="tel" inputmode="tel" autocomplete="off" placeholder="98765 43210" '
+    +     'value="'+esc(A.form.phone)+'"></div>'
+    +   '<div class="fieldrow" id="f_m_pw"><label for="m_pw">Password</label>'
+    +     '<input id="m_pw" type="text" autocomplete="off" placeholder="at least 8 characters" '
+    +     'value="'+esc(A.form.pw)+'"></div>'
+    + '</div>'
+    /* Shown, not masked. The manager is setting a password they then have to
+       read out to somebody — hiding it behind dots helps nobody here and
+       guarantees typos that surface as "it does not work" a day later. */
+    + '<div class="hint" style="margin-top:4px">The password is shown so you can pass it on. '
+    + 'Tell them to keep it — this screen cannot show it again.</div>'
+    + '<div class="btnrow" style="margin-top:12px">'
+    + '<button class="btn primary" data-act="mkmerch"'+(A.busy?' disabled':'')+'>'
+    + (A.busy ? "Creating…" : "Create account")+'</button></div>'
+    + '</div></div>';
+
+  html += '<div class="card"><div class="hd"><h3>'+mine.length+' merchandiser'
+    + (mine.length===1?'':'s')+'</h3></div><div class="bd tight">';
+  if(!mine.length){
+    html += '<div style="padding:8px 0">'+emptyState("No merchandiser accounts yet.")+'</div>';
+  }else{
+    html += '<div class="tblwrap"><table class="tbl"><thead><tr>'
+      + '<th>Name</th><th>Phone</th><th>Photos</th><th>Status</th></tr></thead><tbody>'
+      + mine.map(function(u){
+          const n = allPhotos().filter(function(p){ return p.byId === u.id; }).length;
+          return '<tr><td><b>'+esc(u.name)+'</b></td>'
+            + '<td class="mono num">'+esc(phonePretty(u.phone))+'</td>'
+            + '<td class="num">'+n+'</td>'
+            + '<td><span class="chip '+(u.active?'pass':'neutral')+' plain">'
+            + (u.active?'Active':'Inactive')+'</span></td></tr>';
+        }).join("")
+      + '</tbody></table></div>';
+  }
+  html += '</div></div>';
+  return { html: html };
+}
+
+/* ---- every photo, from everyone ----
+   Flattened out of the task tree ONCE, here, because both the table and the
+   per-merchandiser counts above need the same list and walking the tree twice
+   would let them disagree. */
+function allPhotos(){
+  const out = [];
+  state.tasks.forEach(function(t){
+    (t.afterImages || []).forEach(function(im){
+      const u = userById(im.by);
+      out.push({
+        src: im.src, fb: im.fb, ts: im.ts,
+        byId: im.by, by: u.name, phone: u.phone,
+        /* 0007. Rows captured before the office field existed have none, and
+           say so rather than borrowing the store's name and implying the
+           merchandiser typed it. */
+        office: im.office || null,
+        locSource: im.locSource || null,
+        lat: im.lat, lng: im.lng,
+        taskId: t.id, store: t.storeName, device: im.device
+      });
+    });
+  });
+  return out;
+}
+function photoSortKey(p, by){
+  if(by === "office") return String(p.office || "￿").toLowerCase();
+  if(by === "name")   return String(p.by || "").toLowerCase();
+  if(by === "phone")  return String(p.phone || "");
+  return String(p.ts || "");
+}
+function viewPhotos(){
+  const P = ui.photos;
+  let rows = allPhotos();
+  const q = P.q.trim().toLowerCase();
+  if(q){
+    rows = rows.filter(function(p){
+      return [p.by, p.office, p.phone, phonePretty(p.phone), p.store]
+        .join(" ").toLowerCase().indexOf(q) >= 0;
+    });
+  }
+  rows.sort(function(a, b){
+    const ka = photoSortKey(a, P.sort), kb = photoSortKey(b, P.sort);
+    if(ka < kb) return -P.dir;
+    if(ka > kb) return  P.dir;
+    /* Ties break on recency, always, so the order is total and a re-sort never
+       shuffles equal rows around. */
+    return String(b.ts).localeCompare(String(a.ts));
+  });
+
+  const th = function(key, label){
+    const on = P.sort === key;
+    return '<th class="clickable" data-act="psort" data-k="'+key+'">'+esc(label)
+      + (on ? ' <span style="opacity:.7">'+(P.dir>0?'▲':'▼')+'</span>' : '')+'</th>';
+  };
+  let html = '<div class="pagehd"><div><h1>Photos</h1>'
+    + '<p>Every mockup taken by every merchandiser. <span class="num">'+rows.length+'</span> '
+    + (rows.length===1?'photo':'photos')+'. Click a column to sort.</p></div></div>';
+
+  html += '<div class="card"><div class="bd">'
+    + '<div class="fieldrow" style="margin:0"><label for="ph_q">Search</label>'
+    + '<input id="ph_q" type="search" placeholder="office, merchandiser or phone number" '
+    + 'value="'+esc(P.q)+'" data-act="pq"></div></div></div>';
+
+  /* The search box is re-created by every render, so its listener has to be
+     re-attached by every render too — and the caret has to be put back, or
+     typing a second character moves it to the end of the box. */
+  const bindSearch = function(){
+    const el = $("#ph_q"); if(!el) return;
+    const at = el.selectionStart;
+    try{ el.focus(); if(at != null) el.setSelectionRange(at, at); }catch(e){}
+    el.addEventListener("input", function(){
+      ui.photos.q = el.value;
+      render();
+    });
+  };
+
+  if(!rows.length){
+    return { html: html + '<div class="card" style="margin-top:14px"><div class="bd">'
+      + emptyState(q ? "No photos match that search." : "No photos have been taken yet.")
+      + '</div></div>', post: bindSearch };
+  }
+
+  html += '<div class="card" style="margin-top:14px"><div class="bd tight"><div class="tblwrap">'
+    + '<table class="tbl"><thead><tr><th>Photo</th>'
+    + th("office","Location") + th("name","Merchandiser") + th("phone","Phone") + th("date","Taken")
+    + '</tr></thead><tbody>'
+    + rows.map(function(p){
+        return '<tr class="clickable" data-act="open" data-id="'+esc(p.taskId)+'">'
+          + '<td style="width:96px"><img alt="mockup" src="'+resolveImg(p.src)+'"'
+          +   (p.fb ? ' data-fb="'+esc(p.fb)+'"' : '')
+          +   ' style="width:84px;height:60px;object-fit:cover;border-radius:6px;display:block"></td>'
+          + '<td><div class="stack"><b>'+esc(p.office || "—")+'</b>'
+          +   '<span class="sub">'+esc(photoLocNote(p))+'</span></div></td>'
+          + '<td>'+esc(p.by)+'</td>'
+          + '<td class="mono num">'+esc(phonePretty(p.phone))+'</td>'
+          + '<td class="num" style="white-space:nowrap">'+esc(fmtDT(p.ts))+'</td>'
+          + '</tr>';
+      }).join("")
+    + '</tbody></table></div></div></div>';
+  return { html: html, post: bindSearch };
+}
+/* The one line under the office name: where the coordinate came from, or that
+   there is not one. Never dresses a hand-typed location up as a fix. */
+function photoLocNote(p){
+  if(p.locSource === "stated") return "typed by hand — no GPS";
+  if(p.lat == null || p.lng == null) return "no position recorded";
+  return gps(p.lat, p.lng) + (p.locSource === "simulated" ? " · simulated" : "");
+}
+
+/* ---- creating the account ----
+   DELIBERATELY NOT THROUGH THE OUTBOX. Everything else this app writes is
+   queued and drained later, because a merchandiser in a basement must not lose
+   a capture. An account is the opposite case: it needs the service role, which
+   only the Edge Function holds, so there is nothing a queued copy could do
+   except sit on the device holding a plaintext password until the network came
+   back. If it cannot be created now, it is not created, and the manager is
+   told. See supabase/functions/create-merchandiser/index.ts. */
+function doCreateMerchandiser(){
+  const A = ui.accounts;
+  if(A.busy) return;
+  const g = function(id){ const el = $("#"+id); return el ? String(el.value) : ""; };
+  A.form = { name:g("m_name").trim(), phone:g("m_phone").trim(), pw:g("m_pw") };
+  A.error = ""; A.ok = "";
+
+  /* Checked here as well as in the function, so the common mistakes cost a
+     keystroke rather than a round trip. The function still validates: this is
+     a convenience, not the authorisation. */
+  const digits = phoneDigits(A.form.phone);
+  if(A.form.name.length < 2)  A.error = "Enter the merchandiser's name.";
+  else if(!digits)            A.error = "Enter a " + PHONE_NSN_LEN + "-digit phone number.";
+  else if(A.form.pw.length < 8) A.error = "The password must be at least 8 characters.";
+  else if(USERS.filter(function(u){ return u.phone === digits; }).length)
+    A.error = "That number already belongs to " +
+              USERS.filter(function(u){ return u.phone === digits; })[0].name + ".";
+  if(A.error){ render(); return; }
+  if(!netUp()){
+    A.error = "Creating an account needs a connection. Nothing else on this screen does.";
+    render(); return;
+  }
+
+  A.busy = true; render();
+  sbRequest("/functions/v1/create-merchandiser", {
+    method: "POST", timeout: 20000,
+    body: { name:A.form.name, phone:digits, password:A.form.pw }
+  }).then(function(r){
+    const p = r.body && r.body.profile;
+    A.busy = false;
+    if(!p){ A.error = "The server did not say what it created. Reload before trying again."; render(); return; }
+    /* Seed the local list immediately rather than waiting for the next prime:
+       the manager is about to read the number back to somebody. */
+    if(!USERS.filter(function(u){ return u.id === p.id; }).length) USERS.push(mapProfile(p));
+    A.ok = A.form.name + " can now sign in with " + phonePretty(digits)
+         + " and the password you set. Pass both on before you leave this screen.";
+    A.form = { name:"", phone:"", pw:"" };
+    save(); render();
+  }, function(err){
+    A.busy = false;
+    /* The function answers 401/403/409 with a sentence meant for a manager;
+       anything else falls back to the app's own error wording. */
+    A.error = (err && err.message) ? err.message : errText(err);
+    render();
+  });
+}
+
 function viewAudit(){
   const feed = [];
   state.tasks.forEach(function(t){ t.audit.forEach(function(a){ feed.push({t:t,a:a}); }); });
@@ -13956,6 +14499,96 @@ function runSelfTest(){
     }
   })();
 
+  /* --- PHONE NUMBERS AS IDENTITY -------------------------------------------
+     The normalisation is the primary key of a merchandiser's login, so every
+     way a person can write their own number has to land on the same digits.
+     Getting this wrong does not throw — it silently mints a second account the
+     first one's owner cannot sign into. The same cases are reimplemented in
+     supabase/functions/create-merchandiser/index.ts and MUST agree. */
+  (function phoneTests(){
+    const CANON = PHONE_CC_DEFAULT + "9876543210";
+    T("phone: a bare 10-digit number gains the country code",
+      phoneDigits("9876543210"), CANON, 0);
+    T("phone: spaces are not part of a number", phoneDigits("98765 43210"), CANON, 0);
+    T("phone: nor are dashes and brackets", phoneDigits("(98765)-43210"), CANON, 0);
+    T("phone: a leading + and country code round-trip",
+      phoneDigits("+91 98765 43210"), CANON, 0);
+    T("phone: the trunk 0 is dropped, not kept", phoneDigits("098765 43210"), CANON, 0,
+      "0 98765 43210 is the same subscriber, and keeping it would mint a second account");
+    T("phone: every way of writing one number normalises to ONE account",
+      ["9876543210", "98765 43210", "+919876543210", "091-98765-43210", "+91 (98765) 43210"]
+        .map(phoneDigits).filter(function(d){ return d === CANON; }).length, 5, 0);
+    T("phone: too short is refused rather than padded", phoneDigits("98765"), null);
+    T("phone: too long is refused", phoneDigits("9876543210987654"), null);
+    T("phone: letters are not a phone number", phoneDigits("call me"), null);
+    T("phone: an empty string is not a zero", phoneDigits(""), null);
+    T("phone: null is handled", phoneDigits(null), null);
+
+    T("phone: the synthetic address is digits at the fixed domain",
+      phoneToEmail("98765 43210"), CANON + "@" + PHONE_EMAIL_DOMAIN, 0);
+    T("phone: …and maps back to the digits it came from",
+      emailToPhone(phoneToEmail("9876543210")), CANON, 0);
+    T("phone: a real email is not mistaken for a phone login",
+      isPhoneLogin("rohan.mehta@niva.example"), false);
+    T("phone: …and a synthetic one is", isPhoneLogin(phoneToEmail("9876543210")), true);
+    T("phone: the synthetic address is NEVER what the user is shown",
+      signInLabel(phoneToEmail("9876543210")).indexOf("@") < 0, true,
+      null, "shows " + signInLabel(phoneToEmail("9876543210")));
+    T("phone: a manager's email is shown verbatim",
+      signInLabel("rohan.mehta@niva.example"), "rohan.mehta@niva.example", 0);
+    T("phone: pretty form is grouped for reading aloud",
+      phonePretty("9876543210"), "+91 98765 43210", 0);
+    T("phone: pretty form of nothing is not a stray +", phonePretty(""), "—", 0);
+
+    /* THE ONE SIGN-IN BOX. An "@" is the whole of the decision. */
+    T("login: an email is taken as an email",
+      loginIdentity("rohan.mehta@niva.example").kind, "email", 0);
+    T("login: a phone number is resolved to its synthetic address",
+      loginIdentity("98765 43210").email, CANON + "@" + PHONE_EMAIL_DOMAIN, 0);
+    T("login: …and reports what it will show the user",
+      loginIdentity("98765 43210").shown, "+91 98765 43210", 0);
+    T("login: an empty box is refused with a reason", loginIdentity("  ").ok, false);
+    T("login: a mistyped number is refused BEFORE a round trip",
+      loginIdentity("98765").ok, false, null,
+      "otherwise it is an 'invalid credentials' the merchandiser cannot act on");
+    T("login: every refusal carries something to act on",
+      ["", "98765", "abc"].every(function(s){
+        const r = loginIdentity(s); return !r.ok && r.why && r.why.length > 15; }), true);
+  })();
+
+  /* --- WHERE THE PHOTO WAS TAKEN ---
+     The mockup build must never invent a coordinate: a fabricated position that
+     a manager later sorts by is worse than an honest absence. */
+  (function locationTests(){
+    T("photo location: a hand-typed office says so, and never shows a coordinate",
+      photoLocNote({ locSource:"stated", office:"Andheri East", lat:null, lng:null }),
+      "typed by hand — no GPS", 0);
+    T("photo location: a device fix is shown as one",
+      /^[0-9]/.test(photoLocNote({ locSource:"device", lat:19.076, lng:72.8777 })), true);
+    T("photo location: no position at all is stated plainly, not as 0, 0",
+      photoLocNote({ locSource:null, lat:null, lng:null }), "no position recorded", 0);
+    T("photo location: a legacy simulated row keeps saying it is simulated",
+      /simulated/.test(photoLocNote({ locSource:"simulated", lat:19.07, lng:72.87 })), true,
+      null, "seed rows stay honest rather than being re-labelled as device fixes");
+    /* The sort has to be TOTAL, or clicking a header shuffles equal rows. */
+    T("photo sort: a missing office sorts last, not first",
+      photoSortKey({ office:null }, "office") > photoSortKey({ office:"Zzz" }, "office"), true,
+      null, "an unlabelled photo is the one the manager most needs to find, at the end");
+    T("photo sort: office comparison is case-insensitive",
+      photoSortKey({ office:"Andheri" }, "office"), photoSortKey({ office:"ANDHERI" }, "office"), 0);
+    T("photo sort: dates compare as ISO strings, which sort chronologically",
+      photoSortKey({ ts:"2026-01-02T00:00:00Z" }, "date") > photoSortKey({ ts:"2026-01-01T23:59:59Z" }, "date"),
+      true);
+    /* imageRow must not name a column the project may not have. */
+    T("image row: omits 0007's columns entirely when there is nothing to put in them",
+      Object.keys(imageRow({ id:"i", path:"p", ts:"2026-01-01T00:00:00Z" }, "t"))
+        .filter(function(k){ return k === "office_name" || k === "location_source"; }).length, 0, 0,
+      "naming an absent column is a 400, and the outbox treats a 400 as permanent");
+    T("image row: …and names them when there is",
+      imageRow({ id:"i", path:"p", office:"Andheri East", locSource:"stated" }, "t").office_name,
+      "Andheri East", 0);
+  })();
+
   /* --- geofence helper still intact --- */
   T("haversine ~111.2 km per degree of latitude",
     haversine(0, 0, 1, 0)/1000, 111.19, 0.05);
@@ -14028,7 +14661,7 @@ function renderGate(){
   el.innerHTML = "";
 }
 function focusLogin(){
-  const f = $("#lg_email") && !$("#lg_email").value ? $("#lg_email") : $("#lg_pw");
+  const f = $("#lg_id") && !$("#lg_id").value ? $("#lg_id") : $("#lg_pw");
   if(f && document.activeElement !== f){ try{ f.focus(); }catch(e){} }
 }
 
@@ -14059,7 +14692,7 @@ function loginPanelHTML(expired){
     + '<div class="brandrow">' + NIVA_LOGO
     + '<div><h1>' + (expired ? "Session expired" : "NIVA Field Ops") + '</h1></div></div>'
     + (expired
-        ? '<p class="sub">Your sign-in expired' + (who && who.email ? ' for <b>' + esc(who.email) + '</b>' : '')
+        ? '<p class="sub">Your sign-in expired' + (who && who.email ? ' for <b>' + esc(signInLabel(who.email)) + '</b>' : '')
           + '. Nothing has been lost: '
           + (Outbox.pending()
               ? '<b>' + Outbox.pending() + ' queued change' + (Outbox.pending()===1?'':'s') + '</b> and every capture on this device are still here, '
@@ -14067,10 +14700,19 @@ function loginPanelHTML(expired){
           + 'and syncing resumes as soon as you sign back in.</p>'
         : '<p class="sub">Sign in with your NIVA account. Your role and what you can see are decided by the server, not by this app.</p>')
     + (L.error ? '<div class="err">' + esc(L.error) + '</div>' : '')
+    /* ONE FIELD, not a mode switch. A merchandiser types the phone number they
+       already know; a manager types the work email they already have; the form
+       decides by looking for an "@" and neither has to be told which kind of
+       account they are. `type=tel` because the field is a phone number for
+       almost everyone who will ever see this screen, and an email is still
+       typeable on every keyboard it opens. */
     + '<form id="loginform" autocomplete="on">'
-    + '<div class="fieldrow"><label for="lg_email">Email</label>'
-    + '<input id="lg_email" name="email" type="email" autocomplete="username" spellcheck="false" '
-    + 'inputmode="email" value="' + esc(L.email || (who && who.email) || "") + '"'
+    + '<div class="fieldrow"><label for="lg_id">Phone number</label>'
+    + '<input id="lg_id" name="username" type="tel" autocomplete="username" spellcheck="false" '
+    + 'inputmode="tel" placeholder="98765 43210" value="'
+    + esc(L.email || (who && who.email && !isPhoneLogin(who.email)
+                       ? who.email
+                       : (who && who.email ? phonePretty(emailToPhone(who.email)) : ""))) + '"'
     + (expired && who && who.email ? ' readonly' : '') + '></div>'
     + '<div class="fieldrow"><label for="lg_pw">Password</label>'
     + '<input id="lg_pw" name="password" type="password" autocomplete="current-password"></div>'
@@ -14089,16 +14731,21 @@ function loginPanelHTML(expired){
 function doSignIn(){
   const L = ui.login;
   if(L.busy) return;
-  const email = ($("#lg_email") || {}).value || "";
+  const typed = ($("#lg_id") || {}).value || "";
   const pw    = ($("#lg_pw") || {}).value || "";
-  L.email = email;
-  if(!email.trim() || !pw){ L.error = "Enter your email and password."; renderGate(); return; }
+  L.email = typed;
+  /* The phone is resolved to its synthetic address HERE and not inside
+     Session.signIn, so that the one place which knows about the mapping is the
+     one place that owns it — Session keeps speaking GoTrue's language. */
+  const id = loginIdentity(typed);
+  if(!id.ok){ L.error = id.why; renderGate(); return; }
+  if(!pw){ L.error = "Enter your password."; renderGate(); return; }
   L.busy = true; L.error = ""; renderGate();
 
   const resuming = Session.state === "expired";
   const prevUid  = Session.userId();
 
-  Session.signIn(email, pw).then(function(){
+  Session.signIn(id.email, pw).then(function(){
     L.busy = false; L.error = ""; L.email = "";
     if(resuming && prevUid && Session.userId() !== prevUid){
       /* Different account on a device that still holds someone else's queued
@@ -14109,15 +14756,18 @@ function doSignIn(){
     afterSignIn();
   }, function(err){
     L.busy = false;
-    L.error = signInMessage(err);
+    L.error = signInMessage(err, id.kind);
     renderGate();
   });
 }
 
-/* GoTrue's failure modes, told apart so the human knows what to do. */
-function signInMessage(err){
+/* GoTrue's failure modes, told apart so the human knows what to do.
+   `kind` is what the person actually typed, so a merchandiser is never told
+   their EMAIL was wrong when the box they filled in said Phone number. */
+function signInMessage(err, kind){
   const raw = String((err && err.message) || "").toLowerCase();
   const code = String((err && err.code) || "").toLowerCase();
+  const what = (kind === "phone") ? "phone number" : "email";
   if(err && err.kind === "offline")
     return "Could not reach the server. Check your connection and try again.";
   if(err && err.kind === "timeout")
@@ -14130,7 +14780,9 @@ function signInMessage(err){
     return "This email address has not been confirmed yet. Open the confirmation link, or turn off email confirmation in the Supabase dashboard for a demo project.";
   if(code.indexOf("invalid_credentials") >= 0 || code === "invalid_grant" ||
      raw.indexOf("invalid login") >= 0 || raw.indexOf("invalid_grant") >= 0)
-    return "That email and password do not match an account in this project.";
+    return (kind === "phone")
+      ? "That phone number and password do not match an account. Ask your manager to check the number they registered."
+      : "That " + what + " and password do not match an account in this project.";
   if(err && err.status === 429)
     return "Too many attempts. Wait a minute and try again.";
   if(err && err.kind === "config")
@@ -14272,17 +14924,22 @@ function navFor(role){
   if(role === "Merchandiser"){
     return [ {v:"mytasks", label:"My Tasks", i:"list"} ];
   }
+  /* TWO ITEMS, and the count is the only number a manager needs at a glance. */
+  if(role === "Manager"){
+    return [
+      {v:"photos",   label:"Photos", i:"camp", count: allPhotos().length},
+      {v:"accounts", label:"Merchandisers", i:"users"}
+    ];
+  }
   const pending = state.tasks.filter(t=>t.status===S.SUBMITTED).length;
   const base = [
     {v:"dashboard", label:"Dashboard", i:"dash"},
     {v:"campaigns", label:"Campaigns", i:"camp"},
     {v:"tasks",     label:byMode("All Stores","All Tasks"), i:"list"}
   ];
-  if(role === "Manager"){
-    base.splice(2,0,{v:"approvals", label:byMode("Shortlist","Approvals"), i:"check", count:pending});
-    base.push({v:"create", label:byMode("Add store","Create Task"), i:"plus"});
-  }
   if(role === "Admin"){
+    base.push({v:"photos",   label:"Photos", i:"camp"});
+    base.push({v:"accounts", label:"Merchandisers", i:"users"});
     base.push({v:"users", label:"Users & Roles", i:"users"});
     base.push({v:"audit", label:"Audit Trail", i:"clock"});
   }
@@ -14529,15 +15186,26 @@ function toggleMenu(){
 
 /* ---------- modal ---------- */
 let modalActions = [];
+/* Called however the modal goes away, INCLUDING a scrim click, which runs no
+   action at all. Anything awaiting an answer from a modal needs to hear about
+   that dismissal too, or it waits forever — see askOffice, which is holding a
+   photograph that has already been taken. */
+let modalOnClose = null;
 function openModal(cfg){
   modalActions = cfg.actions || [];
+  modalOnClose = cfg.onClose || null;
   $("#modals").innerHTML = '<div class="scrim" data-act="scrim"><div class="modal">'
     + '<div class="mh">'+esc(cfg.title)+'</div>'
     + '<div class="mb">'+cfg.body+'</div>'
     + '<div class="mf">'+modalActions.map((a,i)=>'<button class="'+(a.cls||"btn")+'" data-act="modalact" data-i="'+i+'">'+esc(a.label)+'</button>').join("")+'</div>'
     + '</div></div>';
 }
-function closeModal(){ $("#modals").innerHTML = ""; modalActions = []; }
+function closeModal(){
+  const f = modalOnClose;
+  modalOnClose = null; modalActions = [];
+  $("#modals").innerHTML = "";
+  if(f){ try{ f(); }catch(e){} }
+}
 
 /* ==========================================================
    16. Render
@@ -14545,7 +15213,8 @@ function closeModal(){ $("#modals").innerHTML = ""; modalActions = []; }
 const VIEWS = {
   dashboard: viewDashboard, campaigns: viewCampaigns, campaign: viewCampaign,
   tasks: viewTasks, create: viewCreate, approvals: viewApprovals, review: viewReview,
-  mytasks: viewMyTasks, task: viewTask, users: viewUsers, audit: viewAudit
+  mytasks: viewMyTasks, task: viewTask, users: viewUsers, audit: viewAudit,
+  accounts: viewAccounts, photos: viewPhotos
 };
 /* Role gating, driven entirely by the session's profile row. This is a UI
    affordance only — the same rules are enforced by RLS and by the guard
@@ -14554,11 +15223,25 @@ const VIEWS = {
 function allowedView(name){
   const r = myRole();
   if(r === "Merchandiser") return ["mytasks","task"].indexOf(name) >= 0;
-  if(r === "Admin") return ["dashboard","campaigns","campaign","tasks","task","users","audit"].indexOf(name) >= 0;
-  if(r === "Manager") return ["dashboard","campaigns","campaign","tasks","task","create","approvals","review"].indexOf(name) >= 0;
+  /* ADMIN KEEPS EVERYTHING. The manager's screen was simplified; the programme's
+     records were not deleted, and somebody has to be able to reach them — to
+     answer a question about an old task, or to see why a placement was
+     rejected. That is the admin, and it is also the escape hatch if the client
+     wants any of it back. */
+  if(r === "Admin") return ["dashboard","campaigns","campaign","tasks","task","users","audit",
+                            "accounts","photos"].indexOf(name) >= 0;
+  /* A MANAGER DOES TWO THINGS. `task` stays reachable so that clicking a row in
+     the photo list opens the capture it came from; it is a detail view of what
+     they are already looking at, not a workflow. */
+  if(r === "Manager") return ["accounts","photos","task"].indexOf(name) >= 0;
   return false;   // no session, or a role this build does not know
 }
-function homeView(){ return myRole()==="Merchandiser" ? "mytasks" : "dashboard"; }
+function homeView(){
+  const r = myRole();
+  if(r === "Merchandiser") return "mytasks";
+  if(r === "Manager")      return "photos";
+  return "dashboard";
+}
 
 function render(){
   renderGate();
@@ -14703,6 +15386,17 @@ document.addEventListener("click", function(e){
     case "rmafter":    doRemoveAfter(id, Number(el.dataset.i)); break;
     case "submitexec": doSubmitExec(id); break;
     case "markread":   markNotifsRead(); break;
+    case "mkmerch":    doCreateMerchandiser(); break;
+    case "psort": {
+      /* Clicking the column you are already on reverses it; a new column starts
+         in the direction that column is actually useful in — newest first for a
+         date, A-Z for everything else. */
+      const k = el.dataset.k;
+      if(ui.photos.sort === k) ui.photos.dir = -ui.photos.dir;
+      else { ui.photos.sort = k; ui.photos.dir = (k === "date") ? -1 : 1; }
+      render();
+      break;
+    }
     case "opennotif": {
       const n = state.notifications.filter(x=>x.id===id)[0];
       if(n && !n.read){
