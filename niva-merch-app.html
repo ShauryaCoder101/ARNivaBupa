@@ -1158,6 +1158,27 @@ const FRAME_FILL_FULL   = 1.00;   // …and at the minimum workable distance
    usually done it because the aisle made them, and refusing a capture for a
    preference is precisely the mistake the fixed standoff made. */
 const FRAME_FILL_LOOSE  = 0.35;
+
+/* ---- THE ROOM IS THE CONSTRAINT, NOT THE LENS ----
+   These mockups are shot in small offices. The client's ceiling is 4 ft, and
+   past that there is simply no floor left to stand on — so no instruction this
+   app gives may ever ask for more.
+
+   It is a CEILING ON GUIDANCE, NOT A REFUSAL. A room that happens to allow 5 ft
+   is not a reason to reject a capture that is otherwise perfect; refusing a
+   satisfiable shot for a preference is the exact mistake the fixed 6 ft standoff
+   made. floorReadingGate keeps treating far as advice.
+
+   Where inside the band to stand is settled by the ERROR, not by frame fill. The
+   floor-line term goes as 1/sin 2θ and is best at θ = 45°, which for a phone
+   held at 1.45 m is 4.76 ft — beyond the ceiling. So within any band this mode
+   allows, the measurement is ALWAYS most accurate at the far end, and since the
+   three poster sizes all fit the frame comfortably at 4 ft, the recommendation
+   is simply the ceiling. Standing at the fit-optimal distance instead would put
+   an A4 at θ = 75°, where sin 2θ = 0.5 and the distance — and therefore the
+   size the artwork is drawn at — is twice as uncertain. */
+const MOCKUP_MAX_STANDOFF_FT = 4.0;
+
 /* The one place a recommendation must be quoted before any camera is open — the
    brief a merchandiser reads before walking into the store. Portrait, at the
    assumed lens, because that is the phone the app falls back to. The LIVE
@@ -1325,6 +1346,55 @@ const DET_LOCK_CONF       = 0.62;   // below this a confirmed lock is dropped
 const DET_REACQUIRE_FRAC  = 0.15;   // corner jump (× quad diagonal) that breaks a lock
 const DET_STABLE_PASSES   = 2;      // consecutive agreeing passes before offering
 const M_TO_FT         = 3.28084;
+
+/* ---- THE THREE POSTER SIZES ----
+   The programme prints exactly these, so the size is a PICKLIST and not two
+   free-text boxes. That is not a UI simplification: a typo in a width silently
+   rescales every mockup drawn from it, and "9 × 8" — a number nobody could
+   satisfy in an office — is precisely how the unsatisfiable-standoff bug got
+   into a task in the first place.
+
+   Declared in MILLIMETRES for the two paper sizes, because that is what ISO 216
+   defines and what the printer works to; feet are derived here once rather than
+   rounded by hand into a literal. The 2 × 4 ft board is declared in feet for the
+   same reason — that is how it is specified and ordered.
+
+   All three fit the frame comfortably at the 4 ft ceiling: at the nominal
+   portrait phone an A4 fills 13 % of the frame width, an A3 19 %, and the
+   2 × 4 ft board 43 % of the height. See the poster-fit self-tests. */
+const POSTER_SIZES = [
+  { key:"a4",  label:"A4",       detail:"210 × 297 mm",
+    widthFt: 210/1000*M_TO_FT, heightFt: 297/1000*M_TO_FT },
+  { key:"a3",  label:"A3",       detail:"297 × 420 mm",
+    widthFt: 297/1000*M_TO_FT, heightFt: 420/1000*M_TO_FT },
+  { key:"2x4", label:"2 × 4 ft", detail:"board",
+    widthFt: 2, heightFt: 4 }
+];
+const POSTER_SIZE_DEFAULT = "a4";
+function posterSize(key){
+  return POSTER_SIZES.filter(function(p){ return p.key === key; })[0] || null;
+}
+/* Which of the three a stored width/height pair IS, to a tenth of an inch. The
+   database keeps feet (numeric(6,2)), not a size key, so a task written before
+   this picklist existed — or by a manager overriding by hand — still has to
+   round-trip back to a label rather than falling off the list. */
+function posterSizeOf(t){
+  if(!t) return null;
+  const w = Number(t.widthFt), h = Number(t.heightFt);
+  if(!isFinite(w) || !isFinite(h)) return null;
+  return POSTER_SIZES.filter(function(p){
+    return Math.abs(p.widthFt - w) < 0.01 && Math.abs(p.heightFt - h) < 0.01;
+  })[0] || null;
+}
+/* How a poster is NAMED on screen. "A4" is what everyone in the programme
+   actually says; the feet are what the geometry uses, and a size that is not one
+   of the three still has to render as something rather than as nothing. */
+function posterLabel(t){
+  const p = posterSizeOf(t);
+  if(p) return p.label + ' <span style="color:var(--text-3)">' + p.detail + '</span>';
+  if(!t || t.widthFt == null || t.heightFt == null) return "—";
+  return Number(t.widthFt) + ' ft × ' + Number(t.heightFt) + ' ft';
+}
 
 /* Known-size references the merchandiser can scale from (millimetres).
    `tolMm` is the reference's own DIMENSIONAL uncertainty — how far its true
@@ -6031,8 +6101,8 @@ function viewReview(p){
         : '')
     +   '<dt>'+byMode("Asked to stand","Target standoff")+'</dt><dd class="num">'
     +   (MOCKUP
-          ? 'about '+fmtRoughFt(taskStandoff(t).recommendedFt, taskStandoff(t).recommendedFt*FOCAL_SIGMA_ASSUMED)+' ft'
-            + ' <span style="color:var(--text-3)">derived from the poster</span>'
+          ? 'up to '+fmtRoughFt(taskStandoff(t).recommendedFt, taskStandoff(t).recommendedFt*FOCAL_SIGMA_ASSUMED)+' ft'
+            + ' <span style="color:var(--text-3)">as far as the room allows</span>'
           : Number(t.standoffFt).toFixed(1)+' ft ± '+t.standoffTolFt+' ft')+'</dd>'
     +   '<dt>Angle tolerance</dt><dd class="num">± '+t.angleTolDeg+'°</dd>'
     + '</dl></div></div>';
@@ -6388,13 +6458,17 @@ function captureBriefCard(t){
     + '<div class="bd"><div class="postercard">'
     + (art ? '<div class="posterthumb"><img alt="poster artwork" src="'+art+'"></div>' : '')
     + '<div style="flex:1;min-width:180px"><dl class="kv">'
-    +   '<dt>Poster</dt><dd class="num">'+t.widthFt+' ft × '+t.heightFt+' ft</dd>'
+    +   '<dt>Poster</dt><dd class="num">'+posterLabel(t)+'</dd>'
     +   '<dt>Stand back</dt><dd class="num">'
     +   (so.derived
-          ? 'about '+fmtRoughFt(so.recommendedFt, so.recommendedFt*so.relSigma)+' ft'
-            + ' <span style="color:var(--text-3)">or more — under '
-            + fmtRoughFt(so.minimumFt, so.minimumFt*so.relSigma)
-            + ' ft the poster will not fit in the picture</span>'
+          ? (so.roomEnough
+              ? 'up to '+fmtRoughFt(so.recommendedFt, so.recommendedFt*so.relSigma)+' ft'
+                + ' <span style="color:var(--text-3)">— as far as the room allows; under '
+                + fmtRoughFt(so.minimumFt, so.minimumFt*so.relSigma)
+                + ' ft the poster will not fit in the picture</span>'
+              : fmtRoughFt(so.minimumFt, so.minimumFt*so.relSigma)+' ft'
+                + ' <span style="color:var(--st-rework)">— more than the '
+                + MOCKUP_MAX_STANDOFF_FT.toFixed(0)+' ft an office allows. This artwork will not fit.</span>')
           : Number(t.standoffFt).toFixed(1)+' ft <span style="color:var(--text-3)">± '+t.standoffTolFt+' ft</span>')+'</dd>'
     +   '<dt>Squareness</dt><dd class="num">± '+t.angleTolDeg+'° on tilt, roll and yaw</dd>'
     +   '<dt>Hold steady</dt><dd class="num">'+(ARM_MS/1000).toFixed(1)+' s before the shutter arms</dd>'
@@ -6785,10 +6859,20 @@ function fieldExtras(t){
              + esc(t.displayType)+'.<br><br>')
     + 'When you take the photo, stand about <b class="num">'+(isFinite(stand)?stand.toFixed(0):"8")+' feet</b> back '
     + '(roughly '+paces+' big steps) and hold the phone straight. '
+    /* MOCKUP: the sentence has to survive a SMALL OFFICE, where the honest
+       advice is "as far back as you can get" and the only real failure is
+       standing so close the artwork runs off the frame. Promising that further
+       back is fine would be advice nobody in the room can take. */
     + (so.derived && isFinite(so.minimumFt)
-        ? 'That is worked out from the size of this poster — further back is fine, but closer than about '
-          + '<b class="num">'+fmtRoughFt(so.minimumFt, so.minimumFt*so.relSigma)+' feet</b> and it will not '
-          + 'fit in the picture at all. '
+        ? (so.roomEnough
+            ? 'If the room will not let you get that far back, take what you can — '
+              + 'just not closer than about <b class="num">'
+              + fmtRoughFt(so.minimumFt, so.minimumFt*so.relSigma)+' feet</b>, '
+              + 'or the poster will not fit in the picture at all. '
+            : 'This poster needs at least <b class="num">'
+              + fmtRoughFt(so.minimumFt, so.minimumFt*so.relSigma)+' feet</b> of clear floor to fit in '
+              + 'the picture, which is more than most offices have. Tell your manager if you cannot '
+              + 'get that far back. ')
         : '')
     + 'The camera screen tells you when you are '
     + 'in the right spot — you do not need to measure anything yourself.'
@@ -8005,10 +8089,10 @@ function arcStartPanel(caps){
   arcPanel('<h2>'+(plain ? byMode("Mock the poster up","Take the photo") : "Guided poster capture")+'</h2>'
     + '<p>'+esc(t.storeName)+' · <span class="mono">'+esc(t.storeCode)+'</span><br>'
     + (plain
-        ? byMode('Poster <b class="num">'+t.widthFt+' × '+t.heightFt+' ft</b>. Find an empty wall big enough '
-                 + 'for it, then stand about <b class="num">'
+        ? byMode('Poster <b class="num">'+posterLabel(t)+'</b>. Find an empty wall big enough '
+                 + 'for it, then stand back as far as the room lets you — up to about <b class="num">'
                  + fmtRoughFt(taskStandoff(t).recommendedFt, taskStandoff(t).recommendedFt*FOCAL_SIGMA_ASSUMED)
-                 + ' ft</b> back '
+                 + ' ft</b> — '
                  + 'and hold the phone straight. The screen tells you when you are in the right spot.',
                  'Poster <b class="num">'+t.widthFt+' × '+t.heightFt+' ft</b>. Stand about '
                  + '<b class="num">'+Number(t.standoffFt).toFixed(1)+' ft</b> back and hold the phone straight. '
@@ -9997,12 +10081,36 @@ function nominalIntrinsics(){
    tolerance are the spec the evidence is measured against, and they win. */
 function taskStandoff(t){
   if(!MOCKUP || !t) return { recommendedFt: t ? Number(t.standoffFt) : STANDOFF_FT,
-                             minimumFt: null, derived: false, relSigma: 0 };
+                             minimumFt: null, maxFt: null, roomEnough: true,
+                             derived: false, relSigma: 0 };
   const I = nominalIntrinsics();
   const st = GEO.posterStandoff({ widthFt:t.widthFt, heightFt:t.heightFt,
     frameW:I.w, frameH:I.h, fx:I.fx, fy:I.fy, fill:FRAME_FILL_TARGET });
-  return { recommendedFt:st.recommendedFt, minimumFt:st.minimumFt,
+  /* STAND AS FAR BACK AS THE ROOM ALLOWS. Inside the band this mode permits,
+     the floor-line error falls monotonically with distance (θ approaches 45°
+     from above), and every size in POSTER_SIZES is comfortably inside the frame
+     at the ceiling — so the ceiling IS the recommendation and the frame-fill
+     target never binds. See MOCKUP_MAX_STANDOFF_FT.
+
+     A poster that cannot fit the frame from within the ceiling is not gated
+     into silence: `roomEnough` goes false, the true minimum is reported, and
+     the brief says the office is too small for that artwork. Quietly
+     recommending a distance nobody can stand at is the bug this whole mode was
+     rebuilt to stop telling. */
+  const roomEnough = st.minimumFt <= MOCKUP_MAX_STANDOFF_FT;
+  return { recommendedFt: roomEnough ? MOCKUP_MAX_STANDOFF_FT : st.minimumFt,
+           minimumFt: st.minimumFt, maxFt: MOCKUP_MAX_STANDOFF_FT,
+           roomEnough: roomEnough, fitOptimalFt: st.recommendedFt,
            limit:st.limit, derived:true, relSigma:I.relSigma };
+}
+/* The closest the FLOOR-LINE METHOD can measure at all: below h/tan(75°) the
+   phone is aiming past the band floorGuard allows and no reading is offered.
+   For a phone held at the 1.45 m default that is 1.28 ft. It is a property of
+   the method and the person, not of the poster, which is why it lives here and
+   not in the fit maths. */
+function floorMeasurableMinFt(hM){
+  const h = (hM > 0) ? hM : FLOOR_DEFAULT_H_M;
+  return GEO.mToFt(h / Math.tan(GEO.rad(FLOOR_MAX_DEPRESSION)));
 }
 /* The live assessment, against the frame that is actually on screen. Null-safe:
    with no task it returns null, with no reading it still returns the two
@@ -13660,8 +13768,108 @@ function runSelfTest(){
       const so = taskStandoff(t9);
       T("taskStandoff derives the standoff in mockup mode and only there",
         so.derived, MOCKUP, null, "APP_MODE = " + APP_MODE);
-      T("taskStandoff: mockup derives 9.90 ft, verification keeps the task's 6.0 ft",
-        so.recommendedFt, MOCKUP ? 9.8991 : STANDOFF_FT, 1e-3);
+      T("taskStandoff: a 9×8 poster needs 6.93 ft, which no office has",
+        so.recommendedFt, MOCKUP ? 6.9294 : STANDOFF_FT, 1e-3,
+        MOCKUP ? "falls back to the true minimum and flags roomEnough" : "verification keeps the task's 6.0 ft");
+      T("taskStandoff: …and says so rather than gating in silence",
+        so.roomEnough, !MOCKUP);
+    })();
+
+    /* ---- THE THREE POSTER SIZES, IN A 4 FT OFFICE ----
+       The client prints A4, A3 and a 2 × 4 ft board, and the rooms are small
+       enough that 4 ft is the most floor anyone has. Every assertion here is
+       about that pairing: each size must FIT the frame from inside the ceiling,
+       the guidance must never point past it, and the floor-line method must
+       actually be able to measure at the distance it recommends. */
+    (function posterSizeTests(){
+      T("three poster sizes, and only three", POSTER_SIZES.length, 3, 0);
+      T("poster sizes carry unique keys",
+        POSTER_SIZES.map(function(p){ return p.key; }).sort().join(","), "2x4,a3,a4", 0);
+      /* ISO 216 in feet, derived rather than typed. */
+      T("A4 is 0.689 × 0.974 ft", posterSize("a4").widthFt, 0.6890, 1e-3, "210 mm");
+      T("A3 is 0.974 × 1.378 ft", posterSize("a3").heightFt, 1.3780, 1e-3, "420 mm");
+      T("A3's short side is A4's long side — the ISO halving rule",
+        posterSize("a3").widthFt, posterSize("a4").heightFt, 1e-12);
+      T("the board is exactly 2 × 4 ft", posterSize("2x4").widthFt + "x" + posterSize("2x4").heightFt,
+        "2x4", 0);
+
+      const NW2 = NOMINAL_FRAME_W, NH2 = NOMINAL_FRAME_H;
+      const fitAt = function(p, dFt){
+        return GEO.viewFit({ distanceFt:dFt, widthFt:p.widthFt, heightFt:p.heightFt,
+                             frameW:NW2, frameH:NH2, fx:fN, fy:fN });
+      };
+      const minFor = function(p){
+        return GEO.posterStandoff({ widthFt:p.widthFt, heightFt:p.heightFt,
+                 frameW:NW2, frameH:NH2, fx:fN, fy:fN, fill:FRAME_FILL_TARGET }).minimumFt;
+      };
+      T("EVERY size fits the frame at the 4 ft ceiling",
+        POSTER_SIZES.every(function(p){ return fitAt(p, MOCKUP_MAX_STANDOFF_FT).fits; }), true, null,
+        "the 9×8 disaster cannot recur for the sizes actually printed");
+      T("…with room to spare, not marginally",
+        POSTER_SIZES.every(function(p){
+          const v = fitAt(p, MOCKUP_MAX_STANDOFF_FT); return Math.max(v.fillW, v.fillH) < 0.55; }), true, null,
+        "A4 " + (fitAt(posterSize("a4"), 4).fillW*100).toFixed(0) + " % · A3 "
+          + (fitAt(posterSize("a3"), 4).fillW*100).toFixed(0) + " % · board "
+          + (fitAt(posterSize("2x4"), 4).fillH*100).toFixed(0) + " % of the frame");
+      T("every size's fit minimum is inside the ceiling",
+        POSTER_SIZES.every(function(p){ return minFor(p) < MOCKUP_MAX_STANDOFF_FT; }), true, null,
+        "A4 " + minFor(posterSize("a4")).toFixed(2) + " · A3 " + minFor(posterSize("a3")).toFixed(2)
+          + " · board " + minFor(posterSize("2x4")).toFixed(2) + " ft");
+      T("the 2×4 ft board is the tightest of the three, and is HEIGHT-limited",
+        fitAt(posterSize("2x4"), 4).limit, "height", 0);
+
+      /* THE MEASUREMENT, not just the framing. A recommendation the phone
+         cannot read a distance at is worthless. */
+      const near = floorMeasurableMinFt(FLOOR_DEFAULT_H_M);
+      T("floor-line cannot measure closer than 1.28 ft at the default hold height",
+        near, 1.2749, 1e-3, "h / tan " + FLOOR_MAX_DEPRESSION + "°");
+      T("…and the 4 ft ceiling is comfortably outside that",
+        MOCKUP_MAX_STANDOFF_FT > near*2, true);
+      T("the tilt at the ceiling is 50°, near the 45° sweet spot",
+        GEO.deg(Math.atan(FLOOR_DEFAULT_H_M/GEO.ftToM(MOCKUP_MAX_STANDOFF_FT))), 49.9420, 1e-3);
+      T("…so the ceiling is the most accurate spot in the whole band",
+        GEO.floorLineError({ h:FLOOR_DEFAULT_H_M, heightRelSigma:0.023,
+          thetaDeg:GEO.deg(Math.atan(FLOOR_DEFAULT_H_M/GEO.ftToM(MOCKUP_MAX_STANDOFF_FT))), thetaSigmaDeg:0.6 }).pct
+        < GEO.floorLineError({ h:FLOOR_DEFAULT_H_M, heightRelSigma:0.023,
+          thetaDeg:GEO.deg(Math.atan(FLOOR_DEFAULT_H_M/GEO.ftToM(2))), thetaSigmaDeg:0.6 }).pct,
+        true, null, "which is why the recommendation is the ceiling and not the fit optimum");
+      /* The AIM term exactly doubles — 1/sin 2θ is 1 at 45° and 2 at 75°. The
+         TOTAL grows by less, because the height term is scale-free and passes
+         straight through unchanged; asserting 2× on the total would be claiming
+         a worse instrument than this one is. */
+      T("standing at A4's fit optimum exactly DOUBLES the aim term",
+        GEO.floorLineError({ h:FLOOR_DEFAULT_H_M, heightRelSigma:0.023, thetaDeg:75, thetaSigmaDeg:0.6 }).terms.pitch
+        / GEO.floorLineError({ h:FLOOR_DEFAULT_H_M, heightRelSigma:0.023, thetaDeg:45, thetaSigmaDeg:0.6 }).terms.pitch,
+        2, 1e-9, "1/sin 2θ at 75° is exactly 2");
+      T("…and drags the whole error bar up by half again",
+        GEO.floorLineError({ h:FLOOR_DEFAULT_H_M, heightRelSigma:0.023, thetaDeg:75, thetaSigmaDeg:0.6 }).pct
+        / GEO.floorLineError({ h:FLOOR_DEFAULT_H_M, heightRelSigma:0.023, thetaDeg:45, thetaSigmaDeg:0.6 }).pct
+        > 1.5, true, null, "the height term is scale-free, so the total grows by less than the aim term");
+
+      /* And the guidance itself, per size. */
+      /* The ceiling is a MOCKUP concept. Verification quotes the manager's own
+         standoff and is not bounded by the size of an office, so each assertion
+         states the mode's contract rather than one mode's number — and the same
+         count of assertions runs either way, which is what lets the driver pin
+         a total at all. */
+      POSTER_SIZES.forEach(function(p){
+        const so = taskStandoff({ widthFt:p.widthFt, heightFt:p.heightFt, standoffFt:STANDOFF_FT });
+        T("guidance for " + p.label + ": the ceiling in mockup, the manager's spec in verification",
+          so.recommendedFt, MOCKUP ? MOCKUP_MAX_STANDOFF_FT : STANDOFF_FT, 1e-9,
+          "recommends " + so.recommendedFt.toFixed(2) + " ft");
+        T("guidance for " + p.label + " is a distance the floor-line method can measure",
+          so.recommendedFt > near, true);
+        T("the room is big enough for " + p.label, so.roomEnough, true);
+      });
+      T("posterSizeOf recognises a stored width/height pair",
+        (posterSizeOf({ widthFt:2, heightFt:4 }) || {}).key, "2x4", 0);
+      T("posterSizeOf tolerates the numeric(6,2) round trip",
+        (posterSizeOf({ widthFt:0.69, heightFt:0.97 }) || {}).key, "a4", 0,
+        "the database stores feet to two places, not the size key");
+      T("posterSizeOf refuses to guess at an off-list size",
+        posterSizeOf({ widthFt:9, heightFt:8 }), null);
+      T("posterLabel falls back to feet rather than to nothing",
+        posterLabel({ widthFt:9, heightFt:8 }), "9 ft × 8 ft", 0);
     })();
   })();
 
