@@ -582,6 +582,32 @@ table.tbl tr:last-child td{border-bottom:0}
 .whopick .ph{margin-left:auto;flex:none;white-space:nowrap;
   font-family:var(--mono);font-size:11px;color:var(--text-3)}
 .whopick.on .ph{color:var(--accent-ink)}
+/* ---- CROPPING ARTWORK TO THE POSTER'S SHAPE ----
+   A4 is 1:1.414 and a phone photo is 1:1 or 3:4, so the two almost never agree.
+   The overlay draws the artwork into the poster's quad, which means a mismatch
+   is not a letterbox — it is a STRETCH, and the mockup then shows a poster that
+   is not the shape the printer will produce. Cropping is how the manager says
+   which part of the image is the poster, rather than the app assuming it is the
+   middle. */
+.cropwrap{position:relative;margin:0 auto;background:var(--surface-3);
+  border:1px solid var(--border);border-radius:var(--r);overflow:hidden;
+  touch-action:none;user-select:none;line-height:0;max-width:100%}
+.cropwrap img{display:block;width:100%;height:auto;pointer-events:none}
+/* Everything outside the frame is dimmed by one big shadow, so the frame reads
+   as a hole rather than as a box drawn on top. */
+.cropbox{position:absolute;border:2px solid var(--accent);cursor:grab;
+  box-shadow:0 0 0 9999px rgba(8,16,26,.62);border-radius:2px}
+.cropbox:active{cursor:grabbing}
+.cropbox::after{content:"";position:absolute;inset:0;pointer-events:none;
+  background:
+    linear-gradient(to right,transparent 33.33%,rgba(255,255,255,.28) 33.33%,rgba(255,255,255,.28) 33.5%,transparent 33.5%,
+                    transparent 66.66%,rgba(255,255,255,.28) 66.66%,rgba(255,255,255,.28) 66.83%,transparent 66.83%),
+    linear-gradient(to bottom,transparent 33.33%,rgba(255,255,255,.28) 33.33%,rgba(255,255,255,.28) 33.5%,transparent 33.5%,
+                    transparent 66.66%,rgba(255,255,255,.28) 66.66%,rgba(255,255,255,.28) 66.83%,transparent 66.83%)}
+.crophint{font-size:12px;color:var(--text-2);margin:0 0 10px;line-height:1.5}
+.cropctl{display:flex;align-items:center;gap:11px;margin-top:13px}
+.cropctl label{font-size:12px;color:var(--text-2);flex:none}
+.cropctl input[type=range]{flex:1;width:auto;padding:0;border:0;background:none;accent-color:var(--accent)}
 /* The count that tells a manager what the primary button is about to do. */
 .pickbar{display:flex;align-items:baseline;gap:8px;margin-top:14px;flex-wrap:wrap}
 .pickbar .n{font-size:12.5px;color:var(--text-2)}
@@ -13080,8 +13106,11 @@ function viewPosters(){
     + (P.art
         ? '<div class="artprev"><img alt="poster artwork" src="'+P.art.src+'">'
           + '<div class="meta"><div class="fn">'+esc(P.art.name)+'</div>'
-          + '<div class="sub">Drawn on the wall at '+esc((posterSize(P.form.size)||{}).label||"")
-          + ' — ' + esc((posterSize(P.form.size)||{}).detail||"") + '</div></div></div>'
+          + '<div class="sub">Cropped to '+esc((posterSize(P.form.size)||{}).label||"")
+          + (P.art.w ? ' · '+P.art.w+' × '+P.art.h+' px' : '')
+          + '</div>'
+          + '<button class="lnk" data-act="precrop" style="margin-top:4px">Crop again</button>'
+          + '</div></div>'
         : '<div class="hint">A JPEG or PNG of the printed artwork. It is drawn over the live '
           + 'camera at the size you pick above.</div>')
     + '</div>'
@@ -13155,14 +13184,162 @@ function bindPosterForm(){
     const file = f.files && f.files[0]; if(!file) return;
     const rd = new FileReader();
     rd.onload = function(){
-      ui.posters.art = { src: rd.result, name: file.name || "artwork.jpg",
-                         ts: new Date().toISOString() };
-      snapshotPosterForm(); render();
+      snapshotPosterForm();
+      const name = file.name || "artwork.jpg";
+      /* STRAIGHT TO THE CROPPER, always — not only when the shapes disagree.
+         An image that happens to match A4 still has a decision in it (which
+         part is the poster), and a step that appears for some uploads and not
+         others is a step nobody learns. */
+      openPosterCropper(rd.result, name, posterAspect(ui.posters.form.size));
     };
     rd.onerror = function(){ toast("Could not read that file.", true); };
     rd.readAsDataURL(file);
   });
+  /* Changing the size after cropping invalidates the crop — A4 and a 2 x 4 ft
+     board are not the same shape — so it re-opens on the ORIGINAL rather than
+     leaving artwork that will be stretched at capture time. */
+  const sel = $("#p_size");
+  if(sel) sel.addEventListener("change", function(){
+    snapshotPosterForm();
+    const art = ui.posters.art;
+    if(art && art.orig){
+      openPosterCropper(art.orig, art.origName || art.name, posterAspect(ui.posters.form.size));
+    }else{
+      render();
+    }
+  });
 }
+/* Width ÷ height for the chosen size — the shape the crop has to come out. */
+function posterAspect(key){
+  const p = posterSize(key);
+  return (p && p.heightFt > 0) ? (p.widthFt / p.heightFt) : 1;
+}
+/* The longest edge the stored artwork is allowed to have. The overlay draws it
+   at a few hundred pixels on a phone screen, and the composite rasterises into
+   the capture frame, so beyond this is bytes the field pays to upload and
+   nobody ever sees. */
+const ARTWORK_MAX_PX = 1600;
+
+/* ---- pick the part of the image that IS the poster ----
+   Returns nothing; on confirm it writes ui.posters.art and re-renders. The
+   crop box is a fixed SHAPE (the poster's) whose size the manager scales and
+   whose position they drag; that is the whole interaction, because a free
+   rectangle would let them choose an aspect the poster cannot be printed at. */
+function openPosterCropper(dataUrl, name, aspect){
+  const img = new Image();
+  img.onerror = function(){ toast("That image could not be read.", true); };
+  img.onload = function(){
+    const sz = posterSize(ui.posters.form.size);
+    openModal({
+      title: "Which part is the poster?",
+      body: '<p class="crophint">Drag the frame to choose the part of the picture that is the '
+          + '<b>' + esc(sz ? sz.label : "poster") + '</b>. It is locked to that shape, so the '
+          + 'artwork cannot come out stretched on the wall.</p>'
+          + '<div class="cropwrap" id="cr_wrap"><img id="cr_img" alt="artwork" src="' + dataUrl + '">'
+          + '<div class="cropbox" id="cr_box"></div></div>'
+          + '<div class="cropctl"><label for="cr_zoom">Size</label>'
+          + '<input type="range" id="cr_zoom" min="20" max="100" value="100"></div>',
+      actions: [
+        { label:"Use this part", cls:"btn primary", act:function(){ cropCommit(); } },
+        { label:"Cancel", cls:"btn", act:function(){ closeModal(); } }
+      ]
+    });
+
+    /* Geometry is kept in DISPLAYED pixels and converted to natural pixels only
+       at the moment of the crop, so the box cannot drift as the modal resizes. */
+    const wrap = $("#cr_wrap"), box = $("#cr_box"), zoom = $("#cr_zoom");
+    if(!wrap || !box) return;
+    let W = 0, H = 0, bw = 0, bh = 0, bx = 0, by = 0;
+
+    const clamp = function(){
+      bw = Math.min(bw, W); bh = bw / aspect;
+      if(bh > H){ bh = H; bw = bh * aspect; }
+      bx = Math.max(0, Math.min(bx, W - bw));
+      by = Math.max(0, Math.min(by, H - bh));
+      box.style.width = bw + "px"; box.style.height = bh + "px";
+      box.style.left  = bx + "px"; box.style.top    = by + "px";
+    };
+    const measure = function(){
+      const r = wrap.getBoundingClientRect();
+      W = r.width; H = r.height;
+    };
+    const sizeTo = function(pct){
+      /* The largest box of this shape that fits, scaled by the slider. */
+      let fw = W, fh = W / aspect;
+      if(fh > H){ fh = H; fw = H * aspect; }
+      const prevCx = bx + bw/2, prevCy = by + bh/2;
+      bw = fw * pct; bh = bw / aspect;
+      bx = (bw ? prevCx : W/2) - bw/2;
+      by = (bh ? prevCy : H/2) - bh/2;
+      clamp();
+    };
+
+    /* The image is already decoded, but the <img> in the modal still has to lay
+       out before it has a width to measure. */
+    const start = function(){
+      measure();
+      if(!W){ setTimeout(start, 30); return; }
+      bw = 0; bh = 0; bx = W/2; by = H/2;
+      sizeTo(1);
+      bx = (W - bw)/2; by = (H - bh)/2; clamp();
+    };
+    start();
+
+    zoom.addEventListener("input", function(){ measure(); sizeTo(Number(zoom.value)/100); });
+
+    /* Pointer events, so one path covers mouse, pen and touch. */
+    let dragging = false, grabX = 0, grabY = 0;
+    box.addEventListener("pointerdown", function(e){
+      dragging = true; grabX = e.clientX - bx; grabY = e.clientY - by;
+      try{ box.setPointerCapture(e.pointerId); }catch(err){}
+      e.preventDefault();
+    });
+    box.addEventListener("pointermove", function(e){
+      if(!dragging) return;
+      bx = e.clientX - grabX; by = e.clientY - grabY;
+      clamp();
+    });
+    const stop = function(){ dragging = false; };
+    box.addEventListener("pointerup", stop);
+    box.addEventListener("pointercancel", stop);
+
+    /* ---- commit: displayed box -> natural pixels -> a canvas of the right shape ---- */
+    window.__cropCommit = function(){
+      measure();
+      const k = img.naturalWidth / (W || 1);          // displayed px -> source px
+      const sx = Math.max(0, Math.round(bx * k));
+      const sy = Math.max(0, Math.round(by * k));
+      const sw = Math.max(1, Math.min(Math.round(bw * k), img.naturalWidth  - sx));
+      const sh = Math.max(1, Math.min(Math.round(bh * k), img.naturalHeight - sy));
+      /* The output is the poster's shape exactly, capped on the long edge. */
+      let ow = sw, oh = Math.round(sw / aspect);
+      if(Math.max(ow, oh) > ARTWORK_MAX_PX){
+        const s = ARTWORK_MAX_PX / Math.max(ow, oh);
+        ow = Math.round(ow * s); oh = Math.round(oh * s);
+      }
+      const c = document.createElement("canvas");
+      c.width = Math.max(1, ow); c.height = Math.max(1, oh);
+      const x = c.getContext("2d");
+      x.imageSmoothingQuality = "high";
+      x.drawImage(img, sx, sy, sw, sh, 0, 0, c.width, c.height);
+      /* JPEG, because that is what the upload declares and what the bucket
+         stores — a .webp or .png arriving here becomes a .jpg on the way out
+         rather than a file whose extension lies about its bytes. */
+      ui.posters.art = { src: c.toDataURL("image/jpeg", 0.92),
+                         name: String(name).replace(/\.[^.]+$/, "") + ".jpg",
+                         w: c.width, h: c.height, ts: new Date().toISOString(),
+                         /* THE UNCROPPED ORIGINAL RIDES ALONG. Changing the size
+                            after cropping changes the shape the crop had to be,
+                            and re-deriving it from the cropped copy would crop a
+                            crop — losing more of the picture on every change. */
+                         orig: dataUrl, origName: name };
+      closeModal();
+      render();
+    };
+  };
+  img.src = dataUrl;
+}
+function cropCommit(){ if(window.__cropCommit) window.__cropCommit(); }
 /* Keep what is typed across the re-render a file pick or a tick causes. */
 function snapshotPosterForm(){
   const g = function(id){ const el = $("#"+id); return el ? el.value : null; };
@@ -13305,7 +13482,11 @@ function doPublishPoster(toEveryone){
   else if(!P.art)                   P.error = "Attach the artwork.";
   else if(!toEveryone && !P.form.who.length)
     P.error = "Tick who gets this poster, or use “Publish to everyone”.";
-  if(P.error){ render(); return; }
+  /* TOASTED AS WELL AS BANNERED. A refusal that only paints somewhere the eye
+     is not already looking reads as a dead button, and a dead button is what
+     this screen looked like for as long as these messages went into `.err` —
+     which is display:none until its field goes .bad. */
+  if(P.error){ toast(P.error, true); render(); return; }
   if(!netUp()){
     P.error = "Publishing needs a connection — the artwork has to reach the server.";
     render(); return;
@@ -15699,6 +15880,16 @@ document.addEventListener("click", function(e){
     case "ppublish":    doPublishPoster(false); break;
     case "ppublishall": doPublishPoster(true);  break;
     case "parchive":    doArchivePoster(id, el.textContent.trim() === "Restore"); break;
+    case "precrop": {
+      const art = ui.posters.art;
+      if(art && art.orig){
+        snapshotPosterForm();
+        openPosterCropper(art.orig, art.origName || art.name, posterAspect(ui.posters.form.size));
+      }else{
+        toast("Choose the artwork file again to re-crop it.", true);
+      }
+      break;
+    }
     case "pall": {
       /* Select-all is NOT "publish to everyone": it ticks the people who exist
          right now, and stops there. The button beside it is the standing rule
