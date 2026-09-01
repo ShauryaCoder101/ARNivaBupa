@@ -27,14 +27,22 @@
    happens. This is why `verify_jwt` being on is not sufficient on its own: a
    valid token proves who you are, not what you may do.
 
-   TWO WRITES, ONE OUTCOME
-   -----------------------
-   An auth user and a profile row are created together, and a profile row is the
-   only thing that gives a login a role (see 0001_schema.sql). If the profile
-   insert fails, the auth user is DELETED again rather than left behind — an
-   account that can sign in but has no profile is exactly the state
-   Session.loadProfile refuses to start from, and it cannot be repaired from
-   inside the app.
+   THE PROFILE ROW MAKES ITSELF
+   ----------------------------
+   Creating the auth user is enough to create the profile: 0004 installs
+   trg_niva_on_auth_user_created, an AFTER INSERT trigger on auth.users that
+   mirrors the new login into public.profiles and reads its name and role out of
+   raw_user_meta_data. So this function does not insert that row — it fills in
+   the one column that trigger predates, `phone`, which 0007 added and which is
+   the whole of the merchandiser's login identity.
+
+   Getting this wrong is not subtle: an INSERT here fails on profiles_pkey every
+   single time, because the trigger has already run inside the same transaction.
+
+   If that update fails, the auth user is DELETED again rather than left behind.
+   A login whose profile carries no phone number cannot sign in at all — the app
+   derives the address from the number — and cannot be repaired from inside the
+   app, so a half-made account is worse than none.
 
    Deploy:  supabase functions deploy create-merchandiser
    Secrets: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY are injected by the platform.
@@ -148,7 +156,10 @@ Deno.serve(async (req) => {
     email,
     password,
     email_confirm: true,
-    user_metadata: { full_name: name, phone },
+    /* `role` is read back out of this by trg_niva_on_auth_user_created, which
+       is what actually creates the profile row (see below). Passing it here
+       means the row is born with the right role instead of defaulting into it. */
+    user_metadata: { full_name: name, phone, role: "Merchandiser" },
   });
 
   if (createErr || !created?.user) {
@@ -157,25 +168,47 @@ Deno.serve(async (req) => {
     return reply(dupe ? 409 : 400, { error: dupe ? "That number already has an account." : msg });
   }
 
-  /* ---- 5. …and the profile that gives it a role ---- */
+  /* ---- 5. …and the phone number on the profile ----
+     THE PROFILE ROW ALREADY EXISTS BY NOW. 0004 installs
+     trg_niva_on_auth_user_created, an AFTER INSERT trigger on auth.users that
+     mirrors every new login into public.profiles, taking full_name and role
+     out of raw_user_meta_data. It runs inside the same transaction as the
+     insert above, so by the time createUser() returns, the row is there.
+
+     That trigger predates 0007 and knows nothing about `phone`, so what is
+     left to do is fill it in — an INSERT here races nothing and collides with
+     everything, failing on profiles_pkey, which is precisely what it did.
+
+     UPSERT rather than UPDATE so this still works on a project where 0004's
+     bootstrap trigger is absent: then there is no row and one gets made. */
   const { data: profile, error: insErr } = await admin
     .from("profiles")
-    .insert({
+    .upsert({
       id: created.user.id,
       full_name: name,
       role: "Merchandiser",
       phone,
       is_active: true,
-    })
+    }, { onConflict: "id" })
     .select("id, full_name, role, phone, is_active")
     .single();
 
   if (insErr) {
-    /* Roll the login back. A user who can authenticate but has no profile row
-       cannot be fixed from the app and cannot be seen by the manager who just
-       made them, so leaving it would be worse than failing. */
+    /* Roll the login back. A user who can authenticate but whose profile does
+       not carry their phone number cannot sign in at all — the app derives the
+       address from the number — and cannot be repaired from inside the app, so
+       leaving it would be worse than failing. Deleting the auth user cascades
+       the trigger's profile row away with it. */
     await admin.auth.admin.deleteUser(created.user.id);
-    return reply(400, { error: `Created the login but not the profile (${insErr.message}). Nothing was saved.` });
+    /* The one collision worth naming: two people, one number. The up-front
+       check catches the ordinary case; this catches the race, and the case
+       where a number is on a row the check could not see. */
+    const dupePhone = insErr.code === "23505" || /profiles_phone_key|phone/i.test(insErr.message || "");
+    return reply(dupePhone ? 409 : 400, {
+      error: dupePhone
+        ? "That phone number is already registered to another account."
+        : `Created the login but could not save the profile (${insErr.message}). Nothing was saved.`,
+    });
   }
 
   return reply(200, { profile });
