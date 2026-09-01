@@ -203,6 +203,9 @@ main#app{padding:20px 22px 60px;flex:1;min-width:0}
   background:var(--st-progress-bg);color:var(--st-progress);font-size:12.5px;line-height:1.5;margin-bottom:12px}
 .queuebanner.bad{background:var(--st-rework-bg);color:var(--st-rework)}
 .queuebanner b{font-weight:700}
+/* The icon is a fixed 15px glyph, not a flex item that grows with the text. */
+.queuebanner svg{width:15px;height:15px;flex:none;margin-top:1px}
+.queuebanner+.grid2,.queuebanner+.grid3{margin-top:14px}
 
 input,select,textarea{
   font:inherit;color:var(--text);background:var(--surface);border:1px solid var(--border-strong);
@@ -553,24 +556,47 @@ table.tbl tr:last-child td{border-bottom:0}
 #arHud.simple .arbar.bottom{gap:9px;padding:14px 12px 18px}
 /* The ONE extra line the fit maths earns: how much wall is in view, or where to
    stand so the poster fits. Quiet, under the distance line, never a chip. */
-/* ---- the manager's forms ----
-   .fieldrow had only a .gate-scoped rule, so every field outside the sign-in
-   panel was falling back to raw block layout. These are the same shapes the
-   gate already uses, unscoped. */
-.fieldrow{display:flex;flex-direction:column;gap:5px;margin-bottom:12px}
-.fieldrow label,.fl{font-size:12px;font-weight:600;color:var(--text-2);letter-spacing:.01em}
-.fieldrow input,.fieldrow select{width:100%;padding:9px 11px;border-radius:8px;
-  border:1px solid var(--line);background:var(--bg-2);color:var(--text-1);font-size:14px}
-.fieldrow input:focus,.fieldrow select:focus{outline:none;border-color:var(--accent)}
-.formgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:0 14px}
-/* Who gets a poster: a tick-list that stays readable at six names or sixty. */
-.whogrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));
-  gap:8px;margin-top:8px}
-.whopick{display:flex;align-items:center;gap:8px;padding:9px 11px;border-radius:9px;
-  border:1px solid var(--line);background:var(--bg-2);cursor:pointer;font-size:13.5px}
-.whopick.on{border-color:var(--accent);background:color-mix(in srgb,var(--accent) 12%,var(--bg-2))}
-.whopick input{accent-color:var(--accent);margin:0;flex:none}
-.whopick .sub{margin-left:auto;font-size:11px;color:var(--text-3)}
+/* ---- WHO GETS A POSTER ----
+   The one genuinely new component on the manager's screens; everything else
+   there is built from .field, .grid2, .card and .queuebanner, which already
+   exist and are already styled.
+
+   THREE RULES HERE ARE LOAD-BEARING, and each fixes a way the first attempt
+   came out mangled:
+     · `input{width:auto;flex:none}` — the global input rule is width:100%, and
+       it was stretching every checkbox across its whole cell;
+     · `.ph{white-space:nowrap;flex:none}` — a phone number is one token and
+       must never be allowed to wrap, which it did, one digit per line;
+     · `.nm{min-width:0}` with ellipsis — so a long name is what gives way,
+       rather than squeezing the number until it breaks. */
+.whogrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,224px),1fr));
+  gap:8px;margin-top:9px}
+.whopick{display:flex;align-items:center;gap:10px;min-width:0;padding:10px 12px;
+  border:1px solid var(--border);border-radius:var(--r);background:var(--surface-2);
+  cursor:pointer;transition:background var(--t),border-color var(--t)}
+.whopick:hover{background:var(--surface-3);border-color:var(--border-strong)}
+.whopick.on{border-color:var(--accent);background:var(--accent-soft)}
+.whopick input{width:auto;flex:none;margin:0;accent-color:var(--accent);cursor:pointer}
+.whopick .nm{font-size:13px;font-weight:550;color:var(--text);
+  min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.whopick .ph{margin-left:auto;flex:none;white-space:nowrap;
+  font-family:var(--mono);font-size:11px;color:var(--text-3)}
+.whopick.on .ph{color:var(--accent-ink)}
+/* The count that tells a manager what the primary button is about to do. */
+.pickbar{display:flex;align-items:baseline;gap:8px;margin-top:14px;flex-wrap:wrap}
+.pickbar .n{font-size:12.5px;color:var(--text-2)}
+.pickbar .lnk{background:none;border:0;padding:0;cursor:pointer;font:inherit;font-size:12.5px;
+  color:var(--accent);text-decoration:underline;text-underline-offset:2px}
+.pickbar .lnk:hover{color:var(--accent-hover)}
+/* Artwork preview: a real thumbnail, not a filename. */
+.artprev{display:flex;align-items:center;gap:13px;margin-top:10px;padding:11px;
+  border:1px solid var(--border);border-radius:var(--r);background:var(--surface-2)}
+.artprev img{width:62px;height:62px;object-fit:contain;flex:none;border-radius:6px;
+  background:var(--surface);border:1px solid var(--border)}
+.artprev .meta{min-width:0}
+.artprev .fn{font-size:12.5px;font-weight:550;color:var(--text);
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.artprev .sub{font-size:11.5px;color:var(--text-3);margin-top:2px}
 #arSee{font-size:12px;line-height:1.4;color:#b8c7d8;padding:0 2px}
 #arSee:empty{display:none}
 #arSimpleHint{font-size:13.5px;line-height:1.45;color:#dbe6f2;background:rgba(10,18,28,.74);
@@ -12968,27 +12994,27 @@ function viewAccounts(){
     + 'nothing for them to activate.</p></div></div>';
 
   /* THE FORM. Three fields, because three is what an account is. */
-  html += '<div class="card" style="margin-bottom:14px"><div class="hd"><h3>Add a merchandiser</h3></div>'
+  html += '<div class="card" style="margin-bottom:16px"><div class="hd"><h3>Add a merchandiser</h3></div>'
     + '<div class="bd">'
-    + (A.error ? '<div class="err" style="margin-bottom:12px">'+esc(A.error)+'</div>' : '')
-    + (A.ok    ? '<div class="note" style="margin-bottom:12px">'+esc(A.ok)+'</div>' : '')
-    + '<div class="formgrid">'
-    +   '<div class="fieldrow" id="f_m_name"><label for="m_name">Name</label>'
+    + (A.error ? '<div class="queuebanner bad">'+icon("info")+'<div>'+esc(A.error)+'</div></div>' : '')
+    + (A.ok    ? '<div class="queuebanner">'+icon("check")+'<div>'+esc(A.ok)+'</div></div>' : '')
+    + '<div class="grid3">'
+    +   '<div class="field"><label class="fl" for="m_name">Name</label>'
     +     '<input id="m_name" type="text" autocomplete="off" placeholder="Aditya Kulkarni" '
     +     'value="'+esc(A.form.name)+'"></div>'
-    +   '<div class="fieldrow" id="f_m_phone"><label for="m_phone">Phone number</label>'
+    +   '<div class="field"><label class="fl" for="m_phone">Phone number</label>'
     +     '<input id="m_phone" type="tel" inputmode="tel" autocomplete="off" placeholder="98765 43210" '
     +     'value="'+esc(A.form.phone)+'"></div>'
-    +   '<div class="fieldrow" id="f_m_pw"><label for="m_pw">Password</label>'
+    +   '<div class="field"><label class="fl" for="m_pw">Password</label>'
     +     '<input id="m_pw" type="text" autocomplete="off" placeholder="at least 8 characters" '
     +     'value="'+esc(A.form.pw)+'"></div>'
     + '</div>'
     /* Shown, not masked. The manager is setting a password they then have to
        read out to somebody — hiding it behind dots helps nobody here and
        guarantees typos that surface as "it does not work" a day later. */
-    + '<div class="hint" style="margin-top:4px">The password is shown so you can pass it on. '
-    + 'Tell them to keep it — this screen cannot show it again.</div>'
-    + '<div class="btnrow" style="margin-top:12px">'
+    + '<div class="hint">Shown, not hidden, so you can pass it on. Tell them to keep it — '
+    + 'this screen cannot show it again.</div>'
+    + '<div class="btnrow" style="margin-top:16px">'
     + '<button class="btn primary" data-act="mkmerch"'+(A.busy?' disabled':'')+'>'
     + (A.busy ? "Creating…" : "Create account")+'</button></div>'
     + '</div></div>';
@@ -13030,51 +13056,66 @@ function viewPosters(){
     + '<p>Upload the artwork and say what size it prints at. Merchandisers see the '
     + 'posters you give them, and the app draws each one on the wall at its true size.</p></div></div>';
 
-  html += '<div class="card" style="margin-bottom:14px"><div class="hd"><h3>Add a poster</h3></div>'
+  const picked = P.form.who.length;
+  html += '<div class="card" style="margin-bottom:16px"><div class="hd"><h3>Add a poster</h3></div>'
     + '<div class="bd">'
-    + (P.error ? '<div class="err" style="margin-bottom:12px">'+esc(P.error)+'</div>' : '')
-    + (P.ok    ? '<div class="note" style="margin-bottom:12px">'+esc(P.ok)+'</div>' : '')
-    + '<div class="formgrid">'
-    +   '<div class="fieldrow"><label for="p_name">Poster name</label>'
+    /* .queuebanner is this app's full-width message; .err is a per-field line
+       that is display:none until its .field goes .bad, so a banner built from
+       it is invisible — which is exactly how the first version of this screen
+       swallowed a server error. */
+    + (P.error ? '<div class="queuebanner bad">'+icon("info")+'<div>'+esc(P.error)+'</div></div>' : '')
+    + (P.ok    ? '<div class="queuebanner">'+icon("check")+'<div>'+esc(P.ok)+'</div></div>' : '')
+    + '<div class="grid2">'
+    +   '<div class="field"><label class="fl" for="p_name">Poster name</label>'
     +     '<input id="p_name" type="text" autocomplete="off" placeholder="Health Plan — Q3" '
     +     'value="'+esc(P.form.name)+'"></div>'
-    +   '<div class="fieldrow"><label for="p_size">Printed size</label><select id="p_size">'
+    +   '<div class="field"><label class="fl" for="p_size">Printed size</label><select id="p_size">'
     +     POSTER_SIZES.map(function(sz){
             return '<option value="'+sz.key+'"'+(P.form.size===sz.key?' selected':'')+'>'
                  + esc(sz.label+" — "+sz.detail)+'</option>'; }).join("")
     +   '</select></div>'
     + '</div>'
-    + '<div class="fieldrow" style="margin-top:10px"><label for="p_art">Artwork</label>'
-    +   '<input id="p_art" type="file" accept="image/*"></div>'
+    + '<div class="field"><label class="fl" for="p_art">Artwork</label>'
+    +   '<input id="p_art" type="file" accept="image/*">'
     + (P.art
-        ? '<div class="shot" style="max-width:190px;margin-top:10px">'
-          + '<img alt="poster artwork" src="'+P.art.src+'">'
-          + '<div class="cap">'+esc(P.art.name)+'</div></div>'
-        : '<div class="hint" style="margin-top:6px">A JPEG or PNG of the printed artwork. '
-          + 'It is drawn over the live camera at the size you picked above.</div>')
+        ? '<div class="artprev"><img alt="poster artwork" src="'+P.art.src+'">'
+          + '<div class="meta"><div class="fn">'+esc(P.art.name)+'</div>'
+          + '<div class="sub">Drawn on the wall at '+esc((posterSize(P.form.size)||{}).label||"")
+          + ' — ' + esc((posterSize(P.form.size)||{}).detail||"") + '</div></div></div>'
+        : '<div class="hint">A JPEG or PNG of the printed artwork. It is drawn over the live '
+          + 'camera at the size you pick above.</div>')
+    + '</div>'
+
     /* WHO GETS IT. The tick-list is the ordinary case; the button beside it is
        a standing rule that also catches people hired later, which no list of
        names can do. */
-    + '<div style="margin-top:16px"><label class="fl">Who gets this poster</label>'
+    + '<div class="field" style="margin-bottom:0"><label class="fl">Who gets this poster</label>'
     + (merch.length
         ? '<div class="whogrid">' + merch.map(function(u){
             const on = P.form.who.indexOf(u.id) >= 0;
             return '<label class="whopick'+(on?' on':'')+'">'
               + '<input type="checkbox" data-act="ptick" data-id="'+esc(u.id)+'"'+(on?' checked':'')+'>'
-              + '<span>'+esc(u.name)+'</span>'
-              + '<span class="sub mono">'+esc(phonePretty(u.phone))+'</span></label>';
+              + '<span class="nm">'+esc(u.name)+'</span>'
+              + '<span class="ph">'+esc(phonePretty(u.phone))+'</span></label>';
           }).join("") + '</div>'
-        : '<div class="hint">No merchandisers yet — add one first, or publish to everyone and '
-          + 'they will get it when their account is made.</div>')
+          + '<div class="pickbar"><span class="n">'
+          + (picked ? '<b>'+picked+'</b> of '+merch.length+' selected' : 'Nobody selected yet')
+          + '</span>'
+          + '<button class="lnk" data-act="pall">'
+          + (picked === merch.length ? 'Clear all' : 'Select all')+'</button></div>'
+        : '<div class="hint">No merchandisers yet — add one first, or publish to everyone '
+          + 'and they will get it the moment their account is made.</div>')
     + '</div>'
-    + '<div class="btnrow" style="margin-top:14px">'
-    + '<button class="btn primary" data-act="ppublish"'+(P.busy?' disabled':'')+'>'
-    +   (P.busy ? "Publishing…" : "Publish to the "+P.form.who.length+" ticked")+'</button>'
+
+    + '<div class="btnrow" style="margin-top:18px;display:flex;gap:9px;flex-wrap:wrap">'
+    + '<button class="btn primary" data-act="ppublish"'+((P.busy||!picked)?' disabled':'')+'>'
+    +   (P.busy ? "Publishing…" : (picked ? "Publish to "+picked+" merchandiser"+(picked===1?"":"s")
+                                          : "Publish"))+'</button>'
     + '<button class="btn" data-act="ppublishall"'+(P.busy?' disabled':'')+'>'
     +   'Publish to everyone</button>'
     + '</div>'
-    + '<div class="hint" style="margin-top:8px"><b>Publish to everyone</b> also gives it to '
-    + 'merchandisers you add later. Ticking names gives it only to those people.</div>'
+    + '<div class="hint" style="margin-top:9px"><b>Publish to everyone</b> also gives this poster '
+    + 'to merchandisers you add later. Ticking names gives it only to those people.</div>'
     + '</div></div>';
 
   html += posterListCard("Live posters", live, false);
@@ -15658,6 +15699,18 @@ document.addEventListener("click", function(e){
     case "ppublish":    doPublishPoster(false); break;
     case "ppublishall": doPublishPoster(true);  break;
     case "parchive":    doArchivePoster(id, el.textContent.trim() === "Restore"); break;
+    case "pall": {
+      /* Select-all is NOT "publish to everyone": it ticks the people who exist
+         right now, and stops there. The button beside it is the standing rule
+         that also reaches whoever is hired next, and conflating the two would
+         quietly widen an audience the manager thought they had bounded. */
+      snapshotPosterForm();
+      const all = USERS.filter(function(u){ return u.role === "Merchandiser" && u.active !== false; })
+                       .map(function(u){ return u.id; });
+      ui.posters.form.who = (ui.posters.form.who.length === all.length) ? [] : all;
+      render();
+      break;
+    }
     case "ptick": {
       /* The tick-list survives the re-render because it lives in ui, not in the
          DOM — and the typed name has to be captured on the way past, or ticking
