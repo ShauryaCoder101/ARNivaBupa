@@ -7718,13 +7718,63 @@ const ARC = {
 
 /* ---------- tiny helpers ---------- */
 function arcEl(id){ return document.getElementById(id); }
+/* ---- loading the artwork WITHOUT TAINTING THE CANVAS ----
+   The composite draws this image into a canvas and then reads the pixels back
+   with toDataURL(). A cross-origin image drawn without CORS approval marks that
+   canvas as tainted, and the read throws SecurityError — which Safari words as
+   "The operation is insecure", so it reads like an HTTPS problem and is not one.
+
+   This never bit while the artwork was seed data: `gen:` images are drawn
+   locally and data: URLs are same-origin, and neither taints. It appeared the
+   moment posters became real uploads served from Supabase Storage on another
+   origin.
+
+   Two routes, in order of cost:
+     1. crossOrigin="anonymous" — Storage sends access-control-allow-origin, so
+        this is the whole fix in the normal case;
+     2. if that is refused, FETCH the bytes and load them from a blob: URL. Those
+        are same-origin by construction, so the canvas stays clean even when a
+        CDN in front of the bucket is not sending CORS headers on images. */
 function arcLoadImage(src){
-  return new Promise(function(res, rej){
-    if(!src){ rej(new Error("no artwork")); return; }
-    const im = new Image();
-    im.onload = function(){ res(im); };
-    im.onerror = function(){ rej(new Error("artwork could not be decoded")); };
-    im.src = resolveImg(src);
+  const url = src ? resolveImg(src) : "";
+  if(!url) return Promise.reject(new Error("no artwork"));
+
+  const load = function(u, cors){
+    return new Promise(function(ok, no){
+      const im = new Image();
+      /* MUST be set before .src, or the request is already in flight without it. */
+      if(cors) im.crossOrigin = "anonymous";
+      im.onload  = function(){ ok(im); };
+      im.onerror = function(){ no(new Error("decode failed")); };
+      im.src = u;
+    });
+  };
+
+  /* Already local: a data: or blob: URL cannot taint anything. */
+  if(url.indexOf("data:") === 0 || url.indexOf("blob:") === 0){
+    return load(url, false).catch(function(){
+      throw new Error("artwork could not be decoded");
+    });
+  }
+
+  return load(url, true).catch(function(){
+    return fetch(url, { mode:"cors", cache:"no-store" })
+      .then(function(r){ if(!r.ok) throw new Error("HTTP " + r.status); return r.blob(); })
+      .then(function(b){
+        const objUrl = URL.createObjectURL(b);
+        return load(objUrl, false).then(function(im){
+          /* The bitmap is decoded and held by the Image; the URL has done its
+             job and would otherwise leak for the life of the document. */
+          try{ URL.revokeObjectURL(objUrl); }catch(e){}
+          return im;
+        }, function(e){
+          try{ URL.revokeObjectURL(objUrl); }catch(e2){}
+          throw e;
+        });
+      })
+      .catch(function(){
+        throw new Error("artwork could not be loaded (the server did not allow it to be read)");
+      });
   });
 }
 function arcCalibKey(){
@@ -12011,8 +12061,23 @@ function arcShoot(){
                    g, tierKey, nn, "camera")
     .catch(function(err){
       ARC.busy = false;
-      toast("Capture failed: " + ((err && err.message) || "unknown"), true);
+      toast("Capture failed: " + arcCaptureWhy(err), true);
     });
+}
+/* SecurityError out of a canvas read is ALWAYS a tainted canvas, and every
+   browser words it as though the connection were at fault — Safari says "The
+   operation is insecure", which sends people to check their HTTPS when the page
+   is already on HTTPS and the camera is plainly working. Say what it actually
+   is. See arcLoadImage for why it happens and what prevents it. */
+function arcCaptureWhy(err){
+  const name = (err && err.name) || "";
+  const msg  = (err && err.message) || "unknown";
+  if(name === "SecurityError" || /insecure|tainted|cross-origin/i.test(msg)){
+    return "the poster artwork could not be read back into the photo. "
+         + "It loaded from another origin without permission to be copied. "
+         + "Re-publishing the poster usually fixes it.";
+  }
+  return msg;
 }
 
 /* ---------- single-frame capture, executed inside the XR frame callback ----------
