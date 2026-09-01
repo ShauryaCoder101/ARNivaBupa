@@ -105,11 +105,12 @@ Deno.serve(async (req) => {
   /* ---- 2. …and are they allowed to? ---- */
   const { data: callerProfile, error: profErr } = await admin
     .from("profiles")
-    .select("role, is_active")
+    .select("id, role, is_active")
     .eq("id", caller.user.id)
     .single();
 
   if (profErr || !callerProfile) return reply(403, { error: "This account has no profile." });
+  const me = callerProfile;
   if (callerProfile.is_active === false) return reply(403, { error: "This account is not active." });
   if (callerProfile.role !== "Manager" && callerProfile.role !== "Admin") {
     return reply(403, { error: "Only a manager can create accounts." });
@@ -211,5 +212,75 @@ Deno.serve(async (req) => {
     });
   }
 
-  return reply(200, { profile });
+  /* ---- 6. the posters this person should already have ----
+     "Publish to everyone" is a STANDING RULE, not a set of names, so it has to
+     be applied to people who did not exist when it was made. campaigns.
+     audience_all (0008) is that rule; provisioning here is what makes a new
+     hire's first sign-in show the same posters as everybody else's.
+
+     BEST EFFORT, DELIBERATELY. The account is already created and usable by
+     this point, and a poster that fails to provision is fixed by the manager
+     re-publishing it — losing the whole account over it would be far worse. Any
+     failures are reported alongside the profile rather than swallowed. */
+  const provisioned: string[] = [];
+  const provisionFailed: { poster: string; why: string }[] = [];
+  const { data: openPosters } = await admin
+    .from("campaigns")
+    .select("id, name, poster_w_ft, poster_h_ft, standoff_ft, standoff_tol_ft, angle_tol_deg")
+    .eq("audience_all", true)
+    .eq("is_active", true);
+
+  for (const c of openPosters || []) {
+    try {
+      const storeCode = "FLD-" + created.user.id.replace(/-/g, "").slice(0, 6).toUpperCase();
+      let storeId: string;
+      const { data: haveStore } = await admin.from("stores")
+        .select("id").eq("store_code", storeCode).maybeSingle();
+      if (haveStore) {
+        storeId = haveStore.id;
+      } else {
+        const { data: madeStore, error: sErr } = await admin.from("stores").insert({
+          store_code: storeCode, name: name + " — field",
+          city: "—", state: "—", state_code: "--", region: "West",
+          lat: 0, lng: 0, geofence_m: 5000, is_active: true,
+        }).select("id").single();
+        if (sErr) { provisionFailed.push({ poster: c.name, why: sErr.message }); continue; }
+        storeId = madeStore.id;
+      }
+
+      const { data: madeTask, error: tErr } = await admin.from("tasks").insert({
+        task_code: "MK-" + String(c.id).replace(/-/g, "").slice(0, 6).toUpperCase()
+                 + "-" + created.user.id.replace(/-/g, "").slice(0, 6).toUpperCase(),
+        campaign_id: c.id, store_id: storeId,
+        assignee_id: created.user.id, manager_id: me.id, created_by: me.id,
+        display_type: "In-shop Branding",
+        width_ft: c.poster_w_ft, height_ft: c.poster_h_ft,
+        standoff_ft: c.standoff_ft, standoff_tol_ft: c.standoff_tol_ft,
+        angle_tol_deg: c.angle_tol_deg,
+        instructions: "Mock this poster up on a clear wall.",
+        status: "In Progress",
+      }).select("id").single();
+      if (tErr) { provisionFailed.push({ poster: c.name, why: tErr.message }); continue; }
+
+      /* Carry the artwork across from any task that already has it, so the new
+         person sees the same key visual rather than a blank overlay. */
+      const { data: art } = await admin.from("task_images")
+        .select("storage_path").eq("kind", "poster")
+        .in("task_id", (await admin.from("tasks").select("id").eq("campaign_id", c.id))
+              .data?.map((t: { id: string }) => t.id) || [])
+        .limit(1).maybeSingle();
+      if (art?.storage_path) {
+        await admin.from("task_images").insert({
+          task_id: madeTask.id, kind: "poster",
+          bucket_id: "poster-artwork", storage_path: art.storage_path,
+          is_guided: false, captured_at: new Date().toISOString(), uploaded_by: me.id,
+        });
+      }
+      provisioned.push(c.name);
+    } catch (e) {
+      provisionFailed.push({ poster: c.name, why: (e as Error)?.message || "unknown" });
+    }
+  }
+
+  return reply(200, { profile, posters: provisioned, posterFailures: provisionFailed });
 });

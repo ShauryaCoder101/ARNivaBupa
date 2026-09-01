@@ -553,6 +553,24 @@ table.tbl tr:last-child td{border-bottom:0}
 #arHud.simple .arbar.bottom{gap:9px;padding:14px 12px 18px}
 /* The ONE extra line the fit maths earns: how much wall is in view, or where to
    stand so the poster fits. Quiet, under the distance line, never a chip. */
+/* ---- the manager's forms ----
+   .fieldrow had only a .gate-scoped rule, so every field outside the sign-in
+   panel was falling back to raw block layout. These are the same shapes the
+   gate already uses, unscoped. */
+.fieldrow{display:flex;flex-direction:column;gap:5px;margin-bottom:12px}
+.fieldrow label,.fl{font-size:12px;font-weight:600;color:var(--text-2);letter-spacing:.01em}
+.fieldrow input,.fieldrow select{width:100%;padding:9px 11px;border-radius:8px;
+  border:1px solid var(--line);background:var(--bg-2);color:var(--text-1);font-size:14px}
+.fieldrow input:focus,.fieldrow select:focus{outline:none;border-color:var(--accent)}
+.formgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:0 14px}
+/* Who gets a poster: a tick-list that stays readable at six names or sixty. */
+.whogrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));
+  gap:8px;margin-top:8px}
+.whopick{display:flex;align-items:center;gap:8px;padding:9px 11px;border-radius:9px;
+  border:1px solid var(--line);background:var(--bg-2);cursor:pointer;font-size:13.5px}
+.whopick.on{border-color:var(--accent);background:color-mix(in srgb,var(--accent) 12%,var(--bg-2))}
+.whopick input{accent-color:var(--accent);margin:0;flex:none}
+.whopick .sub{margin-left:auto;font-size:11px;color:var(--text-3)}
 #arSee{font-size:12px;line-height:1.4;color:#b8c7d8;padding:0 2px}
 #arSee:empty{display:none}
 #arSimpleHint{font-size:13.5px;line-height:1.45;color:#dbe6f2;background:rgba(10,18,28,.74);
@@ -4370,6 +4388,10 @@ function mapProfile(r){
 function mapCampaign(r){
   return { id:r.id, code:r.code, name:r.name, brand:r.brand,
            start:r.starts_on, end:r.ends_on, note:r.note||"", ownerId:r.owner_id||null,
+           /* is_active is what "archived" means; audience_all arrives with 0008
+              and is absent on a project that has not applied it, which reads as
+              false — the safe answer, since it only ever WIDENS an audience. */
+           active: r.is_active !== false, audienceAll: r.audience_all === true,
            poster:{ w:num(r.poster_w_ft), h:num(r.poster_h_ft), standoff:num(r.standoff_ft),
                     tol:num(r.standoff_tol_ft), angleTol:num(r.angle_tol_deg) } };
 }
@@ -4683,7 +4705,11 @@ let ui    = { granularity:"Region", taskFilter:{q:"",status:"",region:"",campaig
               /* The manager's two screens. `accounts.form` survives a re-render
                  so a failed create does not also lose what was typed. */
               accounts:{ busy:false, error:"", ok:"", form:{ name:"", phone:"", pw:"" } },
-              photos:{ sort:"date", dir:-1, q:"" } };
+              photos:{ sort:"date", dir:-1, q:"" },
+              /* The poster being published. `art` holds the chosen file as a
+                 data URL until it is uploaded; `who` is the tick-list. */
+              posters:{ busy:false, error:"", ok:"",
+                        form:{ name:"", size:POSTER_SIZE_DEFAULT, who:[] }, art:null } };
 
 function blankState(){
   return { v:3, userId:null, tasks:[], notifications:[],
@@ -6489,17 +6515,21 @@ function fieldJobLine(t){
 function viewMyTasks(){
   const mine = visibleTasks();
   const groups = [
-    { k:"now",  label:byMode("Shops to visit","Do these now"), cls:"now"  },
+    /* MOCKUP: what a merchandiser has is a list of POSTERS to photograph on a
+       wall, not a round of shops to visit — the office is theirs to choose and
+       is typed onto each photo, not assigned to them in advance. */
+    { k:"now",  label:byMode("Posters to mock up","Do these now"), cls:"now"  },
     { k:"wait", label:"Waiting on your manager", cls:"wait" },
     { k:"done", label:byMode("Decided","Finished"), cls:"done" }
   ];
   const todo = mine.filter(t=>fieldStatus(t).group === "now").length;
 
   let html = '<div class="mobile">'
-    + '<div class="pagehd" style="margin-bottom:12px"><div><h1>My jobs</h1>'
+    + '<div class="pagehd" style="margin-bottom:12px"><div><h1>'+byMode("My posters","My jobs")+'</h1>'
     + '<p>'+(todo
-        ? '<span class="num">'+todo+'</span> job'+(todo===1?"":"s")+' need'+(todo===1?"s":"")+' you today'
-        : 'Nothing waiting on you right now')+'</p></div></div>';
+        ? byMode('<span class="num">'+todo+'</span> poster'+(todo===1?"":"s")+' to mock up',
+                 '<span class="num">'+todo+'</span> job'+(todo===1?"":"s")+' need'+(todo===1?"s":"")+' you today')
+        : byMode('Your manager has not sent you a poster yet', 'Nothing waiting on you right now'))+'</p></div></div>';
 
   /* The notification bell used to live in the topbar, five controls deep.
      Field updates belong where the field is already looking. */
@@ -12984,6 +13014,122 @@ function viewAccounts(){
   return { html: html };
 }
 
+/* ---- posters: artwork, a size, and who gets to shoot it ----
+   A POSTER IS A CAMPAIGN. campaigns already carries the poster's true size,
+   owns the artwork bucket, and has is_active — which is exactly what archiving
+   needs. Calling it a campaign on screen would make a manager think about a
+   concept this build no longer has, so it is a poster everywhere the user can
+   see and a campaign everywhere the database can. */
+function viewPosters(){
+  const P = ui.posters;
+  const merch = USERS.filter(function(u){ return u.role === "Merchandiser" && u.active !== false; });
+  const live = CAMPAIGNS.filter(function(c){ return c.active !== false; });
+  const archived = CAMPAIGNS.filter(function(c){ return c.active === false; });
+
+  let html = '<div class="pagehd"><div><h1>Posters</h1>'
+    + '<p>Upload the artwork and say what size it prints at. Merchandisers see the '
+    + 'posters you give them, and the app draws each one on the wall at its true size.</p></div></div>';
+
+  html += '<div class="card" style="margin-bottom:14px"><div class="hd"><h3>Add a poster</h3></div>'
+    + '<div class="bd">'
+    + (P.error ? '<div class="err" style="margin-bottom:12px">'+esc(P.error)+'</div>' : '')
+    + (P.ok    ? '<div class="note" style="margin-bottom:12px">'+esc(P.ok)+'</div>' : '')
+    + '<div class="formgrid">'
+    +   '<div class="fieldrow"><label for="p_name">Poster name</label>'
+    +     '<input id="p_name" type="text" autocomplete="off" placeholder="Health Plan — Q3" '
+    +     'value="'+esc(P.form.name)+'"></div>'
+    +   '<div class="fieldrow"><label for="p_size">Printed size</label><select id="p_size">'
+    +     POSTER_SIZES.map(function(sz){
+            return '<option value="'+sz.key+'"'+(P.form.size===sz.key?' selected':'')+'>'
+                 + esc(sz.label+" — "+sz.detail)+'</option>'; }).join("")
+    +   '</select></div>'
+    + '</div>'
+    + '<div class="fieldrow" style="margin-top:10px"><label for="p_art">Artwork</label>'
+    +   '<input id="p_art" type="file" accept="image/*"></div>'
+    + (P.art
+        ? '<div class="shot" style="max-width:190px;margin-top:10px">'
+          + '<img alt="poster artwork" src="'+P.art.src+'">'
+          + '<div class="cap">'+esc(P.art.name)+'</div></div>'
+        : '<div class="hint" style="margin-top:6px">A JPEG or PNG of the printed artwork. '
+          + 'It is drawn over the live camera at the size you picked above.</div>')
+    /* WHO GETS IT. The tick-list is the ordinary case; the button beside it is
+       a standing rule that also catches people hired later, which no list of
+       names can do. */
+    + '<div style="margin-top:16px"><label class="fl">Who gets this poster</label>'
+    + (merch.length
+        ? '<div class="whogrid">' + merch.map(function(u){
+            const on = P.form.who.indexOf(u.id) >= 0;
+            return '<label class="whopick'+(on?' on':'')+'">'
+              + '<input type="checkbox" data-act="ptick" data-id="'+esc(u.id)+'"'+(on?' checked':'')+'>'
+              + '<span>'+esc(u.name)+'</span>'
+              + '<span class="sub mono">'+esc(phonePretty(u.phone))+'</span></label>';
+          }).join("") + '</div>'
+        : '<div class="hint">No merchandisers yet — add one first, or publish to everyone and '
+          + 'they will get it when their account is made.</div>')
+    + '</div>'
+    + '<div class="btnrow" style="margin-top:14px">'
+    + '<button class="btn primary" data-act="ppublish"'+(P.busy?' disabled':'')+'>'
+    +   (P.busy ? "Publishing…" : "Publish to the "+P.form.who.length+" ticked")+'</button>'
+    + '<button class="btn" data-act="ppublishall"'+(P.busy?' disabled':'')+'>'
+    +   'Publish to everyone</button>'
+    + '</div>'
+    + '<div class="hint" style="margin-top:8px"><b>Publish to everyone</b> also gives it to '
+    + 'merchandisers you add later. Ticking names gives it only to those people.</div>'
+    + '</div></div>';
+
+  html += posterListCard("Live posters", live, false);
+  if(archived.length) html += posterListCard("Archived", archived, true);
+  return { html: html, post: bindPosterForm };
+}
+function posterListCard(title, rows, isArchived){
+  let h = '<div class="card" style="margin-bottom:14px"><div class="hd"><h3>'+esc(title)
+    + ' <span class="num">'+rows.length+'</span></h3></div><div class="bd tight">';
+  if(!rows.length){
+    return h + '<div style="padding:8px 0">'
+      + emptyState(isArchived ? "Nothing archived." : "No posters yet. Add one above.")
+      + '</div></div></div>';
+  }
+  h += '<div class="tblwrap"><table class="tbl"><thead><tr>'
+    + '<th>Poster</th><th>Size</th><th>Who has it</th><th>Mockups</th><th></th>'
+    + '</tr></thead><tbody>'
+    + rows.map(function(c){
+        const t = { widthFt: c.poster && c.poster.w, heightFt: c.poster && c.poster.h };
+        const mine = state.tasks.filter(function(x){ return x.campaignId === c.id; });
+        const shots = mine.reduce(function(n, x){ return n + (x.afterImages||[]).length; }, 0);
+        return '<tr><td><b>'+esc(c.name)+'</b>'
+          + (c.audienceAll ? ' <span class="chip neutral plain">everyone</span>' : '')
+          + '</td>'
+          + '<td class="num">'+posterLabel(t)+'</td>'
+          + '<td class="num">'+mine.length+'</td>'
+          + '<td class="num">'+shots+'</td>'
+          + '<td style="text-align:right"><button class="btn ghost sm" data-act="parchive" '
+          +   'data-id="'+esc(c.id)+'">'+(isArchived?"Restore":"Archive")+'</button></td></tr>';
+      }).join("")
+    + '</tbody></table></div>';
+  return h + '</div></div>';
+}
+function bindPosterForm(){
+  const f = $("#p_art");
+  if(f) f.addEventListener("change", function(){
+    const file = f.files && f.files[0]; if(!file) return;
+    const rd = new FileReader();
+    rd.onload = function(){
+      ui.posters.art = { src: rd.result, name: file.name || "artwork.jpg",
+                         ts: new Date().toISOString() };
+      snapshotPosterForm(); render();
+    };
+    rd.onerror = function(){ toast("Could not read that file.", true); };
+    rd.readAsDataURL(file);
+  });
+}
+/* Keep what is typed across the re-render a file pick or a tick causes. */
+function snapshotPosterForm(){
+  const g = function(id){ const el = $("#"+id); return el ? el.value : null; };
+  const n = g("p_name"), sz = g("p_size");
+  if(n  != null) ui.posters.form.name = n;
+  if(sz != null) ui.posters.form.size = sz;
+}
+
 /* ---- every photo, from everyone ----
    Flattened out of the task tree ONCE, here, because both the table and the
    per-merchandiser counts above need the same list and walking the tree twice
@@ -13091,6 +13237,111 @@ function photoLocNote(p){
   if(p.locSource === "stated") return "typed by hand — no GPS";
   if(p.lat == null || p.lng == null) return "no position recorded";
   return gps(p.lat, p.lng) + (p.locSource === "simulated" ? " · simulated" : "");
+}
+
+/* ---- publishing a poster ----
+   THREE WRITES, AND ONLY THE MIDDLE ONE IS ORDINARY.
+
+     1. the campaign — the browser may do this: campaigns_insert_mgr allows a
+        manager to insert one they own;
+     2. the artwork — the browser may do this too, because niva_artwork_write
+        keys off owning that campaign, which is why the campaign must exist
+        first and why the path is campaign-scoped;
+     3. the tasks — the browser may NOT do this in a usable state. See
+        supabase/functions/provision-poster.
+
+   Online only, like account creation and for the same reason: there is nothing
+   a queued copy could do except hold a half-published poster on one device. */
+function doPublishPoster(toEveryone){
+  const P = ui.posters;
+  if(P.busy) return;
+  snapshotPosterForm();
+  P.error = ""; P.ok = "";
+
+  const size = posterSize(P.form.size);
+  if(P.form.name.trim().length < 2) P.error = "Give the poster a name.";
+  else if(!size)                    P.error = "Pick a printed size.";
+  else if(!P.art)                   P.error = "Attach the artwork.";
+  else if(!toEveryone && !P.form.who.length)
+    P.error = "Tick who gets this poster, or use “Publish to everyone”.";
+  if(P.error){ render(); return; }
+  if(!netUp()){
+    P.error = "Publishing needs a connection — the artwork has to reach the server.";
+    render(); return;
+  }
+
+  P.busy = true; render();
+  const today = new Date().toISOString().slice(0, 10);
+  const end = new Date(Date.now() + 365*24*3600*1000).toISOString().slice(0, 10);
+  const code = "PST-" + uuid4().replace(/-/g, "").slice(0, 8).toUpperCase();
+  let campaignId = null, artPath = null;
+
+  REST.insert("campaigns", {
+    code: code, name: P.form.name.trim(), brand: "NIVA",
+    starts_on: today, ends_on: end, owner_id: me().id,
+    poster_w_ft: +size.widthFt.toFixed(2), poster_h_ft: +size.heightFt.toFixed(2),
+    standoff_ft: MOCKUP_MAX_STANDOFF_FT,
+    standoff_tol_ft: STANDOFF_TOL_FT, angle_tol_deg: ANGLE_TOL_DEG,
+    is_active: true, audience_all: !!toEveryone
+  }).then(function(rows){
+    const row = rows[0];
+    if(!row) throw SbError("permanent", "The poster was not saved.");
+    campaignId = row.id;
+    artPath = "campaigns/" + campaignId + "/" + uuid4() + ".jpg";
+    return Storage.upload("poster-artwork", artPath, P.art.src, "image/jpeg");
+  }).then(function(){
+    return sbRequest("/functions/v1/provision-poster", {
+      method: "POST", timeout: 30000,
+      body: toEveryone
+        ? { campaignId: campaignId, all: true, artworkPath: artPath }
+        : { campaignId: campaignId, merchandiserIds: P.form.who, artworkPath: artPath }
+    });
+  }).then(function(r){
+    P.busy = false;
+    const n = (r.body && r.body.provisioned) || 0;
+    const bad = (r.body && r.body.failed) || [];
+    P.ok = P.form.name.trim() + " published to " + n + " merchandiser" + (n===1?"":"s")
+         + (toEveryone ? ", and to anyone you add later." : ".")
+         + (bad.length ? " " + bad.length + " could not be set up — try publishing again." : "");
+    P.form = { name:"", size:POSTER_SIZE_DEFAULT, who:[] };
+    P.art = null;
+    /* Show it immediately rather than waiting for the next prime. */
+    Repo.prime().then(function(){ render(); }, function(){ render(); });
+    render();
+  }, function(err){
+    P.busy = false;
+    const said = (err && err.message) ? err.message : errText(err);
+    P.error = campaignId
+      ? ("The poster was saved but not handed out (" + said + "). Publish it again.")
+      : said;
+    toast(P.error, true);
+    if(window.console && console.warn) console.warn("[NIVA] publish poster failed", err);
+    render();
+  });
+}
+/* Archiving is campaigns.is_active, which already exists and which every
+   campaign read already filters on. The photos stay: they are evidence of work
+   somebody did, and a finished campaign does not un-happen. */
+function doArchivePoster(id, restore){
+  const c = campaignById(id);
+  REST.patch("campaigns", "id=eq." + encodeURIComponent(id), { is_active: !!restore })
+    .then(function(rows){
+      /* AN EMPTY RESULT IS A REFUSAL, NOT A SUCCESS. campaigns_update_owner
+         scopes the update to the campaign's owner, and RLS filters rather than
+         errors — so a manager archiving somebody else's poster gets 200 and
+         zero rows. Reporting that as done would leave the poster on every
+         merchandiser's phone while the screen says it is gone. */
+      if(!rows.length){
+        toast("That poster belongs to another manager, so it cannot be "
+              + (restore ? "restored" : "archived") + " from here.", true);
+        return;
+      }
+      if(c) c.active = !!restore;
+      toast((c ? c.name : "Poster") + (restore ? " restored." : " archived — merchandisers will not see it."));
+      save(); render();
+    }, function(err){
+      toast("Could not " + (restore?"restore":"archive") + " that poster: " + errText(err), true);
+    });
 }
 
 /* ---- creating the account ----
@@ -14938,11 +15189,13 @@ function navFor(role){
   if(role === "Merchandiser"){
     return [ {v:"mytasks", label:"My Tasks", i:"list"} ];
   }
-  /* TWO ITEMS, and the count is the only number a manager needs at a glance. */
+  /* THREE ITEMS, in the order the work happens: publish a poster, give somebody
+     an account to shoot it with, look at what came back. */
   if(role === "Manager"){
     return [
-      {v:"photos",   label:"Photos", i:"camp", count: allPhotos().length},
-      {v:"accounts", label:"Merchandisers", i:"users"}
+      {v:"posters",  label:"Posters", i:"poster"},
+      {v:"accounts", label:"Merchandisers", i:"users"},
+      {v:"photos",   label:"Photos", i:"camp", count: allPhotos().length}
     ];
   }
   const pending = state.tasks.filter(t=>t.status===S.SUBMITTED).length;
@@ -15228,7 +15481,7 @@ const VIEWS = {
   dashboard: viewDashboard, campaigns: viewCampaigns, campaign: viewCampaign,
   tasks: viewTasks, create: viewCreate, approvals: viewApprovals, review: viewReview,
   mytasks: viewMyTasks, task: viewTask, users: viewUsers, audit: viewAudit,
-  accounts: viewAccounts, photos: viewPhotos
+  accounts: viewAccounts, photos: viewPhotos, posters: viewPosters
 };
 /* Role gating, driven entirely by the session's profile row. This is a UI
    affordance only — the same rules are enforced by RLS and by the guard
@@ -15243,11 +15496,12 @@ function allowedView(name){
      rejected. That is the admin, and it is also the escape hatch if the client
      wants any of it back. */
   if(r === "Admin") return ["dashboard","campaigns","campaign","tasks","task","users","audit",
-                            "accounts","photos"].indexOf(name) >= 0;
-  /* A MANAGER DOES TWO THINGS. `task` stays reachable so that clicking a row in
-     the photo list opens the capture it came from; it is a detail view of what
-     they are already looking at, not a workflow. */
-  if(r === "Manager") return ["accounts","photos","task"].indexOf(name) >= 0;
+                            "accounts","photos","posters"].indexOf(name) >= 0;
+  /* A MANAGER DOES THREE THINGS: hand out posters, make the accounts that shoot
+     them, and look at what came back. `task` stays reachable so clicking a row
+     in the photo list opens the capture it came from; it is a detail view of
+     what they are already looking at, not a workflow. */
+  if(r === "Manager") return ["posters","accounts","photos","task"].indexOf(name) >= 0;
   return false;   // no session, or a role this build does not know
 }
 function homeView(){
@@ -15401,6 +15655,19 @@ document.addEventListener("click", function(e){
     case "submitexec": doSubmitExec(id); break;
     case "markread":   markNotifsRead(); break;
     case "mkmerch":    doCreateMerchandiser(); break;
+    case "ppublish":    doPublishPoster(false); break;
+    case "ppublishall": doPublishPoster(true);  break;
+    case "parchive":    doArchivePoster(id, el.textContent.trim() === "Restore"); break;
+    case "ptick": {
+      /* The tick-list survives the re-render because it lives in ui, not in the
+         DOM — and the typed name has to be captured on the way past, or ticking
+         somebody would wipe it. */
+      snapshotPosterForm();
+      const who = ui.posters.form.who, at = who.indexOf(id);
+      if(at >= 0) who.splice(at, 1); else who.push(id);
+      render();
+      break;
+    }
     case "psort": {
       /* Clicking the column you are already on reverses it; a new column starts
          in the direction that column is actually useful in — newest first for a
