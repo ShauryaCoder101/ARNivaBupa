@@ -13141,9 +13141,23 @@ function doCreateMerchandiser(){
     save(); render();
   }, function(err){
     A.busy = false;
-    /* The function answers 401/403/409 with a sentence meant for a manager;
-       anything else falls back to the app's own error wording. */
-    A.error = (err && err.message) ? err.message : errText(err);
+    /* The function answers 401/403/409/400 with a sentence meant for a manager;
+       anything else falls back to the app's own error wording.
+
+       SAID THREE WAYS ON PURPOSE. A create that fails silently is the worst
+       outcome here: the manager has just typed a password they intend to read
+       out, and a banner they scroll past leaves them believing an account
+       exists. The toast cannot be missed, the banner survives the re-render,
+       and the console line carries the status and body for whoever is holding
+       a laptop next to them. */
+    const said = (err && err.message) ? err.message : errText(err);
+    A.error = said;
+    toast(said, true);
+    if(window.console && console.warn)
+      console.warn("[NIVA] create-merchandiser failed",
+                   { status: err && err.status, kind: err && err.kind,
+                     code: err && err.code, hint: err && err.hint,
+                     details: err && err.details, message: said });
     render();
   });
 }
