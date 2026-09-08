@@ -213,74 +213,27 @@ Deno.serve(async (req) => {
   }
 
   /* ---- 6. the posters this person should already have ----
-     "Publish to everyone" is a STANDING RULE, not a set of names, so it has to
-     be applied to people who did not exist when it was made. campaigns.
-     audience_all (0008) is that rule; provisioning here is what makes a new
-     hire's first sign-in show the same posters as everybody else's.
+     NOT DONE HERE ANY MORE. It used to be, and being done ONLY here was the
+     bug: account creation is one moment, and everything that reaches a
+     merchandiser by any other route - a self-signup, a row made by hand, an
+     account created by a build deployed before 0008 existed, or simply this
+     block failing softly on a flaky connection - produced a person who could
+     sign in and would never see a poster published to everyone. There was no
+     second chance and nothing that noticed.
 
-     BEST EFFORT, DELIBERATELY. The account is already created and usable by
-     this point, and a poster that fails to provision is fixed by the manager
-     re-publishing it — losing the whole account over it would be far worse. Any
-     failures are reported alongside the profile rather than swallowed. */
-  const provisioned: string[] = [];
-  const provisionFailed: { poster: string; why: string }[] = [];
-  const { data: openPosters } = await admin
-    .from("campaigns")
-    .select("id, name, poster_w_ft, poster_h_ft, standoff_ft, standoff_tol_ft, angle_tol_deg")
-    .eq("audience_all", true)
-    .eq("is_active", true);
+     That work now lives in ONE place, supabase/functions/sync-posters, which
+     is idempotent and which the merchandiser's own client calls at every
+     sign-in. The manager's browser also calls it with this new id the instant
+     this function returns, so the Posters screen's "Who has it" count is right
+     while the manager is still looking at it - but nothing depends on that
+     call succeeding, which is the entire point.
 
-  for (const c of openPosters || []) {
-    try {
-      const storeCode = "FLD-" + created.user.id.replace(/-/g, "").slice(0, 6).toUpperCase();
-      let storeId: string;
-      const { data: haveStore } = await admin.from("stores")
-        .select("id").eq("store_code", storeCode).maybeSingle();
-      if (haveStore) {
-        storeId = haveStore.id;
-      } else {
-        const { data: madeStore, error: sErr } = await admin.from("stores").insert({
-          store_code: storeCode, name: name + " — field",
-          city: "—", state: "—", state_code: "--", region: "West",
-          lat: 0, lng: 0, geofence_m: 5000, is_active: true,
-        }).select("id").single();
-        if (sErr) { provisionFailed.push({ poster: c.name, why: sErr.message }); continue; }
-        storeId = madeStore.id;
-      }
+     The old copy here also could not do the job properly: the only place it
+     could find a poster's artwork was a task_images row on some OTHER
+     merchandiser's task, so the very case that matters most - a poster
+     published to everyone before there was anybody - handed the first hire a
+     blank overlay. sync-posters reads campaigns.artwork_path and falls back to
+     listing the bucket. */
 
-      const { data: madeTask, error: tErr } = await admin.from("tasks").insert({
-        task_code: "MK-" + String(c.id).replace(/-/g, "").slice(0, 6).toUpperCase()
-                 + "-" + created.user.id.replace(/-/g, "").slice(0, 6).toUpperCase(),
-        campaign_id: c.id, store_id: storeId,
-        assignee_id: created.user.id, manager_id: me.id, created_by: me.id,
-        display_type: "In-shop Branding",
-        width_ft: c.poster_w_ft, height_ft: c.poster_h_ft,
-        standoff_ft: c.standoff_ft, standoff_tol_ft: c.standoff_tol_ft,
-        angle_tol_deg: c.angle_tol_deg,
-        instructions: "Mock this poster up on a clear wall.",
-        status: "In Progress",
-      }).select("id").single();
-      if (tErr) { provisionFailed.push({ poster: c.name, why: tErr.message }); continue; }
-
-      /* Carry the artwork across from any task that already has it, so the new
-         person sees the same key visual rather than a blank overlay. */
-      const { data: art } = await admin.from("task_images")
-        .select("storage_path").eq("kind", "poster")
-        .in("task_id", (await admin.from("tasks").select("id").eq("campaign_id", c.id))
-              .data?.map((t: { id: string }) => t.id) || [])
-        .limit(1).maybeSingle();
-      if (art?.storage_path) {
-        await admin.from("task_images").insert({
-          task_id: madeTask.id, kind: "poster",
-          bucket_id: "poster-artwork", storage_path: art.storage_path,
-          is_guided: false, captured_at: new Date().toISOString(), uploaded_by: me.id,
-        });
-      }
-      provisioned.push(c.name);
-    } catch (e) {
-      provisionFailed.push({ poster: c.name, why: (e as Error)?.message || "unknown" });
-    }
-  }
-
-  return reply(200, { profile, posters: provisioned, posterFailures: provisionFailed });
+  return reply(200, { profile });
 });

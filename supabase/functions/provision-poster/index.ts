@@ -105,7 +105,21 @@ Deno.serve(async (req) => {
   } else {
     targets = Array.isArray(body.merchandiserIds) ? body.merchandiserIds.map(String) : [];
   }
-  if (!targets.length) return reply(400, { error: "Nobody was selected for this poster." });
+  /* NOBODY YET IS NOT A FAILURE WHEN THE AUDIENCE IS "EVERYONE".
+     The campaign row is saved and audience_all is true, so the standing rule
+     is intact and complete: the first merchandiser created after this gets the
+     poster, and so does every one after them. Answering 400 here made the app
+     say "The poster was saved but not handed out. Publish it again." - which
+     is false, invites a manager to publish a second copy of the same poster,
+     and directly contradicts what the Posters screen promises three lines
+     above the button.
+
+     Ticking a list of names and ticking nobody IS still a mistake, because
+     there is no rule left over to catch anyone later. That case keeps the 400. */
+  if (!targets.length) {
+    if (body.all === true) return reply(200, { provisioned: 0, failed: [], campaignId });
+    return reply(400, { error: "Nobody was selected for this poster." });
+  }
 
   const provisioned: string[] = [];
   const failed: { id: string; why: string }[] = [];

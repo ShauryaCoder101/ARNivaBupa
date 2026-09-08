@@ -199,6 +199,12 @@ main#app{padding:20px 22px 60px;flex:1;min-width:0}
 .gate pre{background:var(--surface-3);border:1px solid var(--border);border-radius:var(--r);
   padding:11px 12px;font-family:var(--mono);font-size:11.5px;overflow:auto;margin:8px 0;color:var(--text)}
 .gate .panel.wide{max-width:640px}
+
+.gate .ok{margin:0 0 13px;padding:9px 11px;border-radius:var(--r);background:var(--st-approved-bg);
+  color:var(--st-approved);font-size:12.5px;line-height:1.45}
+.gate .altrow{margin-top:14px;font-size:12.5px;color:var(--text-2);text-align:center}
+.gate .linkish{background:none;border:0;padding:0;font:inherit;font-weight:600;color:var(--accent);cursor:pointer}
+.gate .linkish:hover{text-decoration:underline}
 .queuebanner{display:flex;gap:10px;align-items:flex-start;padding:11px 13px;border-radius:var(--r);
   background:var(--st-progress-bg);color:var(--st-progress);font-size:12.5px;line-height:1.5;margin-bottom:12px}
 .queuebanner.bad{background:var(--st-rework-bg);color:var(--st-rework)}
@@ -3306,13 +3312,23 @@ const Blobs = (function(){
 const PROFILE_COLS_CORE = "id,full_name,role,title,region,is_active";
 let PROFILE_HEIGHT_COL = true;
 let PROFILE_PHONE_COL  = true;
+/* `office_address` arrives with 0009_self_signup.sql and is optional for
+   exactly the same reason as the two above: it is asked for at sign-in, and a
+   project that has not applied 0009 must degrade to "we never asked where you
+   work" rather than to "nobody can sign in". */
+let PROFILE_OFFICE_COL = true;
+/* How many downgrades the sign-in read is allowed to survive. One per optional
+   column, because a database can be missing all of them at once. */
+const PROFILE_OPTIONAL_COLS = 3;
 function profileCols(){
   return PROFILE_COLS_CORE
-    + (PROFILE_HEIGHT_COL ? ",height_cm" : "")
-    + (PROFILE_PHONE_COL  ? ",phone"     : "");
+    + (PROFILE_HEIGHT_COL ? ",height_cm"      : "")
+    + (PROFILE_PHONE_COL  ? ",phone"          : "")
+    + (PROFILE_OFFICE_COL ? ",office_address" : "");
 }
 function profileHeightSupported(){ return PROFILE_HEIGHT_COL; }
 function profilePhoneSupported(){ return PROFILE_PHONE_COL; }
+function profileOfficeSupported(){ return PROFILE_OFFICE_COL; }
 /* True when this error is "that column is not there", and nothing else. A
    network failure, a 401 or an RLS-filtered empty result must NOT downgrade. */
 function profileColMissing(err, name){
@@ -3333,10 +3349,17 @@ function profilePhoneMissing(err){
   PROFILE_PHONE_COL = false;
   return true;
 }
+
+function profileOfficeMissing(err){
+  if(!PROFILE_OFFICE_COL) return false;
+  if(!profileColMissing(err, "office_address")) return false;
+  PROFILE_OFFICE_COL = false;
+  return true;
+}
 /* Either optional column going missing is recoverable in the same way, and the
    callers all want the same question answered: "should I just try again?" */
 function profileColRecovered(err){
-  return profileHeightMissing(err) || profilePhoneMissing(err);
+  return profileHeightMissing(err) || profilePhoneMissing(err) || profileOfficeMissing(err);
 }
 
 /* ==========================================================
@@ -3569,17 +3592,18 @@ const Session = (function(){
         persist();
         return profile;
       };
-      /* Two optional columns means up to two downgrades before the select is
-         one this project can answer — and this select runs AT SIGN-IN, so
-         giving up after one would lock every user out of a database missing
-         both migrations. */
-      return q(profileCols()).then(take, function(err){
-        if(!profileColRecovered(err)) throw err;
-        return q(profileCols()).then(take, function(err2){
-          if(!profileColRecovered(err2)) throw err2;
-          return q(profileCols()).then(take);
+      /* Each optional column is one more downgrade before the select is one
+         this project can answer — and this select runs AT SIGN-IN, so giving
+         up an attempt too early locks every user out of a database that is
+         merely a migration behind. A loop rather than another layer of
+         nesting, because the list has grown three times now. */
+      const attempt = function(left){
+        return q(profileCols()).then(take, function(err){
+          if(left <= 0 || !profileColRecovered(err)) throw err;
+          return attempt(left - 1);
         });
-      });
+      };
+      return attempt(PROFILE_OPTIONAL_COLS);
     },
 
     /* Merge a patch into the cached profile row. The ONLY caller is the height
@@ -4435,7 +4459,11 @@ function mapProfile(r){
            heightCm: (r.height_cm == null ? null : Number(r.height_cm)),
            /* 0007. A merchandiser always has one (it IS their login); a manager
               signing in with an email legitimately has none. */
-           phone: (r.phone == null ? null : String(r.phone)) };
+           phone: (r.phone == null ? null : String(r.phone)),
+           /* 0009. What they said when they created their account, and the
+              default the capture screen offers back. Empty for every account a
+              manager made, which is why the prompt still exists. */
+           office: (r.office_address == null ? "" : String(r.office_address)) };
 }
 function mapCampaign(r){
   return { id:r.id, code:r.code, name:r.name, brand:r.brand,
@@ -4753,7 +4781,20 @@ function taskInsertRow(t){
 let state = null;
 let view  = { name:"dashboard", params:{} };
 let ui    = { granularity:"Region", taskFilter:{q:"",status:"",region:"",campaign:""}, popOpen:null,
-              login:{ busy:false, error:"", email:"" },
+              /* ONE SCREEN, TWO STATES. `mode` is which of them is up and
+                 `form` is what was typed into the sign-up one, kept across the
+                 wholesale re-render that every error causes. The two password
+                 boxes are deliberately NOT kept here: a refusal is almost
+                 always about them, and re-offering a password somebody is
+                 about to change is how the same typo gets made twice. */
+              login:{ busy:false, error:"", ok:"", email:"", mode:"signin",
+                      form:{ name:"", phone:"", office:"" } },
+              /* The forgotten-password panel. Its own state and not a flag on
+                 `login`, because it is a different screen with a different
+                 form: `typed` is what is in the phone box, `digits` and `name`
+                 are what the server said about it, and both survive the
+                 re-render that every Session change triggers. */
+              reset:{ open:false, step:"phone", busy:false, error:"", typed:"", digits:"", name:"" },
               /* The manager's two screens. `accounts.form` survives a re-render
                  so a failed create does not also lose what was typed. */
               accounts:{ busy:false, error:"", ok:"", form:{ name:"", phone:"", pw:"" } },
@@ -4775,7 +4816,9 @@ const me = function(){
   const p = Session.profile();
   if(!p) return { id:null, name:"Not signed in", role:null, title:"" };
   return { id:p.id, name:p.full_name || p.name || p.id, role:p.role, title:p.title || "",
-           phone: p.phone || null };
+           phone: p.phone || null,
+           /* 0009 — stated once at sign-up, and never asked for again. */
+           office: p.office_address || "" };
 };
 const myRole = function(){ const p = Session.profile(); return p ? p.role : null; };
 const signedIn = function(){ return SB_CONFIGURED && !!Session.profile() && Session.state !== "signedout"; };
@@ -11710,10 +11753,46 @@ function arcComposite(source, srcW, srcH, intr, g, tierKey, geo, nudgeNorm, capt
   if(ARC.posterImg){
     x.save(); x.globalAlpha = 0.85; arcDrawQuadImage(x, ARC.posterImg, q); x.restore();
   }
-  arcDrawQuadChrome(x, q,
-    t.widthFt.toFixed(1)+" ft × "+t.heightFt.toFixed(1)+" ft @ "+g.distance.toFixed(1)+" ft", "#2dd4bf");
+  /* The size-and-distance chip is a survey annotation: it lets a reviewer see
+     that the poster was drawn at the brief's dimensions from the measured
+     standoff. A client looking at a proposed poster is not auditing anything,
+     and a caption stapled under the artwork is the first thing they notice, so
+     mockup mode draws the outline and corner ticks with no text at all. The
+     chip is skipped, not blanked — arcDrawQuadChrome guards it with if(caption)
+     — so nothing is left behind. This runs before `clean` is rasterised, which
+     is what we want: neither JPEG should carry it. */
+  arcDrawQuadChrome(x, q, byMode(null,
+    t.widthFt.toFixed(1)+" ft × "+t.heightFt.toFixed(1)+" ft @ "+g.distance.toFixed(1)+" ft"), "#2dd4bf");
 
   const clean = c.toDataURL("image/jpeg", 0.62);
+
+  /* WHAT GETS BURNED INTO THE PIXELS, PER MODE
+     ------------------------------------------------------------
+     VERIFICATION keeps the full four-line stamp below, and must: the JPEG is
+     the evidence, and a reviewer holding nothing but the file has to be able to
+     read the tier, the store, the GPS fix and geofence verdict, and the
+     distance / tilt / roll / yaw off the image itself. Do not reduce it.
+
+     MOCKUP is shown to somebody deciding whether they like a poster on their
+     wall. Every survey number is noise to that reader, and there was a lot of
+     it — four lines, filling the bottom of the picture they actually asked
+     for. So the mockup stamp carries the two facts that make the image mean
+     something later and nothing else: WHERE it was shot and WHEN.
+
+     Two lines instead of four also buys back the space. arcFooter sizes the
+     band as rowH*lines.length + pad*2, so the strip shrinks with the content
+     rather than leaving a hollow margin under the text.
+
+     The date is fmtDT, not the raw ISO string the verification stamp uses —
+     "8 Sep 2026, 14:32" is what every other screen calls this photo, and a
+     timestamp nobody in the field can read at a glance is not a timestamp. */
+  if(MOCKUP){
+    arcFooter(x, d.w, d.h, [
+      geo.office || "Location not stated",
+      fmtDT(new Date().toISOString())
+    ], "#5eead4");
+    return { stamped: c.toDataURL("image/jpeg", 0.7), clean: clean };
+  }
 
   const tm = tierMeta(tierKey);
   const n1 = v => (v==null||!isFinite(v)) ? "—" : Number(v).toFixed(1);
@@ -11770,8 +11849,19 @@ function officeList(){
   try{ const a = JSON.parse(localStorage.getItem(OFFICE_KEY) || "[]"); return Array.isArray(a) ? a : []; }
   catch(e){ return []; }
 }
+/* THE DEFAULT OFFICE, in order of how much it knows. The last office typed on
+   THIS phone wins, because it is where the person was most recently standing.
+   Failing that, the address they gave when they created their account (0009):
+   they have already answered this question once and being asked it again on
+   their first photograph is exactly the kind of thing that teaches people to
+   dismiss the dialog. Managers have no office_address and never see it. */
 function officeLast(){
-  try{ return localStorage.getItem(OFFICE_LAST_KEY) || ""; }catch(e){ return ""; }
+  try{
+    const last = localStorage.getItem(OFFICE_LAST_KEY);
+    if(last) return last;
+  }catch(e){}
+  const p = Session.profile();
+  return (p && p.office_address) ? String(p.office_address) : "";
 }
 function officeRemember(name){
   const n = String(name || "").trim();
@@ -12262,9 +12352,16 @@ function arcFinishCapture(source, w, h, intr, g, tierKey, nudgeNorm, captureMode
 }
 function arcReviewPanel(){
   const c = ARC.capture, t = ARC.task, p = c.rec;
-  arcPanel('<h2>' + (p.pass ? "Placement verified" : "Capture recorded — gates not met") + '</h2>'
+  arcPanel('<h2>' + byMode("Here is the mockup",
+                            (p.pass ? "Placement verified" : "Capture recorded — gates not met")) + '</h2>'
     + '<div class="shot" style="margin-bottom:12px"><img alt="composited capture" src="'+c.imgs.stamped+'"></div>'
-    + placementBlock(p, t)
+    /* placementBlock is the survey read-out — tier badge, distance against
+       target, delta, tilt, roll, yaw. It is the point of the verification
+       product and it is noise here: a merchandiser who has just taken a
+       picture of a wall is deciding whether the picture is good, and none of
+       those numbers help them decide that. The measurement is still recorded
+       on the placement row; it is simply not narrated back at them. */
+    + byMode('', placementBlock(p, t))
     /* MOCKUP has no registered store to be near, so a geofence verdict would be
        measuring against nothing. What matters is where they said they were and
        whether the phone agreed. */
@@ -13577,6 +13674,22 @@ function doPublishPoster(toEveryone){
     artPath = "campaigns/" + campaignId + "/" + uuid4() + ".jpg";
     return Storage.upload("poster-artwork", artPath, P.art.src, "image/jpeg");
   }).then(function(){
+    /* A FOURTH WRITE, AND IT IS ALLOWED TO FAIL.
+       Until 0009 the only record of where a poster's artwork lived was the
+       task_images rows hanging off the tasks it had been handed to — which is
+       no record at all on the day a poster is published to everyone and there
+       is nobody to hand it to. campaigns.artwork_path is the pointer, so the
+       first merchandiser hired afterwards gets the poster WITH its key visual
+       instead of a blank overlay.
+
+       Deliberately not part of the promise chain. A project that has not
+       applied 0009 answers 400 "column campaigns.artwork_path does not exist",
+       and one absent column must not turn a published poster into a failed
+       one — sync-posters still finds the object by listing the bucket, which
+       is laid out campaigns/<id>/<uuid>.jpg precisely so it can. */
+    REST.patch("campaigns", "id=eq." + encodeURIComponent(campaignId),
+               { artwork_path: artPath })
+      .catch(function(){});
     return sbRequest("/functions/v1/provision-poster", {
       method: "POST", timeout: 30000,
       body: toEveryone
@@ -13673,10 +13786,31 @@ function doCreateMerchandiser(){
     /* Seed the local list immediately rather than waiting for the next prime:
        the manager is about to read the number back to somebody. */
     if(!USERS.filter(function(u){ return u.id === p.id; }).length) USERS.push(mapProfile(p));
-    A.ok = A.form.name + " can now sign in with " + phonePretty(digits)
+    const who = A.form.name;
+    const said = who + " can now sign in with " + phonePretty(digits)
          + " and the password you set. Pass both on before you leave this screen.";
+    A.ok = said;
     A.form = { name:"", phone:"", pw:"" };
     save(); render();
+    /* Hand them the posters published to everyone NOW, so the Posters screen's
+       "Who has it" column is right while the manager is still looking at it.
+       This is an optimisation and nothing rests on it: the identical call runs
+       at this person's first sign-in, and sync-posters is idempotent, so the
+       two cannot double up. Its failure is therefore NOT reported — telling a
+       manager "the account was made but one poster did not arrive" would
+       invite them to redo something that fixes itself, and the account, which
+       is the part that cannot be redone, is already safely made. */
+    syncPosters({ merchandiserId: p.id }).then(function(r){
+      if(!r || !r.provisioned) return;
+      /* Only if the manager has not moved on and started another account. */
+      if(A.ok === said)
+        A.ok = who + " can now sign in with " + phonePretty(digits)
+             + " and the password you set, and already has " + r.provisioned
+             + " poster" + (r.provisioned === 1 ? "" : "s")
+             + " published to everyone. Pass the number and password on before "
+             + "you leave this screen.";
+      Repo.prime().then(function(){ render(); }, function(){ render(); });
+    });
   }, function(err){
     A.busy = false;
     /* The function answers 401/403/409/400 with a sentence meant for a manager;
@@ -15106,6 +15240,52 @@ function runSelfTest(){
     T("login: every refusal carries something to act on",
       ["", "98765", "abc"].every(function(s){
         const r = loginIdentity(s); return !r.ok && r.why && r.why.length > 15; }), true);
+
+    /* --- forgotten password: phone number only, by design. The panel's own
+       rule is the whole of what it checks before the round trip. --- */
+    T("reset: a short password is refused before the round trip",
+      !!resetPwProblem("short1", "short1"), true);
+    T("reset: a mismatch is refused, and says which",
+      resetPwProblem("longenough1", "longenough2"), "The two passwords do not match.", 0);
+    T("reset: eight matching characters is the whole of the rule",
+      resetPwProblem("abcd1234", "abcd1234"), null, null,
+      "the same floor create-merchandiser enforces server-side");
+    T("reset: the account it signs into is the one it just changed",
+      phoneToEmail("098765 43210"), CANON + "@" + PHONE_EMAIL_DOMAIN, 0,
+      "reset and sign-in must derive the address the same way or neither works");
+
+    /* CREATING YOUR OWN ACCOUNT. The confirm box is the one refusal that is
+       entirely ours — the Edge Function re-checks everything else, but "these
+       two do not match" is a fact about typing and has to be caught where the
+       typing happened. The phone must normalise here exactly as it does in the
+       sign-in box, or a person signs up under one address and signs in against
+       another. */
+    const SU = { name:"Aditya Kulkarni", phone:"98765 43210",
+                 office:"Andheri East branch", pw:"correcthorse", pw2:"correcthorse" };
+    const su = function(over){ return signupCheck(Object.assign({}, SU, over || {})); };
+    T("signup: a complete form is accepted", su().ok, true);
+    T("signup: …and normalises the phone exactly as the login box does",
+      su().phone, CANON, 0);
+    T("signup: …and derives the same synthetic address it will sign in against",
+      su().email, phoneToEmail(SU.phone), 0);
+    T("signup: a mismatched confirmation is refused BEFORE a round trip",
+      su({ pw2:"correcthorse " }).ok, false, null,
+      "a trailing space is a password nobody can retype");
+    T("signup: a short password is refused here, not by GoTrue",
+      su({ pw:"abc123", pw2:"abc123" }).ok, false);
+    T("signup: the office is required — every photo is filed under it",
+      su({ office:"  " }).ok, false);
+    T("signup: a mistyped number is refused", su({ phone:"98765" }).ok, false);
+    T("signup: a nameless account is refused", su({ name:"A" }).ok, false);
+    T("signup: every refusal carries something to act on",
+      [{pw2:"x"}, {phone:"1"}, {office:""}, {name:""}, {pw:"short",pw2:"short"}]
+        .every(function(o){ const r = su(o); return !r.ok && r.why && r.why.length > 15; }), true);
+    /* THE ROLE IS NOT ON THIS FORM AND MUST NOT BE IN WHAT IT SENDS. 0009
+       refuses one server-side as well; this pins that the client never offers
+       the question in the first place. */
+    T("signup: nothing the form produces can carry a role",
+      Object.keys(su({ role:"Admin" })).indexOf("role"), -1, 0,
+      "the Edge Function hard-codes Merchandiser; this is the client half");
   })();
 
   /* --- WHERE THE PHOTO WAS TAKEN ---
@@ -15208,12 +15388,38 @@ function renderGate(){
   const el = gateEl();
   if(!el) return;
   if(!SB_CONFIGURED){ el.innerHTML = setupPanelHTML(); return; }
+  /* The reset panel replaces the login panel outright, in both the signed-out
+     and the expired case — a merchandiser whose session died and whose
+     password has gone with it needs exactly this screen. Guarded on
+     Session.state rather than signedIn(), which is TRUE while expired. */
+  if(ui.reset.open && Session.state !== "ready"){ el.innerHTML = resetPanelHTML(); focusReset(); return; }
   if(Session.state === "expired"){ el.innerHTML = loginPanelHTML(true); focusLogin(); return; }
-  if(!signedIn()){ el.innerHTML = loginPanelHTML(false); focusLogin(); return; }
+  /* Sign-up is a STATE OF THE GATE, not a view: nothing is signed in, so there
+     is no navigation to push and nothing for a back button to undo. An expired
+     session never offers it — that person has an account. */
+  if(!signedIn()){
+    el.innerHTML = (ui.login.mode === "signup") ? signupPanelHTML() : loginPanelHTML(false);
+    focusLogin(); return;
+  }
   el.innerHTML = "";
 }
+function focusReset(){
+  const f = (ui.reset.step === "phone") ? $("#rs_phone") : $("#rs_pw");
+  if(f && document.activeElement !== f){ try{ f.focus(); }catch(e){} }
+}
 function focusLogin(){
-  const f = $("#lg_id") && !$("#lg_id").value ? $("#lg_id") : $("#lg_pw");
+  /* First empty field, else the last one — which on the sign-in panel is the
+     same rule as before (an empty number, otherwise the password) and on the
+     sign-up panel picks up wherever a failed attempt left off. */
+  const ids = (ui.login.mode === "signup")
+    ? ["su_name", "su_phone", "su_office", "su_pw", "su_pw2"]
+    : ["lg_id", "lg_pw"];
+  let f = null;
+  for(let i = 0; i < ids.length && !f; i++){
+    const el = $("#" + ids[i]);
+    if(el && !el.value) f = el;
+  }
+  if(!f) f = $("#" + ids[ids.length - 1]);
   if(f && document.activeElement !== f){ try{ f.focus(); }catch(e){} }
 }
 
@@ -15252,6 +15458,11 @@ function loginPanelHTML(expired){
           + 'and syncing resumes as soon as you sign back in.</p>'
         : '<p class="sub">Sign in with your NIVA account. Your role and what you can see are decided by the server, not by this app.</p>')
     + (L.error ? '<div class="err">' + esc(L.error) + '</div>' : '')
+    /* Not an error. The only thing that says this is a sign-up whose account
+       was made but whose automatic sign-in did not land, and telling that
+       person something went wrong would send them off to create a second
+       account on a number that now has one. */
+    + (L.ok ? '<div class="ok">' + esc(L.ok) + '</div>' : '')
     /* ONE FIELD, not a mode switch. A merchandiser types the phone number they
        already know; a manager types the work email they already have; the form
        decides by looking for an "@" and neither has to be told which kind of
@@ -15271,14 +15482,211 @@ function loginPanelHTML(expired){
     + '<button class="btn primary" type="submit" style="width:100%;justify-content:center" '
     + (L.busy ? 'disabled' : '') + '>' + (L.busy ? "Signing in…" : (expired ? "Sign in and resume" : "Sign in")) + '</button>'
     + '</form>'
+    /* OUTSIDE the form on purpose: inside it, Enter on the password box could
+       reach it before the submit button on some browsers, and a person trying
+       to sign in would land on the reset screen instead. */
+    + '<button class="btn ghost sm" data-act="forgotpw" style="width:100%;justify-content:center;margin-top:8px">'
+    + 'Forgot password?</button>'
     + (expired ? '<button class="btn ghost sm" data-act="signout" style="width:100%;justify-content:center;margin-top:8px">'
                  + 'Sign out and keep queued work on this device</button>' : '')
+
+    /* CREATE AN ACCOUNT. Deliberately a link under the form rather than a
+       second form beside it: almost everybody who reaches this screen already
+       has an account, and two sets of fields competing for one phone number is
+       how a person ends up with two. Never offered on the expired panel — that
+       person has an account, and it is the one they are looking at. */
+    + (expired ? ''
+        : '<div class="altrow">New here? '
+          + '<button type="button" class="linkish" data-act="gosignup">Create an account</button></div>')
     + '<div class="note">' + (netUp()
         ? 'Signing in needs a connection. Once you are in, the app keeps working without one.'
         : '<b>This device is offline.</b> Signing in needs a connection — reconnect and try again.')
       + '</div>'
     + '</div></div>';
 }
+
+/* ==========================================================
+   14d. CREATING YOUR OWN ACCOUNT
+   ------------------------------------------------------------
+   A person can sign themselves up, and what they get is a MERCHANDISER. There
+   is no role on this form, no role in what it posts, and no role anywhere in
+   the function behind it — 'Merchandiser' is a constant in
+   supabase/functions/signup-merchandiser/index.ts.
+
+   WHY THIS DOES NOT CALL supabase.auth.signUp(). GoTrue's public
+   /auth/v1/signup copies its `data` object into raw_user_meta_data verbatim,
+   and 0004's niva_handle_new_user read the new profile's ROLE straight back
+   out of that column. The anon key authorising that call is in this file, in
+   plain text, by design. A sign-up form built on signUp() would therefore be a
+   form on which anyone could post {"role":"Admin"} and be an administrator.
+   So the form posts to an Edge Function holding the service role instead, and
+   0009_self_signup.sql closes the endpoint behind it by refusing to honour any
+   role from user metadata except 'Merchandiser'.
+
+   FIVE FIELDS AND NO MORE. No email — the phone number is the login (2c). The
+   office address is asked HERE precisely so the capture screen does not ask a
+   second time: it lands on profiles.office_address and officeLast() offers it
+   back as the default on the first photograph.
+   ========================================================== */
+
+/* Everything refusable without a round trip, in one pure function so the
+   self-tests can pin it. The confirm box is the only check here that the
+   server does NOT repeat, and deliberately so: a mistyped confirmation is a
+   fact about typing, not about the database. */
+function signupCheck(f){
+  const name   = String((f && f.name)   || "").trim();
+  const office = String((f && f.office) || "").trim();
+  const pw     = String((f && f.pw)     || "");
+  const pw2    = String((f && f.pw2)    || "");
+  const digits = phoneDigits(f && f.phone);
+  if(name.length < 2)
+    return { ok:false, why:"Enter your full name — your manager sees it next to your photographs." };
+  if(!digits)
+    return { ok:false, why:"That does not look like a " + PHONE_NSN_LEN + "-digit phone number. It is how you will sign in." };
+  if(office.length < 2)
+    return { ok:false, why:"Enter the office you work out of. Your photographs are filed under it." };
+  if(office.length > 200)
+    return { ok:false, why:"Keep the office address under 200 characters." };
+  if(pw.length < 8)
+    return { ok:false, why:"Choose a password of at least 8 characters." };
+  if(pw.length > 72)
+    return { ok:false, why:"That password is too long — 72 characters is the limit." };
+  if(pw !== pw2)
+    return { ok:false, why:"The two passwords do not match. Type both again." };
+  /* No role key, and there never is one: see the block comment above. */
+  return { ok:true, name:name, phone:digits, office:office,
+           password:pw, email:phoneToEmail(digits) };
+}
+
+function signupPanelHTML(){
+  const L = ui.login, F = L.form;
+  return '<div class="gate"><div class="panel">'
+    + '<div class="brandrow">' + NIVA_LOGO
+    + '<div><h1>Create your account</h1></div></div>'
+    + '<p class="sub">' + byMode(
+        "For merchandisers. You sign in with your phone number — there is no email and nothing to activate — and every poster that is open to everyone is waiting the moment you are in.",
+        "For merchandisers. You sign in with your phone number — there is no email and nothing to activate — and every execution open to everyone is assigned the moment you are in.")
+      + '</p>'
+    + (L.error ? '<div class="err">' + esc(L.error) + '</div>' : '')
+    + '<form id="signupform" autocomplete="on">'
+    + '<div class="fieldrow"><label for="su_name">Full name</label>'
+    + '<input id="su_name" name="name" type="text" autocomplete="name" '
+    + 'placeholder="Aditya Kulkarni" value="' + esc(F.name) + '"></div>'
+    + '<div class="fieldrow"><label for="su_phone">Phone number</label>'
+    + '<input id="su_phone" name="username" type="tel" inputmode="tel" autocomplete="username" '
+    + 'spellcheck="false" placeholder="98765 43210" value="' + esc(F.phone) + '"></div>'
+    /* ASKED ONCE, HERE. This is the address the capture screen pre-fills, so
+       the first photograph does not open with a question this person has
+       already answered. Each photo still records where it was actually taken. */
+    + '<div class="fieldrow"><label for="su_office">Office address</label>'
+    + '<input id="su_office" name="street-address" type="text" autocomplete="street-address" '
+    + 'placeholder="Andheri East branch, Mumbai" value="' + esc(F.office) + '"></div>'
+    /* Masked, and NOT re-emitted on a re-render, unlike the three above: a
+       refusal here is nearly always about these two boxes, and handing back a
+       password somebody is about to retype is how the same typo happens twice.
+       (The manager's own create form shows its password in the clear because
+       they have to read it out; nobody reads this one to anybody.) */
+    + '<div class="fieldrow"><label for="su_pw">Password</label>'
+    + '<input id="su_pw" name="password" type="password" autocomplete="new-password" '
+    + 'placeholder="at least 8 characters"></div>'
+    + '<div class="fieldrow"><label for="su_pw2">Confirm password</label>'
+    + '<input id="su_pw2" name="password2" type="password" autocomplete="new-password"></div>'
+    + '<button class="btn primary" type="submit" style="width:100%;justify-content:center" '
+    + (L.busy ? 'disabled' : '') + '>'
+    + (L.busy ? "Creating your account…" : "Create account") + '</button>'
+    + '</form>'
+    + '<div class="altrow">Already have an account? '
+    + '<button type="button" class="linkish" data-act="gosignin">Sign in</button></div>'
+    + '<div class="note">' + (netUp()
+        ? 'This is the only screen that needs a connection. Once you are in, the app keeps working without one.'
+        : '<b>This device is offline.</b> Creating an account needs a connection — reconnect and try again.')
+      + '</div>'
+    + '</div></div>';
+}
+
+function doSignUp(){
+  const L = ui.login;
+  if(L.busy) return;
+  const g = function(id){ const el = $("#" + id); return el ? String(el.value) : ""; };
+  /* Name, phone and office survive the re-render; the passwords do not. */
+  L.form = { name:g("su_name").trim(), phone:g("su_phone").trim(), office:g("su_office").trim() };
+
+  const chk = signupCheck({ name:L.form.name, phone:L.form.phone, office:L.form.office,
+                            pw:g("su_pw"), pw2:g("su_pw2") });
+  if(!chk.ok){ L.error = chk.why; L.ok = ""; renderGate(); return; }
+  if(!netUp()){
+    L.error = "Creating an account needs a connection. Reconnect and try again — nothing else on this phone does.";
+    renderGate(); return;
+  }
+
+  L.busy = true; L.error = ""; L.ok = ""; renderGate();
+
+  /* token:null. This endpoint is deployed with verify_jwt OFF and there is by
+     definition no session yet; the function reads no identity from the caller
+     at all, so sending a stale Authorization header from whoever used this
+     phone last would prove nothing and only muddy its logs. */
+  sbRequest("/functions/v1/signup-merchandiser", {
+    method: "POST", token: null, timeout: 25000,
+    body: { name: chk.name, phone: chk.phone, office: chk.office, password: chk.password }
+  }).then(function(r){
+    const p = r.body && r.body.profile;
+    if(!p){
+      L.busy = false;
+      L.error = "The server did not say what it created. Try signing in before trying again.";
+      renderGate(); return;
+    }
+    /* STRAIGHT IN. The password was typed twice thirty seconds ago; asking for
+       it a third time to reach the app they just made an account for is a step
+       with nothing behind it. */
+    return Session.signIn(chk.email, chk.password).then(function(){
+      L.busy = false; L.error = ""; L.ok = ""; L.email = "";
+      L.mode = "signin"; L.form = { name:"", phone:"", office:"" };
+      afterSignIn();
+      const n = (r.body.posters && r.body.posters.length) || 0;
+      if(n) toast(n + (n === 1 ? " poster is" : " posters are") + " waiting for you.");
+    }, function(){
+      /* THE ACCOUNT EXISTS. Only the sign-in that followed it failed, and
+         saying "sign-up failed" here would send this person back to make a
+         second account on a number that now has one. Hand them the sign-in
+         panel with their number already in it. */
+      L.busy = false; L.mode = "signin"; L.error = "";
+      L.ok = "Your account is ready. Sign in with " + phonePretty(chk.phone)
+           + " and the password you just chose.";
+      L.email = phonePretty(chk.phone);
+      L.form = { name:"", phone:"", office:"" };
+      renderGate();
+    });
+  }, function(err){
+    L.busy = false;
+    L.error = signupMessage(err);
+    renderGate();
+    if(window.console && console.warn)
+      console.warn("[NIVA] signup-merchandiser failed",
+                   { status: err && err.status, kind: err && err.kind,
+                     code: err && err.code, message: L.error });
+  });
+}
+
+/* The function answers with a sentence meant for the person holding the phone;
+   everything else here is a network fact and is told as one. The timeout case
+   is worded carefully on purpose: a request that never came back may well have
+   created the account, and "try again" would be advice to make a second one. */
+function signupMessage(err){
+  if(err && err.kind === "offline")
+    return "Could not reach the server. Check your connection and try again.";
+  if(err && err.kind === "timeout")
+    return "The server did not answer in time. Your account may still have been created — try signing in before you try this again.";
+  if(err && err.kind === "config")
+    return "This build has no Supabase project configured.";
+  if(err && err.status === 404)
+    return "This project has no sign-up function deployed. Ask your manager to create the account for you.";
+  if(err && err.status === 409)
+    return ((err.message || "That number already has an account.") + " Sign in instead, or check the number you typed.");
+  if(err && err.status === 429)
+    return "Too many attempts. Wait a minute and try again.";
+  return (err && err.message) ? err.message : "Could not create the account.";
+}
+
 
 function doSignIn(){
   const L = ui.login;
@@ -15342,6 +15750,266 @@ function signInMessage(err, kind){
   return (err && err.message) ? err.message : "Sign-in failed.";
 }
 
+/* ---- the standing rule, applied ----
+   "Publish to everyone" is a rule about PEOPLE WHO DO NOT EXIST YET, which is
+   why it is a column on the poster and not a list of names (0008). Publishing
+   applies it to whoever exists that minute; this applies it to whoever is
+   holding the phone.
+
+   RUN AT EVERY SIGN-IN, NOT ONLY WHEN AN ACCOUNT IS MADE. Creation is one
+   moment and a moment can fail — a dropped connection, a poster published
+   thirty seconds later, an account made by a self-signup form, an account made
+   by a build deployed before 0008 existed, an account switched off on the day
+   a poster went out and switched back on the week after. Every one of those
+   leaves somebody who can sign in and will never see a poster their colleagues
+   have, with nothing in the app that notices. Sign-in happens again tomorrow,
+   so that is where the repair belongs.
+
+   FREE WHEN THERE IS NOTHING TO DO. The server reads before it writes at every
+   level — one synthetic store per person, one task per (poster x person),
+   tasks unique on (campaign_id, store_id) — so the ordinary sign-in provisions
+   nothing and answers zero.
+
+   SILENT WHEN IT FAILS, on purpose. The person has just signed in and is
+   looking at their task list; a red banner about a poster they have never
+   heard of names nothing they can act on, and the next sign-in tries again.
+   Managers get the same treatment for the same reason.
+
+   MOCKUP ONLY. Posters and audience_all are a mockup-mode idea; a verification
+   build has no standing rule to reconcile and must not start making a request
+   per sign-in to find that out. */
+function syncPosters(body){
+  if(!MOCKUP || !SB_CONFIGURED || !netUp() || Session.state !== "ready")
+    return Promise.resolve(null);
+  return sbRequest("/functions/v1/sync-posters", {
+    method: "POST", timeout: 20000, body: body || {}
+  }).then(function(r){
+    return (r && r.body) || null;
+  }, function(err){
+    if(window.console && console.warn)
+      console.warn("[NIVA] sync-posters failed",
+                   { status: err && err.status, kind: err && err.kind,
+                     message: (err && err.message) || errText(err) });
+    return null;
+  });
+}
+
+
+/* ---- forgotten password ----
+   PHONE NUMBER ONLY. No one-time code, no email, no question: the programme
+   asked for exactly this and reaffirmed it. A merchandiser who cannot get in
+   is a merchandiser who does not work that day, and the account holds photos
+   of walls. The consequence — anyone holding the number can take the account —
+   is understood and accepted. If that ever stops being true, the place to add
+   a check is supabase/functions/reset-merchandiser-password/index.ts, where
+   the note in `set` mode spells out the one-line version.
+
+   NOTHING HERE GOES THROUGH THE OUTBOX, for the same reason account creation
+   does not: it needs the service role, which only the Edge Function holds, so
+   a queued copy could do nothing but sit on the device holding a plaintext
+   password. If it cannot be done now, it is not done, and the person is told. */
+
+/* The only rule this panel enforces on its own, said once so the form and the
+   self-tests cannot drift. 8 is the programme's floor — the same number
+   create-merchandiser enforces server-side, so a password a manager could hand
+   out is a password a merchandiser can choose. */
+const RESET_PW_MIN = 8;
+function resetPwProblem(pw, again){
+  pw    = String(pw == null ? "" : pw);
+  again = String(again == null ? "" : again);
+  if(pw.length < RESET_PW_MIN) return "The new password must be at least " + RESET_PW_MIN + " characters.";
+  if(pw !== again)             return "The two passwords do not match.";
+  return null;
+}
+
+/* The gate's second panel. Deliberately NOT a mode switch on the login form: a
+   person who has forgotten their password is not signing in, and sharing one
+   form would leave a stale password box on screen while they type a number
+   into it. Two steps, one panel, one <form> so Enter works on both. */
+function resetPanelHTML(){
+  const R = ui.reset;
+  const asking = (R.step === "phone");
+  return '<div class="gate"><div class="panel">'
+    + '<div class="brandrow">' + NIVA_LOGO
+    + '<div><h1>' + (asking ? "Forgot your password" : "Set a new password") + '</h1></div></div>'
+    + (asking
+        ? '<p class="sub">Type the phone number your account is registered under. '
+          + 'If it is registered, you can set a new password here and now.</p>'
+        : '<p class="sub">Found <b>' + esc(R.name || "that account") + '</b> on <b>'
+          + esc(phonePretty(R.digits)) + '</b>. Choose a new password — you will be signed in with it.</p>')
+    + (R.error ? '<div class="err">' + esc(R.error) + '</div>' : '')
+    + '<form id="resetform" autocomplete="on">'
+    + (asking
+        ? '<div class="fieldrow"><label for="rs_phone">Phone number</label>'
+          + '<input id="rs_phone" name="username" type="tel" autocomplete="username" spellcheck="false" '
+          + 'inputmode="tel" placeholder="98765 43210" value="' + esc(R.typed) + '"></div>'
+        /* The number is repeated, hidden, on the password step so a password
+           manager files the new password against the right account instead of
+           offering it back later as an orphan with no username. */
+        : '<input type="text" name="username" autocomplete="username" readonly '
+          + 'style="display:none" value="' + esc(R.digits) + '">'
+          + '<div class="fieldrow"><label for="rs_pw">New password</label>'
+          + '<input id="rs_pw" name="new-password" type="password" autocomplete="new-password"></div>'
+          + '<div class="fieldrow"><label for="rs_pw2">New password again</label>'
+          + '<input id="rs_pw2" type="password" autocomplete="new-password"></div>')
+    + '<button class="btn primary" type="submit" style="width:100%;justify-content:center" '
+    + (R.busy ? 'disabled' : '') + '>'
+    + (R.busy ? (asking ? "Checking…" : "Setting…")
+              : (asking ? "Continue" : "Set password and sign in")) + '</button>'
+    + '</form>'
+    + '<button class="btn ghost sm" data-act="resetback" style="width:100%;justify-content:center;margin-top:8px">'
+    + 'Back to sign in</button>'
+    + '<div class="note">' + (netUp()
+        ? 'Changing a password needs a connection. It takes effect immediately, on every device.'
+        : '<b>This device is offline.</b> Changing a password needs a connection — reconnect and try again.')
+      + '</div>'
+    + '</div></div>';
+}
+
+function doForgotOpen(){
+  /* Carry across whatever was already in the login box: nine times out of ten
+     it is the number they are about to type again. */
+  ui.reset = { open:true, step:"phone", busy:false, error:"",
+               typed: String(ui.login.email || ""), digits:"", name:"" };
+  ui.login.error = "";
+  renderGate();
+}
+function doForgotClose(){
+  ui.reset = { open:false, step:"phone", busy:false, error:"", typed:"", digits:"", name:"" };
+  renderGate();
+}
+/* One submit handler, two steps. */
+function doForgotSubmit(){
+  if(ui.reset.busy) return;
+  if(ui.reset.step === "phone") doForgotLookup(); else doForgotSet();
+}
+
+/* Step 1 — is this number registered? `check` mode always answers 200, so
+   "no such number" arrives here as data and is said plainly rather than
+   surfacing as a failed request. */
+function doForgotLookup(){
+  const R = ui.reset;
+  R.typed = String((($("#rs_phone") || {}).value) || "").trim();
+  R.error = "";
+  const d = phoneDigits(R.typed);
+  /* Checked here as well as in the function, so a typo costs a keystroke
+     rather than a round trip. The function still validates. */
+  if(!d){ R.error = "Enter a " + PHONE_NSN_LEN + "-digit phone number."; renderGate(); return; }
+  if(!netUp()){
+    R.error = "Changing a password needs a connection. Reconnect and try again.";
+    renderGate(); return;
+  }
+  R.busy = true; renderGate();
+  /* token: SUPABASE_ANON, not the session token — there is no session, and the
+     platform's verify_jwt wants SOMETHING signed by this project in the
+     Authorization header. The anon key is exactly that and proves nothing
+     about who is calling, which is correct: the function's own checks are the
+     whole of the access control. */
+  sbRequest("/functions/v1/reset-merchandiser-password", {
+    method: "POST", timeout: 20000, token: SUPABASE_ANON,
+    body: { mode: "check", phone: d }
+  }).then(function(r){
+    const b = (r && r.body) || {};
+    R.busy = false;
+    if(!b.registered){
+      R.error = b.why || "That number is not registered. Check it with your manager.";
+      renderGate(); return;
+    }
+    R.digits = String(b.phone || d);
+    R.name   = String(b.name || "");
+    R.step   = "pw";
+    R.error  = "";
+    renderGate();
+  }, function(err){
+    R.busy = false;
+    R.error = forgotMessage(err);
+    if(window.console && console.warn)
+      console.warn("[NIVA] reset-merchandiser-password check failed",
+                   { status: err && err.status, kind: err && err.kind, message: R.error });
+    renderGate();
+  });
+}
+
+/* Step 2 — set it, then sign in with it. */
+function doForgotSet(){
+  const R = ui.reset;
+  const pw1 = String((($("#rs_pw")  || {}).value) || "");
+  const pw2 = String((($("#rs_pw2") || {}).value) || "");
+  R.error = "";
+  const bad = resetPwProblem(pw1, pw2);
+  if(bad){ R.error = bad; renderGate(); return; }
+  if(!netUp()){
+    R.error = "Changing a password needs a connection. Reconnect and try again.";
+    renderGate(); return;
+  }
+
+  /* Captured before the round trip: resetting from the EXPIRED screen can land
+     on a different account than the one whose queued work is on this device,
+     and that has to be said out loud — the outbox is tagged per user and will
+     not drain under the wrong identity. Same rule as doSignIn(). */
+  const resuming = Session.state === "expired";
+  const prevUid  = Session.userId();
+
+  R.busy = true; renderGate();
+  sbRequest("/functions/v1/reset-merchandiser-password", {
+    method: "POST", timeout: 20000, token: SUPABASE_ANON,
+    body: { mode: "set", phone: R.digits, password: pw1 }
+  }).then(function(){
+    /* THE PASSWORD IS ALREADY CHANGED FROM HERE ON. Everything below is about
+       what to do with that fact, and nothing below may report it as a failure
+       to change it. */
+    Session.signIn(phoneToEmail(R.digits), pw1).then(function(){
+      ui.reset = { open:false, step:"phone", busy:false, error:"", typed:"", digits:"", name:"" };
+      ui.login = { busy:false, error:"", email:"" };
+      if(resuming && prevUid && Session.userId() !== prevUid){
+        toast("Signed in as a different user. Work queued by the previous account stays on this device until they sign in.", true);
+      }else{
+        toast("Password changed. You are signed in.");
+      }
+      afterSignIn();
+    }, function(err){
+      /* Hand them to the LOGIN box, not back to this form: the password is set,
+         and sending them round again would have them change it twice and
+         wonder which one took. */
+      const said = signInMessage(err, "phone");
+      const num  = phonePretty(R.digits);
+      ui.reset = { open:false, step:"phone", busy:false, error:"", typed:"", digits:"", name:"" };
+      ui.login = { busy:false, email:num,
+                   error:"Your password was changed. Signing in did not go through (" + said
+                         + ") — try it here with the new password." };
+      renderGate();
+    });
+  }, function(err){
+    R.busy = false;
+    R.error = forgotMessage(err);
+    toast(R.error, true);
+    if(window.console && console.warn)
+      console.warn("[NIVA] reset-merchandiser-password set failed",
+                   { status: err && err.status, kind: err && err.kind, message: R.error });
+    renderGate();
+  });
+}
+
+/* The function answers with a sentence meant for the person reading it, so its
+   own wording wins wherever there is one. These are the cases where there is
+   not — the request never reached it, or never got past the gateway. */
+function forgotMessage(err){
+  if(err && err.kind === "offline")
+    return "Could not reach the server. Check your connection and try again.";
+  if(err && err.kind === "timeout")
+    return "The server did not answer in time. Try again.";
+  if(err && err.status === 429)
+    return "Too many attempts. Wait a minute and try again.";
+  if(err && err.status === 401)
+    return "This build cannot reach the password-reset service. Deploy the reset-merchandiser-password function.";
+  if(err && err.kind === "server")
+    return "The password service returned an error (" + err.status + "). Try again shortly.";
+  if(err && err.kind === "config")
+    return "This build has no Supabase project configured.";
+  return (err && err.message) ? err.message : "Could not change that password.";
+}
+
+
 /* Everything that has to happen once there is a session and a profile. */
 function afterSignIn(){
   state = load();
@@ -15353,12 +16021,23 @@ function afterSignIn(){
   maybeAskHeight();
   Outbox.kick();
   Poller.start();
-  Repo.prime().then(function(){ render(); }, function(err){
-    /* Cached data is still on screen. Only say something if there is nothing
-       to show at all. */
-    if(!state.everSynced) toast("Signed in, but could not load data: " + errText(err), true);
-    render();
-  });
+  const primed = function(){
+    Repo.prime().then(function(){ render(); }, function(err){
+      /* Cached data is still on screen. Only say something if there is nothing
+         to show at all. */
+      if(!state.everSynced) toast("Signed in, but could not load data: " + errText(err), true);
+      render();
+    });
+  };
+  /* THE READ WAITS FOR THE RECONCILIATION, and does not race it.
+     sync-posters may hand this account tasks it does not have yet, and a prime
+     started alongside would not see them — Repo.refresh() returns the
+     IN-FLIGHT read when one is already running, so "sync, then refresh" would
+     quietly hand back the too-early answer rather than reading again. A
+     merchandiser's first paint costs one round trip; a poster that never
+     arrives costs the job. Managers skip it: they have no tasks. */
+  if(myRole() === "Merchandiser") syncPosters(null).then(primed, primed);
+  else primed();
 }
 
 /* Only `read_at` is writable on a notification, and only on rows addressed to
@@ -15445,7 +16124,9 @@ function doSignOut(){
     state = blankState();
     USERS = []; CAMPAIGNS = []; STORES = [];
     view = { name:"dashboard", params:{} };
-    ui.login = { busy:false, error:"", email:"" };
+    ui.login = { busy:false, error:"", ok:"", email:"", mode:"signin",
+                 form:{ name:"", phone:"", office:"" } };
+    ui.reset = { open:false, step:"phone", busy:false, error:"", typed:"", digits:"", name:"" };
     closePops(); closeModal();
     renderGate(); render();
   };
@@ -15831,10 +16512,13 @@ function render(){
    behave. It lives inside #gate, which is re-rendered wholesale, hence the
    delegated listener. */
 document.addEventListener("submit", function(e){
-  const f = e.target.closest && e.target.closest("#loginform");
-  if(!f) return;
-  e.preventDefault();
-  doSignIn();
+  if(!e.target.closest) return;
+  if(e.target.closest("#loginform")){  e.preventDefault(); doSignIn(); return; }
+  if(e.target.closest("#signupform")){ e.preventDefault(); doSignUp(); return; }
+  /* The forgotten-password panel is a real <form> for the same reasons: Enter
+     submits it, and a password manager sees a password field it can fill and
+     save. One handler, because the panel's two steps share one form. */
+  if(e.target.closest("#resetform")){  e.preventDefault(); doForgotSubmit(); return; }
 });
 
 document.addEventListener("click", function(e){
@@ -16001,7 +16685,22 @@ document.addEventListener("click", function(e){
       if(n){ closePops(); if(n.taskId) go("task",{id:n.taskId}); else render(); }
       break;
     }
+    /* Two states of one screen. The typed identity is carried across so that
+       somebody who started typing their number in the wrong panel does not
+       have to type it again, and the refusal from the panel they left does not
+       follow them into the one they arrived at. */
+    case "gosignup":
+      ui.login.mode = "signup"; ui.login.error = ""; ui.login.ok = "";
+      if(!ui.login.form.phone && ui.login.email) ui.login.form.phone = ui.login.email;
+      renderGate(); break;
+    case "gosignin":
+      ui.login.mode = "signin"; ui.login.error = ""; ui.login.ok = "";
+      if(!ui.login.email && ui.login.form.phone) ui.login.email = ui.login.form.phone;
+      renderGate(); break;
+
     case "signout":    closePops(); closeModal(); doSignOut(); break;
+    case "forgotpw":   doForgotOpen(); break;
+    case "resetback":  doForgotClose(); break;
     case "syncpanel":  closePops(); openSyncPanel(); break;
     case "resyncnow":  closePops(); Outbox.kick(); Poller.now(); toast("Refreshing from the server."); break;
     case "myheight":   closePops(); askHeight(true); break;
