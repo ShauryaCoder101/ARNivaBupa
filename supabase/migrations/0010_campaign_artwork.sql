@@ -67,4 +67,8 @@ commit;
 -- path; ones published to nobody yet are null until the next publish, and
 -- sync-posters finds those by listing the bucket.
 
-NOTE ON GRANTS: none needed. 0002 already grants `select, insert, update, delete on public.campaigns to authenticated` at table level and campaigns_update_owner permits a whole-row update by the owner, so a manager may PATCH the new column. No column guard trigger exists on campaigns.
+-- NOTE ON GRANTS: none needed. 0002 already grants select, insert, update,
+-- delete on public.campaigns to authenticated at table level, and
+-- campaigns_update_owner permits a whole-row update by the owner, so a
+-- manager may PATCH the new column. No column guard trigger exists on
+-- campaigns.
