@@ -1471,6 +1471,16 @@ function posterLabel(t){
   if(!t || t.widthFt == null || t.heightFt == null) return "—";
   return Number(t.widthFt) + ' ft × ' + Number(t.heightFt) + ' ft';
 }
+/* Just the dimensions in feet, rounded to one decimal — for the many places
+   that print "W × H ft" inline rather than a named label. This did not exist
+   while widthFt/heightFt were whole numbers a manager typed ("9", "8"); now the
+   standard sizes are DERIVED from millimetres (A4 = 210/1000 × M_TO_FT), so a
+   raw print reads "0.6889763999999999 × 0.9744094 ft". One decimal is enough:
+   the sizes run 0.7 to 4.0 ft. Null/undefined renders as an em dash. */
+function posterDims(t){
+  if(!t || t.widthFt == null || t.heightFt == null) return "—";
+  return Number(t.widthFt).toFixed(1) + ' × ' + Number(t.heightFt).toFixed(1) + ' ft';
+}
 
 /* Known-size references the merchandiser can scale from (millimetres).
    `tolMm` is the reference's own DIMENSIONAL uncertainty — how far its true
@@ -5817,7 +5827,7 @@ function taskTable(tasks, title, withFilters){
     return '<tr class="clickable" data-act="open" data-id="'+t.id+'">'
       + '<td><div class="stack"><b>'+esc(t.storeName)+'</b><span class="sub mono">'+esc(t.storeCode)+'</span></div></td>'
       + '<td><div class="stack">'+esc(t.city)+'<span class="sub">'+esc(t.state)+' · '+esc(t.region)+'</span></div></td>'
-      + '<td>'+esc(t.displayType)+'<div class="sub num" style="font-size:11.5px;color:var(--text-3)">'+t.widthFt+' × '+t.heightFt+' ft</div></td>'
+      + '<td>'+esc(t.displayType)+'<div class="sub num" style="font-size:11.5px;color:var(--text-3)">'+posterDims(t)+'</div></td>'
       + '<td>'+esc(userById(t.assigneeId).name)+'</td>'
       + '<td class="num">'+fmtD(t.execDate)+'</td>'
       + '<td>'+chip(t.status)+(function(){ const c = taskSyncChip(t); return c ? '<div style="margin-top:4px">'+c+'</div>' : ''; })()+'</td>'
@@ -6182,7 +6192,7 @@ function doCreateTask(mode){
         + (storeIsNew ? " · new store record " + code : ""), null, group);
   if(draftBefore) audit(t, "Before image attached", "Baseline store photo captured and geo-tagged", null, group);
   audit(t, "Capture brief set",
-    "Poster "+t.widthFt+" × "+t.heightFt+" ft · standoff "+t.standoffFt.toFixed(1)+" ± "+t.standoffTolFt+" ft · angle ± "+t.angleTolDeg+"°",
+    "Poster "+posterDims(t)+" · standoff "+t.standoffFt.toFixed(1)+" ± "+t.standoffTolFt+" ft · angle ± "+t.angleTolDeg+"°",
     null, group);
 
   if(mode === "assign"){
@@ -6250,7 +6260,7 @@ function viewApprovals(){
       + '<div class="apv-body">'
       +   '<div style="font-size:15px;font-weight:650">'+esc(t.storeName)+' <span class="tag">'+esc(t.storeCode)+'</span></div>'
       +   '<div style="font-size:12.5px;color:var(--text-2);margin-top:2px">'+esc(t.city)+' · '+esc(t.state)+' · '+esc(t.region)
-      +     ' &nbsp;|&nbsp; '+esc(t.displayType)+' · <span class="num">'+t.widthFt+'×'+t.heightFt+' ft</span></div>'
+      +     ' &nbsp;|&nbsp; '+esc(t.displayType)+' · <span class="num">'+posterDims(t)+'</span></div>'
       +   '<div style="font-size:12.5px;color:var(--text-3);margin-top:6px">Submitted by <b style="color:var(--text-2)">'+esc(userById(t.assigneeId).name)
       +     '</b> · '+esc(fmtDT(t.submittedAt))+' · '+esc(ago(t.submittedAt))+'</div>'
       +   '<div style="margin-top:8px;display:flex;gap:7px;flex-wrap:wrap">'
@@ -6288,7 +6298,7 @@ function viewReview(p){
   let html = '<button class="btn ghost sm" data-act="nav" data-v="approvals" style="margin-bottom:10px">'+icon("back")
     + byMode("Walls to shortlist","Approvals queue")+'</button>'
     + '<div class="pagehd"><div><h1>'+byMode("Wall — ","Review — ")+esc(t.storeName)+'</h1>'
-    + '<p><span class="mono">'+esc(t.storeCode)+'</span> · '+esc(t.city)+', '+esc(t.state)+' · '+esc(t.displayType)+' · <span class="num">'+t.widthFt+' × '+t.heightFt+' ft</span></p></div>'
+    + '<p><span class="mono">'+esc(t.storeCode)+'</span> · '+esc(t.city)+', '+esc(t.state)+' · '+esc(t.displayType)+' · <span class="num">'+posterDims(t)+'</span></p></div>'
     + '<div class="spacer" style="flex:1"></div>'+chip(t.status)+'</div>';
 
   if(t.status !== S.SUBMITTED){
@@ -6350,7 +6360,7 @@ function viewReview(p){
     + '</div><div class="bd">'
     + (MOCKUP ? '' : placementBlock(t.placement, t))
     + '<dl class="kv" style="margin-top:'+(MOCKUP?"0":"12px")+'">'
-    +   '<dt>'+byMode("Poster size","Poster brief")+'</dt><dd class="num">'+t.widthFt+' × '+t.heightFt+' ft</dd>'
+    +   '<dt>'+byMode("Poster size","Poster brief")+'</dt><dd class="num">'+posterDims(t)+'</dd>'
     + (MOCKUP && t.placement && t.placement.distanceFt != null
         ? '<dt>Shot from</dt><dd class="num">'+Number(t.placement.distanceFt).toFixed(1)+' ft from the wall</dd>'
         : '')
@@ -6602,9 +6612,9 @@ function fieldPhotoVerdict(im){
 /* Verification: "Put up a 4 ft x 3 ft poster on the Gondola End Cap."
    Mockup:       "Find a wall for a 4 ft x 3 ft poster."                     */
 function fieldJobLine(t){
-  return byMode('Wall for a <span class="num">'+t.widthFt+' ft × '+t.heightFt+' ft</span> poster'
+  return byMode('Wall for a <span class="num">'+posterDims(t)+'</span> poster'
                 + ' · <b>'+esc(t.displayType)+'</b>',
-                '<b>'+esc(t.displayType)+'</b> · <span class="num">'+t.widthFt+' ft × '+t.heightFt+' ft</span> poster');
+                '<b>'+esc(t.displayType)+'</b> · <span class="num">'+posterDims(t)+'</span> poster');
 }
 
 function viewMyTasks(){
@@ -6704,7 +6714,7 @@ function storeInfoCard(t){
     + '<dt>Store GPS</dt><dd class="mono num">'+esc(gps(t.lat,t.lng))+'</dd>'
     + '<dt>Campaign</dt><dd>'+esc(campaignById(t.campaignId).name)+'</dd>'
     + '<dt>Display type</dt><dd>'+esc(t.displayType)+'</dd>'
-    + '<dt>Poster size</dt><dd class="num">'+t.widthFt+' ft × '+t.heightFt+' ft <span style="color:var(--text-3)">('+(t.widthFt*t.heightFt).toFixed(1)+' sq ft)</span></dd>'
+    + '<dt>Poster size</dt><dd class="num">'+posterDims(t)+' <span style="color:var(--text-3)">('+(t.widthFt*t.heightFt).toFixed(1)+' sq ft)</span></dd>'
     + '<dt>'+byMode("Visit date","Execution date")+'</dt><dd class="num">'+fmtD(t.execDate)+'</dd>'
     + '<dt>Merchandiser</dt><dd>'+esc(userById(t.assigneeId).name)+'</dd>'
     + '<dt>Manager</dt><dd>'+esc(userById(t.managerId).name)+'</dd>'
@@ -7117,10 +7127,10 @@ function fieldExtras(t){
   }
   h += '<details class="disc"><summary>'+icon("poster")+'Size, and where to stand</summary>'
     + '<div class="dbd">'
-    + byMode('The poster is <b class="num">'+t.widthFt+' ft × '+t.heightFt+' ft</b>. You are looking for an '
+    + byMode('The poster is <b class="num">'+posterDims(t)+'</b>. You are looking for an '
              + 'empty wall big enough to hold it — the sort of spot a '+esc(t.displayType).toLowerCase()
              + ' would go.<br><br>',
-             'The poster is <b class="num">'+t.widthFt+' ft × '+t.heightFt+' ft</b>, going on the '
+             'The poster is <b class="num">'+posterDims(t)+'</b>, going on the '
              + esc(t.displayType)+'.<br><br>')
     + 'When you take the photo, stand about <b class="num">'+(isFinite(stand)?stand.toFixed(0):"8")+' feet</b> back '
     + '(roughly '+paces+' big steps) and hold the phone straight. '
@@ -7158,8 +7168,8 @@ function fieldViewHere(t){
     +   '<div class="hw">'+esc(t.city)+', '+esc(t.state)+' · <span class="mono">'+esc(t.storeCode)+'</span></div>'
     +   '<div class="bigfact">'+icon("poster")
     +     '<div><div class="bn">'
-    +       byMode('Find an empty wall for a <span class="num">'+t.widthFt+' ft × '+t.heightFt+' ft</span> poster',
-                   'Put up a <span class="num">'+t.widthFt+' ft × '+t.heightFt+' ft</span> poster')
+    +       byMode('Find an empty wall for a <span class="num">'+posterDims(t)+'</span> poster',
+                   'Put up a <span class="num">'+posterDims(t)+'</span> poster')
     +     '</div>'
     +       '<div class="bs">'+byMode('Somewhere a ','On the ')+esc(t.displayType)
     +         byMode(' would go · ',' · ')+esc(camp.name)+'</div></div>'
@@ -8294,10 +8304,50 @@ function arcPanel(html){
    method, not a consolation prize, and it is spelled out in those words before
    the button is pressed. Typing the numbers is last, and is described as a
    guess because that is what it is.                                          */
+
+/* ---- may Tier A be OFFERED at all? ----
+   `caps.xr` answers "does this handset have WebXR immersive-ar with hit-test",
+   and that answer is a fact about the phone: the diagnostics row above keeps
+   reporting it verbatim, because a manager working out why one handset in a
+   fleet behaves badly needs the truth about the hardware. What changes here is
+   the ROUTING, which is a different question — "is the hit-test the right way
+   to measure THIS wall".
+
+   IN MOCKUP MODE IT IS NOT, and the reason is the mode's own premise. Tier A
+   measures by asking ARCore for a hit against a detected plane. ARCore finds
+   planes from visual texture, which is why it locks onto a floor — carpet
+   flecks, tile grout, scuffs — within a second or two, and why a bare painted
+   wall, which is the ONLY kind of wall this mode is ever pointed at, can give
+   it nothing to latch onto for as long as the merchandiser is willing to keep
+   waving the phone about. The field reported exactly that shape: a black stage
+   reading "Looking for the wall — move the phone slowly" that never resolved,
+   a shutter that never enabled, and — pointed at the floor instead — a perfectly
+   good capture of the poster lying on the tiles. The method was not failing
+   randomly; it was doing the one thing it is good at.
+
+   So mockup mode routes to the floor line instead, on EVERY phone. That method
+   never asks the wall for anything: it takes the join between wall and floor,
+   the phone's depression angle and a known eye height, and returns d = h/tan θ.
+   It already was the mockup default on the phones without ARCore, it works on
+   any handset with a tilt sensor, and a bare wall costs it nothing — the wall's
+   blankness is not a degraded case for it, it is simply irrelevant to it.
+
+   VERIFICATION MODE IS UNTOUCHED and keeps Tier A as its primary offer. There
+   the wall has an installed poster on it, which is precisely the high-contrast
+   rectangle ARCore wants, and Tier A remains the highest evidence tier the app
+   has. Nothing about Tier A's code, its capture path or its tier ranking
+   changes; it is still reached from a retry after an XR error, and it is still
+   what verification opens with. */
+function arcOffersTierA(caps){ return !!(caps && caps.xr) && !MOCKUP; }
+
 function arcStartPanel(caps){
   const t = ARC.task;
   const cal = arcCalibGet();
   const plain = (myRole() === "Merchandiser");
+  /* Everything below that decides WHAT TO OFFER asks this, never `caps.xr`.
+     The capability matrix a few lines down is the one place that still asks the
+     hardware question directly, and it must — that row is the honest report. */
+  const xrOffer = arcOffersTierA(caps);
 
   /* ---- the technical read-out: managers and admins only ---- */
   let rows = "";
@@ -8342,7 +8392,15 @@ function arcStartPanel(caps){
         + 'This page is not a secure context, so the browser will not hand out the camera, GPS or motion sensors. '
         + 'Serve it over <span class="mono">https</span> or from <span class="mono">http://localhost</span> — see <span class="mono">RUN.md</span>. '
         + 'Manual entry still works and is recorded as unverified.</div></div>';
-  } else if(caps.xr && plain){
+  } else if(xrOffer && plain){
+    /* VERIFICATION ONLY, now. The sentence promises that the phone will find
+       the wall on its own, and on a wall with a poster already installed it
+       will. Promising it over a BARE wall was the lie the field caught, so
+       mockup mode no longer reaches this branch at all and falls through to the
+       floor-line paragraph below — which describes a method that keeps the
+       promise on any phone. The `byMode` mockup half of this string is
+       therefore dead, but the string is left exactly as it was: verification
+       reads it verbatim and nothing here may change what verification says. */
     how = '<div class="hint" style="margin:0 0 12px;font-size:13px;line-height:1.55">'
       + '<b>This phone can measure the wall by itself.</b> Nothing to tape up and nothing to carry — '
       + byMode('point it at the empty wall, walk to where it tells you, and the poster appears on the wall '
@@ -8350,9 +8408,14 @@ function arcStartPanel(caps){
                'point it at the wall, walk to where it tells you, and the poster is drawn at its real size.')
       + '</div>';
   } else if(caps.media && plain && MOCKUP){
-    /* MOCKUP MODE, NO ARCore. The wall is bare, so there is nothing on it to
-       measure against — but the floor is already there. Nothing to tape up and
-       nothing to carry, which was the whole complaint about the A4 sheet. */
+    /* MOCKUP MODE, ON EVERY PHONE — including the ARCore ones, which used to be
+       sent to Tier A from here and left staring at a wall the hit-test could not
+       see. The wall is bare, so there is nothing on it to measure against and
+       nothing on it for a plane detector to find either — but the floor is
+       already there, on every phone, and the join it makes with the wall is a
+       line the merchandiser can aim at deliberately rather than hope for.
+       Nothing to tape up and nothing to carry, which was the whole complaint
+       about the A4 sheet. */
     /* Two sentences, two steps. This is the last screen before the camera and
        the merchandiser reads it standing in a shop, so it says what they will
        do, not how it works. */
@@ -8379,16 +8442,21 @@ function arcStartPanel(caps){
 
   /* ---- the buttons ---- */
   let btns = '';
-  if(caps.xr)    btns += '<button class="btn primary" data-arc="tierA">'
+  /* `xrOffer`, not `caps.xr`. In mockup mode there is no Tier A button at all,
+     so the camera button becomes the primary and is labelled "Measure off the
+     floor" rather than "…instead" — there is no longer anything for it to be
+     instead OF, and offering an alternative to a method that was never offered
+     reads as an apology for the good path. */
+  if(xrOffer)    btns += '<button class="btn primary" data-arc="tierA">'
                        + (plain ? byMode("Point at the wall","Start") : "Start AR measurement")+'</button>';
-  if(caps.media) btns += '<button class="btn'+(caps.xr?'':' primary')+'" data-arc="tierB">'
+  if(caps.media) btns += '<button class="btn'+(xrOffer?'':' primary')+'" data-arc="tierB">'
                        + (plain
-                           ? (caps.xr
+                           ? (xrOffer
                                ? byMode("Measure off the floor instead", "Use the A4 sheet instead")
                                : byMode("Measure off the floor", "Use the camera"))
                            : byMode("Camera + floor-line (reference scale as fallback)",
                                     "Camera + reference scale"))+'</button>';
-  btns += '<button class="btn'+((!caps.xr && !caps.media)?' primary':'')+'" data-arc="tierC">'
+  btns += '<button class="btn'+((!xrOffer && !caps.media)?' primary':'')+'" data-arc="tierC">'
         + (plain ? "Type the numbers in" : "Manual entry (unverified)")+'</button>';
   /* Calibration costs a tape measure and five minutes. It only pays for itself
      on the camera path, so it is not put in front of someone who is about to
@@ -8399,7 +8467,12 @@ function arcStartPanel(caps){
      stature estimate already gives, so it is a refinement, not a prerequisite —
      it lives here, behind the word "optional", and never interrupts a capture.
      Managers and admins keep the technical labels. */
-  if(caps.media && (!plain || !caps.xr)){
+  /* `xrOffer` again: the reason this was hidden from an ARCore phone was that
+     its owner was about to use AR and would never touch a reference or a phone
+     height. In mockup mode they are now about to use the floor line, where the
+     eye height h is the single largest term in the error budget, so the tape
+     calibration is exactly as worth offering to them as to anyone else. */
+  if(caps.media && (!plain || !xrOffer)){
     if(MOCKUP)
       btns += '<button class="btn ghost" data-arc="floorcal">'
             + (plain ? "Optional: measure this phone exactly (tape measure)" : "Calibrate phone height (floor-line)…")+'</button>';
@@ -8416,10 +8489,10 @@ function arcStartPanel(caps){
                  + fmtRoughFt(taskStandoff(t).recommendedFt, taskStandoff(t).recommendedFt*FOCAL_SIGMA_ASSUMED)
                  + ' ft</b> — '
                  + 'and hold the phone straight. The screen tells you when you are in the right spot.',
-                 'Poster <b class="num">'+t.widthFt+' × '+t.heightFt+' ft</b>. Stand about '
+                 'Poster <b class="num">'+posterDims(t)+'</b>. Stand about '
                  + '<b class="num">'+Number(t.standoffFt).toFixed(1)+' ft</b> back and hold the phone straight. '
                  + 'The screen tells you when you are in the right spot.')
-        : 'Poster <b class="num">'+t.widthFt+' × '+t.heightFt+' ft</b>, shot from <b class="num">'
+        : 'Poster <b class="num">'+posterDims(t)+'</b>, shot from <b class="num">'
           + Number(t.standoffFt).toFixed(1)+' ± '+t.standoffTolFt+' ft</b>, square within <b class="num">± '+t.angleTolDeg+'°</b>.')
     + '</p>'
     + rows
@@ -8537,7 +8610,7 @@ function arcShell(t){
     + '<div id="arHud">'
     +   '<div class="arbar">'
     +     '<button class="arbtn pe" data-arc="close" aria-label="Close">✕</button>'
-    +     '<div id="arTitle">'+esc(t.storeName)+'<small>'+esc(t.storeCode)+' · poster '+t.widthFt+'×'+t.heightFt+' ft</small></div>'
+    +     '<div id="arTitle">'+esc(t.storeName)+'<small>'+esc(t.storeCode)+' · poster '+posterDims(t)+'</small></div>'
     +     '<div style="flex:1"></div>'
     +     '<span class="tierbadge tier-unv" id="arTier">detecting…</span>'
     +   '</div>'
@@ -8657,8 +8730,11 @@ function arcTierB(){
          known-width object and dragging handles on every single capture. The
          manual modes are still one tap away and are what a failed detection
          falls back to. */
-      /* MOCKUP MODE, NO ARCore: floor-line is the DEFAULT and the A4 sheet is
-         the fallback, not the other way round. The merchandiser rejected taping
+      /* MOCKUP MODE, ON EVERY PHONE: floor-line is the DEFAULT and the A4 sheet
+         is the fallback, not the other way round. This used to read "no ARCore",
+         because an ARCore phone was routed to Tier A before it ever got here;
+         arcOffersTierA now sends those phones down this path too, so this is
+         simply what mockup mode does. The merchandiser rejected taping
          paper up in every shop, and on a bare wall the floor line is the only
          thing in the room whose geometry is already known. The sheet is still
          one tap away and is offered by name the moment the floor line cannot be
@@ -8719,7 +8795,7 @@ function arcRefDef(){
     if(!t) return REF_PRESETS.filter(x=>x.key==="a4q")[0];
     const wmm = t.widthFt*304.8, hmm = t.heightFt*304.8;
     return { key:"poster", quad:true, auto:true,
-             label:"The poster itself ("+t.widthFt+" × "+t.heightFt+" ft)",
+             label:"The poster itself ("+posterDims(t)+")",
              mm:wmm, hmm:hmm, tolMm: arcRefTolMm(p, Math.min(wmm, hmm)) };
   }
   if(p.key === "custom"){
@@ -9912,6 +9988,18 @@ function arcFloorTakeReading(){
 
    `note` is advice and rides on a SUCCESS; `why` is a refusal. Exactly one of
    them is ever non-empty. */
+/* The distance a REFUSAL should send somebody to: the room's ceiling, unless
+   this phone's actual lens needs more than that to fit the poster in. `fit` is
+   computed against live intrinsics, taskStandoff against nominal ones, and the
+   larger of the two is the only answer that is right on both. */
+function gateStandbackFt(fit){
+  const so = taskStandoff(ARC.task);
+  const ceiling = so && isFinite(so.recommendedFt) ? so.recommendedFt : null;
+  const liveMin = fit && isFinite(fit.minimumFt) ? fit.minimumFt : null;
+  if(ceiling == null) return liveMin != null ? liveMin : NaN;
+  if(liveMin == null) return ceiling;
+  return Math.max(ceiling, liveMin);
+}
 function floorReadingGate(distFt){
   const t = ARC.task;
   const none = { ok:false, code:"none", why:arcPlainFloorWhy(ARC.floor), note:"" };
@@ -9932,14 +10020,28 @@ function floorReadingGate(distFt){
   const fit = arcFit(distFt);
   if(!fit || !fit.view) return { ok:true, code:"ok", why:"", note:"" };
   const v = fit.view;
+  /* WHERE A REFUSAL SENDS THEM has to agree with where the guidance line sends
+     them, or the screen argues with itself: the line above says "stand about
+     4 ft back" and the refusal underneath says 1.6, and neither number is
+     wrong on its own terms — one is the room's ceiling, the other is the
+     distance at which the artwork fills the frame.
+
+     The ceiling wins, because standing further back always sees MORE wall, so
+     it can never be the reason a poster does not fit. The one case where it is
+     not enough is a lens narrower than the nominal one taskStandoff assumes:
+     there the LIVE minimum is the honest answer, and taking the larger of the
+     two gives that automatically without a second branch. */
   if(!v.fits)
     return { ok:false, code:"close", note:"",
              why:"Move back first — from here you can only see "
                + (v.limit === "width"
                     ? fmtRoughFt(v.visibleWFt, fit.seeWSigma) + " ft of wall"
                     : fmtRoughFt(v.visibleHFt, fit.seeHSigma) + " ft of wall top to bottom")
-               + ", and the poster is " + (v.limit === "width" ? t.widthFt : t.heightFt)
-               + " ft. Stand about " + fmtRoughFt(fit.recommendedFt, fit.recSigma) + " ft back." };
+               /* ROUNDED, because these are no longer round numbers. A poster
+                  used to be "9 × 8 ft", typed by a manager; A4 is derived from
+                  210 mm and prints as 0.6889763999999999 ft if you let it. */
+               + ", and the poster is " + Number(v.limit === "width" ? t.widthFt : t.heightFt).toFixed(1)
+               + " ft. Stand about " + fmtRoughFt(gateStandbackFt(fit), fit.recSigma) + " ft back." };
   if(Math.max(v.fillW, v.fillH) < FRAME_FILL_LOOSE)
     return { ok:true, code:"far", why:"",
              note:" The poster will sit small in the shot from here — about "
@@ -10547,16 +10649,16 @@ function arcWallCheck(){
     ARC.wall.ack = false;
     toast("It fits — you marked " + n1(r.widthFt) + " ft of wall"
       + (r.heightFt != null ? " by " + n1(r.heightFt) + " ft" : "")
-      + " and the poster is " + t.widthFt + " × " + t.heightFt + " ft.");
+      + " and the poster is " + posterDims(t) + ".");
     return;
   }
   ARC.wall.ack = false;
   const said = [];
   if(r.fitsWidth === false)
-    said.push('This poster is <b class="num">' + t.widthFt + ' ft</b> wide but the wall is only '
+    said.push('This poster is <b class="num">' + n1(t.widthFt) + ' ft</b> wide but the wall is only '
       + '<b class="num">' + n1(r.widthFt) + ' ft</b>.');
   if(r.fitsHeight === false)
-    said.push('It is <b class="num">' + t.heightFt + ' ft</b> tall and the wall is only '
+    said.push('It is <b class="num">' + n1(t.heightFt) + ' ft</b> tall and the wall is only '
       + '<b class="num">' + n1(r.heightFt) + ' ft</b>.');
   openModal({
     title: "The poster is bigger than this wall",
@@ -10820,19 +10922,47 @@ function arcRenderSimple(g, prog){
      uncalibrated phone the focal term alone is ± 12 %, and fmtRoughFt rounds
      the figure to a step no finer than its own error bar so the sentence
      cannot claim precision the measurement chain does not have. */
+  /* WHICH RECOMMENDATION THIS SENTENCE QUOTES, in mockup mode, is not the one
+     `arcFit` computes. arcFit's `recommendedFt` is the FRAME-FILL optimum — the
+     distance at which the artwork occupies FRAME_FILL_TARGET of the shot — and
+     for a small poster that lands absurdly close: the field screenshots show
+     "For a 0.69 × 0.97 ft poster, stand about 1.6 ft back", which is very
+     nearly the WORST place in the band to take a floor-line reading. The
+     floor-line error carries a 1/sin 2θ term that improves monotonically all
+     the way out to θ = 45°, so accuracy gets better with every step backwards
+     inside the band, and MOCKUP_MAX_STANDOFF_FT records the decision that
+     follows from it: stand as far back as the room allows, up to the 4 ft
+     ceiling. At 1.6 ft an A4 sits at θ ≈ 75°, sin 2θ = 0.5, and the distance —
+     and therefore the size the poster is DRAWN at — is twice as uncertain.
+
+     `taskStandoff` is where that decision lives, and it is already what the
+     brief, the task list and the preflight panel all quote. Quoting it here too
+     is the whole point: the merchandiser must not be told 4 ft on the screen
+     before the camera opens and 1.6 ft on the screen after it. It also handles
+     the room-too-small case on its own — when the ceiling cannot fit the poster
+     it reports the true minimum instead — so this sentence never has to.
+
+     VERIFICATION IS UNTOUCHED: `taskStandoff` hands back the manager's own
+     per-task standoff there, and in any case neither of these two branches is
+     reachable outside mockup mode. */
   if(seeEl){
     let seeTxt = "";
+    /* Computed once, not per branch: both sentences below must name the same
+       distance, which was half the bug. */
+    const so   = MOCKUP ? taskStandoff(t) : null;
+    const soFt = so ? Number(so.recommendedFt) : NaN;
+    const soSigma = so ? soFt*so.relSigma : 0;
     if(fit){
       if(g.distance != null && fit.view && (!MOCKUP || fit.view.fits)){
-        seeTxt = (MOCKUP && fit.preview && !fit.preview.fits)
+        seeTxt = (MOCKUP && fit.preview && !fit.preview.fits && isFinite(soFt))
           ? ("Off the edges of the screen, but still in the photo — step back to about "
-             + fmtRoughFt(fit.recommendedFt, fit.recSigma) + " ft.")
+             + fmtRoughFt(soFt, soSigma) + " ft.")
           : ("You can see about " + fmtRoughFt(fit.view.visibleWFt, fit.seeWSigma)
              + " × " + fmtRoughFt(fit.view.visibleHFt, fit.seeHSigma)
              + " ft of wall from here.");
-      } else if(MOCKUP && isFinite(fit.recommendedFt)){
-        seeTxt = "For a " + t.widthFt + " × " + t.heightFt + " ft poster, stand about "
-               + fmtRoughFt(fit.recommendedFt, fit.recSigma) + " ft back.";
+      } else if(MOCKUP && isFinite(soFt)){
+        seeTxt = "For a " + posterDims(t) + " poster, stand about "
+               + fmtRoughFt(soFt, soSigma) + " ft back.";
       }
     }
     if(seeEl.dataset.h !== seeTxt){ seeEl.dataset.h = seeTxt; seeEl.textContent = seeTxt; }
@@ -11524,7 +11654,7 @@ function arcDrawWall(ctx, cw, ch){
   if(r && t){
     const label = r.widthFt.toFixed(1) + " ft wide"
       + (r.heightFt != null ? " × " + r.heightFt.toFixed(1) + " ft tall" : "")
-      + "  ·  poster " + t.widthFt + " × " + t.heightFt + " ft";
+      + "  ·  poster " + posterDims(t);
     ctx.font = "800 12px ui-monospace, Menlo, monospace";
     ctx.textAlign = "center";
     const tw = ctx.measureText(label).width;
@@ -11669,8 +11799,8 @@ function arcRefPanel(){
           + 'wall and keep it in the picture. Everything else here is for the rare wall that already has '
           + 'something of a known size on it.</div>'
         : (t ? '<div class="hint" style="margin:0 0 10px">For an <b>after</b> shot the poster itself is the '
-            + 'best reference — it is already on the wall at a known <b class="num">'+t.widthFt+' × '+t.heightFt
-            + ' ft</b> and needs nothing carried to site. Before the poster is up, tape a plain <b>A4 sheet</b> '
+            + 'best reference — it is already on the wall at a known <b class="num">'+posterDims(t)
+            + '</b> and needs nothing carried to site. Before the poster is up, tape a plain <b>A4 sheet</b> '
             + '(210 × 297 mm) flat to the wall.</div>' : ''))
     + '<div class="field"><label class="fl" for="ref_sel">Reference</label><select id="ref_sel">'
     + refPresets().map(p=>'<option value="'+p.key+'"'+(p.key===ARC.refPreset?" selected":"")+'>'+esc(p.label)
@@ -11821,7 +11951,7 @@ function arcComposite(source, srcW, srcH, intr, g, tierKey, geo, nudgeNorm, capt
     "DIST " + n1(g.distance) + " ft (target " + Number(t.standoffFt).toFixed(1) + " ±" + t.standoffTolFt + ")"
       + "   TILT " + n1(g.pitch) + "°   ROLL " + n1(g.roll) + "°   YAW "
       + (g.yawVerified ? n1(g.yaw) + "°" : "unverified")
-      + "   POSTER " + t.widthFt + "×" + t.heightFt + " ft"
+      + "   POSTER " + posterDims(t)
   ], "#5eead4");
   return { stamped: c.toDataURL("image/jpeg", 0.7), clean: clean };
 }
@@ -12405,7 +12535,7 @@ function arcAttach(){
     + " · tilt " + n1(p.pitchDeg) + "° [" + (p.pitchOk?"PASS":"FAIL") + "]"
     + " · roll " + n1(p.rollDeg) + "° [" + (p.rollOk?"PASS":"FAIL") + "]"
     + " · yaw " + (p.yawVerified ? (n1(p.yawDeg) + "° [" + (p.yawOk?"PASS":"FAIL") + "]") : "unverified")
-    + " · poster " + t.widthFt + "×" + t.heightFt + " ft"
+    + " · poster " + posterDims(t)
     + " · f " + (p.focalPx||"—") + " px from " + p.focalSource
     + " · distance from " + p.distanceSource
     + " · geofence " + (p.geofencePass?"PASS":"FAIL") + " " + p.geofenceM + " m"
