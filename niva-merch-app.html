@@ -5448,7 +5448,11 @@ function campaignRollupById(){
    deliberate, documented trade — see MIGRATION.md.
    ========================================================== */
 const Poller = (function(){
-  let t = null, ticks = 0, stopped = false;
+  /* `forced` marks a tick somebody ASKED for — the refresh button, the tab
+     coming back to the front, the network returning. Those skip the poster
+     reconciliation's rate limit, because a person pressing refresh and not
+     getting their job is the entire complaint this exists to answer. */
+  let t = null, ticks = 0, stopped = false, forced = false;
   function arm(ms){
     if(t) clearTimeout(t);
     if(stopped) return;
@@ -5460,13 +5464,25 @@ const Poller = (function(){
     if(typeof document !== "undefined" && document.visibilityState === "hidden") return arm();
     if(typeof navigator !== "undefined" && navigator.onLine === false) return arm();
     ticks++;
-    Repo.refresh(ticks % 10 === 0).then(function(){ scheduleRender(); arm(); },
-                                        function(){ arm(); });
+    /* RECONCILE BEFORE READING, not after: sync-posters may create tasks this
+       account does not have yet, and a read started alongside would not see
+       them — the same ordering afterSignIn() takes and for the same reason.
+       merchSyncPosters is a no-op for managers, and rate-limits itself, so the
+       common tick costs nothing and does not wait on the network.
+
+       A tick that actually provisioned something forces the FULL refresh
+       rather than waiting for the every-tenth one: a poster that just arrived
+       is precisely the thing the person is standing there waiting for. */
+    const asked = forced; forced = false;
+    merchSyncPosters(asked).then(function(r){
+      const got = !!(r && r.provisioned);
+      return Repo.refresh(got || ticks % 10 === 0);
+    }).then(function(){ scheduleRender(); arm(); }, function(){ arm(); });
   }
   return {
     start: function(){ stopped = false; arm(POLL_INTERVAL_MS); },
     stop:  function(){ stopped = true; if(t) clearTimeout(t); t = null; },
-    now:   function(){ arm(0); }
+    now:   function(){ forced = true; arm(0); }
   };
 })();
 
@@ -15908,6 +15924,41 @@ function signInMessage(err, kind){
    MOCKUP ONLY. Posters and audience_all are a mockup-mode idea; a verification
    build has no standing rule to reconcile and must not start making a request
    per sign-in to find that out. */
+/* ---- THE RECONCILIATION HAS TO RUN ON EVERY PATH BACK INTO THE APP ----
+   sync-posters is the ONLY thing that creates a merchandiser's task. Until it
+   runs, a poster the manager published does not exist for that person: there
+   is no row for the poller to find and no amount of pulling to refresh will
+   conjure one. So calling it from afterSignIn() alone — which is where it
+   started — produced exactly the complaint the field made: a job that "takes
+   time, or does not appear even on refreshing multiple times". Refreshing the
+   PAGE restores the session from localStorage and never passes through
+   afterSignIn(), so the only gesture that actually worked was a full sign-out
+   and sign-in, which nobody would guess.
+
+   It now runs on the restore path and on the poller, so a poster published
+   while somebody is standing in an office reaches them on its own.
+
+   TWO GUARDS, because this is a function call and not a table read:
+     · one flight at a time — the poller, a tab regaining focus and the network
+       coming back can all arrive together, and the second and third calls have
+       nothing to add;
+     · a floor between runs, so focusing the tab forty times does not mean
+       forty invocations. `force` skips the floor for the one case that must
+       never be skipped: coming back into the app, where the whole point is to
+       find what arrived while it was closed. */
+const POSTER_SYNC_MIN_MS = 60000;
+let posterSyncAt = 0, posterSyncing = null;
+function merchSyncPosters(force){
+  if(myRole() !== "Merchandiser") return Promise.resolve(null);
+  if(posterSyncing) return posterSyncing;
+  const now = Date.now();
+  if(!force && posterSyncAt && (now - posterSyncAt) < POSTER_SYNC_MIN_MS)
+    return Promise.resolve(null);
+  posterSyncAt = now;
+  const done = function(r){ posterSyncing = null; return r; };
+  posterSyncing = syncPosters(null).then(done, function(){ return done(null); });
+  return posterSyncing;
+}
 function syncPosters(body){
   if(!MOCKUP || !SB_CONFIGURED || !netUp() || Session.state !== "ready")
     return Promise.resolve(null);
@@ -16932,7 +16983,15 @@ function boot(){
          since this device last synced, and the cached copy must not outrank
          the server's. */
       Session.loadProfile().then(function(){ renderChrome(); maybeAskHeight(); }, function(){});
-      Repo.refresh(true).then(function(){ render(); }, function(err){
+      /* RESTORING A SESSION IS COMING BACK INTO THE APP, so it reconciles like
+         a sign-in does — forced past the rate limit, and before the read, so
+         the read sees anything it just provisioned. This is the line whose
+         absence made refreshing the page useless: the page came back, the
+         poller started, the server was asked for tasks, and the task the
+         manager had published had still never been created. */
+      merchSyncPosters(true).then(function(){
+        return Repo.refresh(true);
+      }).then(function(){ render(); }, function(err){
         if(err && err.kind !== "auth" && err.kind !== "offline" && !state.everSynced)
           toast("Could not reach the server: " + errText(err), true);
         render();
