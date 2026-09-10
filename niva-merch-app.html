@@ -183,8 +183,31 @@ main#app{padding:20px 22px 60px;flex:1;min-width:0}
   justify-content:center;padding:24px;overflow:auto}
 .gate .panel{width:100%;max-width:440px;background:var(--surface);border:1px solid var(--border);
   border-radius:var(--r-lg);box-shadow:var(--shadow-lg);padding:26px 26px 22px}
-.gate .brandrow{display:flex;align-items:center;gap:10px;margin-bottom:18px}
-.gate .brandrow svg{width:34px;height:34px}
+/* The brand row STACKS. What sits in it now is the real Niva Bupa lockup,
+   which is a wide ~3:1 landscape mark rather than the 34px square glyph it
+   replaced: set beside the heading it would either crowd the heading or have
+   to shrink to a width nobody can read a wordmark at. Above the heading it
+   gets the whole column at every panel width, and the longest heading on any
+   gate panel — "NIVA Field Ops — setup required" — stops competing with it
+   for the same line. */
+.gate .brandrow{display:block;margin-bottom:18px}
+/* The artwork arrives as a data: URI with its own WHITE background baked in,
+   so it is given a white plate to sit on; without one it appears in dark mode
+   as a bright rectangle with hard edges pasted onto a near-black panel. The
+   #fff here is deliberate and is NOT a token somebody forgot: it is not a
+   theme colour, it is the colour inside the image, and it has to be the same
+   in both themes. In light mode the plate simply disappears — var(--surface)
+   behind it is white too — which is why this is one rule and not a dark-mode
+   override. line-height:0 keeps the inline-block from growing a text
+   descender under the image. */
+.gate .brandmark{display:inline-block;background:#fff;border-radius:var(--r);
+  padding:6px 9px;margin-bottom:12px;line-height:0}
+/* The ratio is stated rather than left to be read off the file, so the box is
+   the right width before the image has been decoded and the gate cannot reflow
+   under its own heading on first paint. Belt and braces for a data: URI, which
+   decodes immediately — it costs nothing and it is the difference between a
+   layout that depends on the asset and one that does not. */
+.gate .brandmark img{display:block;height:30px;width:auto;aspect-ratio:420/215}
 .gate h1{font-size:19px;margin:0 0 4px;letter-spacing:-.01em}
 .gate p.sub{margin:0 0 18px;font-size:13px;color:var(--text-2);line-height:1.5}
 .gate label{display:block;font-size:11.5px;font-weight:600;color:var(--text-2);margin:0 0 5px}
@@ -637,6 +660,11 @@ table.tbl tr:last-child td{border-bottom:0}
 #arSimpleHint:empty{display:none}
 #arSimpleHint b{color:#5eead4}
 #arSimpleHint .cue{flex:0 0 auto;width:30px;height:40px;color:#5eead4}
+#arSimpleHint .cue{flex:0 0 auto;width:30px;height:40px;color:#5eead4}
+/* The same figure, reused in the height question so the posture is taught once,
+   in one drawing, in both the places that depend on it. Its own metrics here:
+   the rule above is scoped to the AR hint bar and paints for a camera view. */
+.hint .cue{flex:0 0 auto;width:24px;height:32px;color:var(--text-2);opacity:.9}
 #arSimpleWarn{font-size:13px;line-height:1.45;font-weight:650;color:#2a1a00;background:#fbbf24;
   border-radius:10px;padding:9px 12px}
 #arSimpleWarn:empty{display:none}
@@ -867,6 +895,29 @@ pre,.mono{overflow-wrap:anywhere}
 .outcome.wait{border-left-color:var(--st-submitted)}
 .outcome.ok{border-left-color:var(--st-approved)}
 .outcome.fix{border-left-color:var(--st-rework)}
+
+
+/* ---- the confirmation screen ----
+   Deliberately the only thing above the fold: a mark, two lines, and the way
+   out. Everything the merchandiser might still want — the mockups, their own
+   note, the history — sits below it, which is safe here because .fieldscreen
+   pins .actionbar to the bottom of the viewport: scrolling down to look at a
+   photo never scrolls the way out off the screen. */
+.thanks{
+  display:flex; flex-direction:column; align-items:center; text-align:center;
+  padding:26px 12px 20px; margin-bottom:14px;
+}
+.thanks .tick{
+  width:66px; height:66px; border-radius:99px; display:flex; align-items:center; justify-content:center;
+  background:var(--accent-soft); color:var(--accent-ink); margin-bottom:16px;
+}
+.thanks .tick svg{width:32px;height:32px;stroke-width:2.6}
+/* The waiting variant borrows the in-progress tint rather than the accent, so
+   "gone" and "still going" are told apart at a glance, before a word is read. */
+.thanks.pending .tick{background:var(--st-progress-bg);color:var(--st-progress)}
+.thanks h2{margin:0;font-size:28px;font-weight:700;letter-spacing:-.022em;line-height:1.15}
+.thanks .tl{margin:11px 0 0;font-size:14.5px;color:var(--text);line-height:1.55;max-width:34ch}
+.thanks .tn{margin:9px 0 0;font-size:13px;color:var(--text-2);line-height:1.55;max-width:36ch}
 
 /* updates strip — the notification bell, folded into the job list */
 .updates{
@@ -1182,6 +1233,12 @@ const SIGN_KEY    = "niva.signcache.v1";     // signed-URL cache
 const LS_KEY_V1 = "niva.state.v1";
 const CALIB_KEY = "niva.calib.v1";
 const GEOFENCE_M = 150;
+/* How old the location taken when the capture screen opened may be and still be
+   put on a photo. Two minutes covers a merchandiser who opens the screen, reads
+   the two steps, finds a wall and presses the shutter. Past that they may well
+   have walked into a different room, and a fix that stale would be claiming to
+   know something it no longer does. */
+const GEO_PRIME_MAX_AGE_MS = 120000;
 
 /* Guided-capture defaults. Managers may override these per task. */
 const STANDOFF_FT     = 6.0;   // target camera-to-wall distance
@@ -1249,7 +1306,7 @@ const FRAME_FILL_LOOSE  = 0.35;
    floor-line term goes as 1/sin 2θ and is best at θ = 45°, which for a phone
    held at 1.45 m is 4.76 ft — beyond the ceiling. So within any band this mode
    allows, the measurement is ALWAYS most accurate at the far end, and since the
-   three poster sizes all fit the frame comfortably at 4 ft, the recommendation
+   two poster sizes both fit the frame comfortably at 4 ft, the recommendation
    is simply the ceiling. Standing at the fit-optimal distance instead would put
    an A4 at θ = 75°, where sin 2θ = 0.5 and the distance — and therefore the
    size the artwork is drawn at — is twice as uncertain. */
@@ -1413,6 +1470,76 @@ function statureHold(cm, ratio){
   return { hM: hM, sigmaM: sigmaM, relSigma: sigmaM/hM, ratio: R, statureCm: Number(cm) };
 }
 
+/* ---- the same number, in the units the person actually thinks in ----
+   Storage stays centimetres: the column is height_cm, its CHECK is written in
+   centimetres, and every derivation downstream of statureHold() is metric.
+   These are a UNIT SKIN over that number and nothing more. Nobody in India
+   states their height in centimetres — they say "5 feet 4 inches" — so the one
+   question is asked in feet and inches and converted here, once, at the edge.
+
+   2.54 is exact by definition; M_TO_FT above is an approximate factor for
+   DISTANCES in metres and is deliberately not reused for a stature in whole
+   inches, where the rounding would show. */
+const CM_PER_INCH     = 2.54;
+const INCHES_PER_FOOT = 12;
+
+/* feet + inches -> whole centimetres, rounded the way the column stores it. */
+function ftInToCm(ft, inch){
+  const f = Number(ft), i = Number(inch);
+  if(!(isFinite(f) && isFinite(i))) return null;
+  return Math.round((f*INCHES_PER_FOOT + i) * CM_PER_INCH);
+}
+
+/* whole centimetres -> the NEAREST whole inch, split into feet and inches.
+   Nearest and not floor: flooring would read 175 cm back as 5 ft 8 in when
+   5 ft 9 in (175.3) is the closer of the two candidates. The trip back is not
+   exactly reversible — an inch is 2.54 cm, so 174 cm reads as 5 ft 9 in and
+   re-saving that writes 175 — which is a twentieth of STATURE_SIGMA_M and moves
+   no error bar, but it is why nothing writes a converted value back on its own.
+   Only pressing Save writes. */
+function cmToFtIn(cm){
+  const v = Number(cm);
+  if(!isFinite(v)) return null;
+  const total = Math.round(v / CM_PER_INCH);
+  return { ft: Math.floor(total/INCHES_PER_FOOT), in: total % INCHES_PER_FOOT, totalIn: total };
+}
+
+/* One spelling of a height, used everywhere it is shown to the person whose
+   height it is. */
+function fmtFtIn(cm){
+  const p = cmToFtIn(cm);
+  return p ? (p.ft + " ft " + p.in + " in") : "—";
+}
+
+/* The band of whole-inch heights whose rounded centimetre value the database
+   will actually accept — DERIVED from STATURE_MIN_CM / STATURE_MAX_CM rather
+   than written down a third time. Rounding inwards at both ends is what keeps
+   the picker and the CHECK in agreement: 3 ft 11 in is 119 cm and 7 ft 3 in is
+   221 cm, so neither is offered. Today that is 4 ft 0 in to 7 ft 2 in; widen
+   the constraint in a migration, move the two constants, and the picker widens
+   with them with no second edit here. */
+function statureInchBand(){
+  let lo = Math.floor(STATURE_MIN_CM / CM_PER_INCH);
+  let hi = Math.ceil(STATURE_MAX_CM / CM_PER_INCH);
+  while(lo <= hi && Math.round(lo*CM_PER_INCH) < STATURE_MIN_CM) lo++;
+  while(hi >= lo && Math.round(hi*CM_PER_INCH) > STATURE_MAX_CM) hi--;
+  return { minIn: lo, maxIn: hi };
+}
+
+/* What the picker should show for a height that is already on file. Normally
+   just cmToFtIn, but a row written by the build that asked in centimetres can
+   hold a value the inch grid cannot name — 120 cm is 47.2 in and the band starts
+   at 48 — so it is pulled to the nearest end rather than left unmatched, where
+   a <select> would silently land on its first option and quietly change the
+   answer. The difference is under an inch, and nothing is written until Save. */
+function statureFtInFor(cm){
+  const p = cmToFtIn(cm);
+  if(!p) return null;
+  const b = statureInchBand();
+  const t = Math.min(b.maxIn, Math.max(b.minIn, p.totalIn));
+  return (t === p.totalIn) ? p : cmToFtIn(Math.round(t*CM_PER_INCH));
+}
+
 /* ---- detector budget ----
    The numbers the "degrade gracefully" rule is measured against. */
 const DET_BUDGET_MS       = 30;     // one pass; over this consistently ⇒ step down
@@ -1423,34 +1550,47 @@ const DET_REACQUIRE_FRAC  = 0.15;   // corner jump (× quad diagonal) that break
 const DET_STABLE_PASSES   = 2;      // consecutive agreeing passes before offering
 const M_TO_FT         = 3.28084;
 
-/* ---- THE THREE POSTER SIZES ----
+/* ---- THE TWO POSTER SIZES ----
    The programme prints exactly these, so the size is a PICKLIST and not two
    free-text boxes. That is not a UI simplification: a typo in a width silently
    rescales every mockup drawn from it, and "9 × 8" — a number nobody could
    satisfy in an office — is precisely how the unsatisfiable-standoff bug got
    into a task in the first place.
 
-   Declared in MILLIMETRES for the two paper sizes, because that is what ISO 216
-   defines and what the printer works to; feet are derived here once rather than
-   rounded by hand into a literal. The 2 × 4 ft board is declared in feet for the
-   same reason — that is how it is specified and ordered.
+   Declared in MILLIMETRES, because that is what ISO 216 defines and what the
+   printer works to; feet are derived here once rather than rounded by hand into
+   a literal.
 
-   All three fit the frame comfortably at the 4 ft ceiling: at the nominal
-   portrait phone an A4 fills 13 % of the frame width, an A3 19 %, and the
-   2 × 4 ft board 43 % of the height. See the poster-fit self-tests. */
+   WHY A2, AND WHY A3 AND THE 2 × 4 FT BOARD ARE GONE. The client prints A4 and
+   A2 and nothing else; A3 and the board were this file's own guess at the range
+   before anyone had asked. Dropping them is safe because NOTHING IN THE APP
+   BRANCHES ON A SIZE KEY — posterSizeOf() has exactly one caller, posterLabel(),
+   and posterSize() is only ever read at publish time. A campaign whose stored
+   feet no longer match a listed size keeps capturing, keeps its stored crop, and
+   simply prints "0.97 ft × 1.38 ft" where it used to print "A3". It loses a
+   friendly name and not a capability.
+
+   A2 IS THE SAME SHAPE AS A4. ISO 216 halves the long side at every step, so
+   210/297 and 420/594 are the same ratio to the last digit — which means
+   posterAspect(), and therefore the crop box the manager drags, is IDENTICAL
+   for the two. That is what makes offering a merchandiser a choice between them
+   a change of one number rather than a re-crop and a re-upload.
+
+   Both fit the frame comfortably at the 4 ft ceiling: at the nominal portrait
+   phone an A4 fills 13 % of the frame width and an A2 27 %, and A2 — the
+   largest thing the programme prints — needs only 1.06 ft to fit the frame edge
+   to edge, a quarter of the ceiling. See the poster-fit self-tests. */
 const POSTER_SIZES = [
-  { key:"a4",  label:"A4",       detail:"210 × 297 mm",
+  { key:"a4",  label:"A4",  detail:"210 × 297 mm",
     widthFt: 210/1000*M_TO_FT, heightFt: 297/1000*M_TO_FT },
-  { key:"a3",  label:"A3",       detail:"297 × 420 mm",
-    widthFt: 297/1000*M_TO_FT, heightFt: 420/1000*M_TO_FT },
-  { key:"2x4", label:"2 × 4 ft", detail:"board",
-    widthFt: 2, heightFt: 4 }
+  { key:"a2",  label:"A2",  detail:"420 × 594 mm",
+    widthFt: 420/1000*M_TO_FT, heightFt: 594/1000*M_TO_FT }
 ];
 const POSTER_SIZE_DEFAULT = "a4";
 function posterSize(key){
   return POSTER_SIZES.filter(function(p){ return p.key === key; })[0] || null;
 }
-/* Which of the three a stored width/height pair IS, to a tenth of an inch. The
+/* Which of the two a stored width/height pair IS, to a tenth of an inch. The
    database keeps feet (numeric(6,2)), not a size key, so a task written before
    this picklist existed — or by a manager overriding by hand — still has to
    round-trip back to a label rather than falling off the list. */
@@ -1464,7 +1604,7 @@ function posterSizeOf(t){
 }
 /* How a poster is NAMED on screen. "A4" is what everyone in the programme
    actually says; the feet are what the geometry uses, and a size that is not one
-   of the three still has to render as something rather than as nothing. */
+   of the two still has to render as something rather than as nothing. */
 function posterLabel(t){
   const p = posterSizeOf(t);
   if(p) return p.label + ' <span style="color:var(--text-3)">' + p.detail + '</span>';
@@ -1476,7 +1616,7 @@ function posterLabel(t){
    while widthFt/heightFt were whole numbers a manager typed ("9", "8"); now the
    standard sizes are DERIVED from millimetres (A4 = 210/1000 × M_TO_FT), so a
    raw print reads "0.6889763999999999 × 0.9744094 ft". One decimal is enough:
-   the sizes run 0.7 to 4.0 ft. Null/undefined renders as an em dash. */
+   the sizes run 0.7 to 1.9 ft. Null/undefined renders as an em dash. */
 function posterDims(t){
   if(!t || t.widthFt == null || t.heightFt == null) return "—";
   return Number(t.widthFt).toFixed(1) + ' × ' + Number(t.heightFt).toFixed(1) + ' ft';
@@ -6663,28 +6803,66 @@ function viewMyTasks(){
   groups.forEach(function(g){
     const list = mine.filter(t=>fieldStatus(t).group === g.k);
     if(!list.length) return;
-    list.sort(function(a,b){ return String(a.execDate).localeCompare(String(b.execDate)) || a.storeName.localeCompare(b.storeName); });
+    /* MOCKUP: every one of a merchandiser's tasks points at the SAME synthetic
+       store, so sorting on storeName is a tiebreak that can never break a tie,
+       and exec_date is null on a poster with no visit attached — between them
+       the list came out in whatever order the cache happened to hold. Sort by
+       the thing the card now leads with. */
+    list.sort(byMode(
+      function(a,b){ return campaignById(a.campaignId).name.localeCompare(campaignById(b.campaignId).name); },
+      function(a,b){ return String(a.execDate).localeCompare(String(b.execDate)) || a.storeName.localeCompare(b.storeName); }));
     html += '<div class="sectlabel" style="margin-top:16px">'+esc(g.label)+' · <span class="num">'+list.length+'</span></div>';
     html += '<div class="joblist">' + list.map(jobCard).join("") + '</div>';
   });
   return { html: html + '</div>' };
 }
 
-/* One store, one job, one obvious action. Not a table row. */
+/* One store, one job, one obvious action. Not a table row.
+
+   MOCKUP: THE CARD IS THE POSTER, and nothing else is on it. It used to be the
+   store — name, city, state, code — because in verification a job IS a shop you
+   walk into. Mockup has no shop. tasks.store_id is NOT NULL and tasks are
+   UNIQUE on (campaign_id, store_id), so provision-poster invents one synthetic
+   store per merchandiser: "<their name> - field", code FLD-XXXXXX, sitting at
+   lat/lng 0,0. That row is plumbing and was never meant to be read by anybody.
+   Rendering it as the card's headline told a merchandiser their own name a
+   second time and then followed it with an em dash for a city, another for a
+   state, and a store code for a shop that does not exist.
+
+   What goes there instead is the only pair of facts somebody looking for a wall
+   can act on: WHICH POSTER this is — the name the manager published it under,
+   which is the campaigns row's name — and WHAT SIZE IT PRINTS AT. posterLabel
+   and not posterDims, because "A4 210 × 297 mm" is what everyone in the
+   programme says and "0.7 × 1.0 ft" is an artefact of storing ISO millimetres
+   in feet. The display type goes as well: "In-shop Branding" is a category for
+   the manager's reporting, not an instruction. So does "Due", which in mockup is
+   ALWAYS an em dash — a poster handed out by provision-poster has no visit
+   attached to it and therefore no exec_date to be due on.
+
+   Verification keeps every line of it. There the store is a real shop with a
+   real code, the display type is where the poster physically goes, and the date
+   is a date somebody has to hit. */
 function jobCard(t){
   const st  = fieldStatus(t);
   const nxt = fieldNext(t);
   const sync = taskSyncChip(t);
   const edge = (t.status === S.REWORK) ? "fix" : st.group;   /* left stripe: now / fix / wait / done */
+  const body = MOCKUP
+    ? '<div class="jc-store">'+esc(campaignById(t.campaignId).name)+'</div>'
+      + '<div class="jc-where">'+posterLabel(t)+'</div>'
+    : '<div class="jc-store">'+esc(t.storeName)+'</div>'
+      + '<div class="jc-where">'+esc(t.city)+', '+esc(t.stateCode)+' · <span class="mono">'+esc(t.storeCode)+'</span></div>'
+      + '<div class="jc-what">'+icon("poster")+'<div>'+fieldJobLine(t)+'</div></div>';
   return '<div class="jobcard '+edge+'" data-act="open" data-id="'+t.id+'">'
     + '<div class="jc-b">'
-    +   '<div class="jc-store">'+esc(t.storeName)+'</div>'
-    +   '<div class="jc-where">'+esc(t.city)+', '+esc(t.stateCode)+' · <span class="mono">'+esc(t.storeCode)+'</span></div>'
-    +   '<div class="jc-what">'+icon("poster")+'<div>'+fieldJobLine(t)+'</div></div>'
+    +   body
     +   '<div class="jc-meta"><span class="plain '+st.cls+'">'+esc(st.text)+'</span>'+sync+'</div>'
     + '</div>'
-    + '<div class="jc-act">'
-    +   '<span class="jc-when">Due '+esc(fmtD(t.execDate))+'</span>'
+    /* .jc-act is justify-content:space-between, so with the "Due" span gone the
+       lone button would slide to the LEFT edge of the footer and read as a
+       layout bug rather than as a deliberate removal. */
+    + '<div class="jc-act"'+byMode(' style="justify-content:flex-end"','')+'>'
+    +   byMode('', '<span class="jc-when">Due '+esc(fmtD(t.execDate))+'</span>')
     +   '<button class="btn '+(nxt.primary?"primary":"")+'" data-act="open" data-id="'+t.id+'">'
     +     esc(nxt.label)+icon("fwd")+'</button>'
     + '</div>'
@@ -7176,19 +7354,35 @@ function fieldExtras(t){
 /* ---------- step 1: you're here ---------- */
 function fieldViewHere(t){
   const camp = campaignById(t.campaignId);
-  let body = '<h2 class="steptitle">You\'re here</h2>'
-    + '<p class="stepsub">'+byMode("Check this is the right shop, and what you are looking for.",
+  /* MOCKUP: the same synthetic-store leak the poster list had, one tap further
+     in. This screen printed "<name> — field", an empty city and state, the FLD-
+     code and a display type, under a heading asking somebody to confirm they
+     are at the right shop — when there is no shop, and that store is a row
+     invented only so tasks.store_id could be NOT NULL.
+
+     What identifies the job here is the POSTER, so that is what the screen
+     names: the campaign the manager published, its printed size, and the one
+     instruction that follows from it — in the client's own words from slide 6.
+
+     Verification is untouched. There it really is a shop, picked by a manager,
+     and checking you have arrived at the right one is the whole point of the
+     step. */
+  let body = '<h2 class="steptitle">'+byMode("This poster", "You\'re here")+'</h2>'
+    + '<p class="stepsub">'+byMode("Identify the wall where the poster can be placed.",
                                    "Check this is the right shop, and what goes up.")+'</p>'
     + '<div class="here">'
-    +   '<div class="hs">'+esc(t.storeName)+'</div>'
-    +   '<div class="hw">'+esc(t.city)+', '+esc(t.state)+' · <span class="mono">'+esc(t.storeCode)+'</span></div>'
+    +   byMode('<div class="hs">'+esc(camp.name)+'</div>'
+                 + '<div class="hw">'+posterLabel(t)+'</div>',
+               '<div class="hs">'+esc(t.storeName)+'</div>'
+                 + '<div class="hw">'+esc(t.city)+', '+esc(t.state)+' · <span class="mono">'+esc(t.storeCode)+'</span></div>')
     +   '<div class="bigfact">'+icon("poster")
     +     '<div><div class="bn">'
-    +       byMode('Find an empty wall for a <span class="num">'+posterDims(t)+'</span> poster',
+    +       byMode('Find an empty wall this poster will fit on',
                    'Put up a <span class="num">'+posterDims(t)+'</span> poster')
     +     '</div>'
-    +       '<div class="bs">'+byMode('Somewhere a ','On the ')+esc(t.displayType)
-    +         byMode(' would go · ',' · ')+esc(camp.name)+'</div></div>'
+    +       byMode('<div class="bs">'+esc(camp.name)+'</div>',
+                   '<div class="bs">On the '+esc(t.displayType)+' · '+esc(camp.name)+'</div>')
+    +     '</div>'
     +   '</div>'
     + '</div>'
     /* MOCKUP MODE: there is no baseline photo of a spot that has not been chosen
@@ -7200,8 +7394,15 @@ function fieldViewHere(t){
 
   const done = fieldDone(t);
   const next = done.check ? (done.shoot ? 3 : 2) : 1;
+  /* MOCKUP: "Get started" rather than "Find a wall". By the time this branch is
+     live the check-in is behind you and the next tap opens the rest of the job,
+     so the button is the start of the work rather than one instruction out of
+     it — and an instruction is a poor button anyway when the line above it and
+     the camera screen both say the same thing at more length. The label before
+     check-in stays "I'm at the shop": that one is a statement of fact the
+     merchandiser is making, and it is what the check-in records. */
   const label = done.check
-    ? (done.shoot ? byMode("Go to send","Go to submit") : byMode("Find a wall","Take the photo"))
+    ? (done.shoot ? byMode("Go to send","Go to submit") : byMode("Get started","Take the photo"))
     : "I'm at the shop";
   const actions = '<button class="btn back" data-act="nav" data-v="mytasks" aria-label="Back to my jobs">'+icon("back")+'</button>'
     + '<button class="btn primary" data-act="fstep" data-id="'+t.id+'" data-s="'+next+'">'+esc(label)+icon("fwd")+'</button>';
@@ -7220,13 +7421,23 @@ function fieldViewCheck(t){
       + '<div class="outcome ok"><div class="ot">You checked in</div><div class="ob">'
       + (ci ? esc(fmtDT(ci.ts)) + ' · <span class="num">' + ci.distance + ' m</span> from the shop.'
             : 'Recorded on this device.')
-      + '</div></div>';
+      + '</div></div>'
+      /* MOCKUP: with the check-in already recorded there is nothing left to
+         decide on this screen, so it was a green box, a lot of empty phone and
+         a button that did not explain itself. Naming the next job here means
+         the screen still tells you something on the way past. Verification is
+         left alone: there the wall is not the merchandiser's to identify. */
+      + (MOCKUP ? '<p class="stepsub" style="margin-top:12px">Next, identify the wall where '
+                + 'the poster can be placed.</p>' : '');
     const done = fieldDone(t);
     const next = done.shoot ? 3 : 2;
     return { body: body,
       actions: '<button class="btn back" data-act="fstep" data-id="'+t.id+'" data-s="0" aria-label="Back">'+icon("back")+'</button>'
         + '<button class="btn primary" data-act="fstep" data-id="'+t.id+'" data-s="'+next+'">'
-        + (done.shoot ? byMode("Go to send","Go to submit") : byMode("Find a wall","Take the photo"))
+        /* The same words as step 1's forward button, because it is the same
+           move to the same screen; two labels for one action is how a four-step
+           sequence starts feeling like more than four steps. */
+        + (done.shoot ? byMode("Go to send","Go to submit") : byMode("Get started","Take the photo"))
         + icon("fwd") + '</button>' };
   }
 
@@ -7340,24 +7551,83 @@ function fieldPhotoGrid(t, shots, editable){
 }
 
 /* ---------- step 4: submit ---------- */
+/* ---------- the confirmation, shared by "going" and "gone" ----------
+   THE ONE THING THIS SCREEN MUST NOT DO IS LIE, and the temptation to lie is
+   built into it. Submission is QUEUED, not performed: doSubmitExec() pushes
+   the bytes, the placements, the image rows and the status patch into the
+   Outbox as a single group and transitions with `optimistic:false`, so the
+   task stays In Progress on this device until the SERVER hands the row back.
+   A thank-you that appears the instant the button is pressed and says "sent"
+   would be wrong in exactly the situation this app exists for.
+
+   So there are two thank-yous here rather than one, and the difference lives
+   in the sentence rather than in the heading:
+
+     GONE  — t.status is Submitted. Only Sync.onTaskPatched() sets that, and
+             only from a row the database handed back, which it does only once
+             every byte has landed and niva_tasks_transition_guard has accepted
+             the status change. submitted_at is stamped by that same trigger
+             with now() (0004_functions.sql), so "Sent 9 Sep 2026, 11.45" is
+             the database's own clock and not this phone's — which is why it is
+             read from t.submittedAt and never from t.submitting.at.
+     GOING — the group is still draining. The heading still says thank you,
+             because the WORK is genuinely finished and acknowledging it costs
+             nothing, but the line under it opens with "Not sent yet" and says
+             what will make it go.
+
+   Offline is worded separately again. "Going up now" said to a phone with no
+   signal is the sentence that sends a merchandiser out of a basement believing
+   the job is filed. */
+function fieldThanks(t){
+  const sent = (t.status === S.SUBMITTED);
+  const left = t.submitting ? Outbox.groupPending(t.submitting.group) : 0;
+  const n    = t.submitting ? t.submitting.images : 0;
+  /* MOCKUP: what this person actually sent is a WALL they went and found. In
+     verification the wall was never in question — they sent proof that the
+     poster is up on it. */
+  const what = byMode("Your location for the poster","Your photo of the poster");
+
+  let line, note;
+  if(sent){
+    line = 'Sent <span class="num">'+esc(fmtDT(t.submittedAt))+'</span>. '+what+' has been sent.';
+    note = byMode("Nothing more to do — you will hear back whether this wall is being used.",
+                  "Nothing more to do — you will get an update when it is approved, or if something needs fixing.");
+  }else if(netUp()){
+    line = '<b>Not sent yet.</b> '+what+' and '
+         + (n === 1 ? 'your photo are' : 'your '+n+' photos are')
+         + ' going up from this phone now'
+         + (left ? ', about <b class="num">'+left+'</b> step'+(left===1?'':'s')+' to go' : '')
+         + '.';
+    note = "It is safe to close the app — it finishes on its own, and this screen says so when it has.";
+  }else{
+    line = '<b>Not sent yet.</b> This phone has no signal, so '+what.toLowerCase()+' is still here with you.';
+    note = "It goes by itself the moment you have a connection. Nothing is lost in the meantime, and it is safe to close the app.";
+  }
+
+  return '<div class="thanks'+(sent?'':' pending')+'">'
+    + '<div class="tick">'+icon(sent ? "check" : "clock")+'</div>'
+    + '<h2>Thank You</h2>'
+    + '<p class="tl">'+line+'</p>'
+    + '<p class="tn">'+esc(note)+'</p>'
+    + '</div>';
+}
+
 function fieldViewSend(t){
   const w = ws(t.id);
   const back = '<button class="btn back" data-act="fstep" data-id="'+t.id+'" data-s="2" aria-label="Back">'+icon("back")+'</button>';
 
   /* Already gone in, one way or another. */
   if(t.status === S.SUBMITTED || t.status === S.APPROVED || t.status === S.CLOSED){
-    let body = '<h2 class="steptitle">'+(t.status === S.SUBMITTED ? "Sent" : byMode("Done","Finished"))+'</h2>';
-    if(t.status === S.SUBMITTED){
-      body += '<div class="outcome wait"><div class="ot">With your manager</div>'
-        + '<div class="ob">Sent '+esc(fmtDT(t.submittedAt))+'. '
-        + byMode('Nothing more to do — you will hear back whether this wall is being used.',
-                 'Nothing more to do — you will get an update when it is approved, or if something needs fixing.')
-        + '</div></div>';
-    } else if(t.status === S.APPROVED){
+    /* Submitted gets the whole screen; approved and closed are updates about a
+       job the person already finished, so they keep the quieter card. */
+    let body = (t.status === S.SUBMITTED)
+      ? fieldThanks(t)
+      : '<h2 class="steptitle">'+byMode("Done","Finished")+'</h2>';
+    if(t.status === S.APPROVED){
       body += '<div class="outcome ok"><div class="ot">'+byMode("Wall suitable","Approved")+'</div>'
         + '<div class="ob">'+esc(userById(t.managerId).name)
         + byMode(' picked this wall on ',' approved this on ')+esc(fmtDT(t.approvedAt))+'.</div></div>';
-    } else {
+    } else if(t.status === S.CLOSED){
       body += '<div class="outcome ok"><div class="ot">'+byMode("Survey closed","Job closed")+'</div>'
         + '<div class="ob">Reference <span class="mono">'+esc(t.completionRef)+'</span>'
         + (t.closedAt ? ' · '+esc(fmtDT(t.closedAt)) : '')+'.</div></div>';
@@ -7368,32 +7638,39 @@ function fieldViewSend(t){
         + '<div class="bd" style="font-size:13.5px;color:var(--text-2)">'+esc(t.merchRemarks)+'</div></div>';
     }
     body += '<details class="disc"><summary>'+icon("clock")+'What has happened so far</summary>'+fieldHistory(t)+'</details>';
-    return { body: body,
-      actions: back + '<button class="btn primary" data-act="nav" data-v="mytasks">Back to my jobs</button>' };
+    /* No rail and no back arrow. There is no step left to walk to, and the one
+       chip that is still enabled — the camera — would cheerfully offer to
+       re-shoot a job that has already gone. One way out, full width, exactly
+       where the thumb already is. */
+    return { body: body, bare: true,
+      actions: '<button class="btn primary" data-act="nav" data-v="mytasks">'
+             + byMode("Back to Home page","Back to my jobs")+'</button>' };
   }
 
   /* Draining. Deliberately read-only: pulling an image out from under an
      upload that is already queued would destroy the bytes the queue is about
      to send. */
   if(t.submitting){
-    const left = Outbox.groupPending(t.submitting.group);
-    let body = '<h2 class="steptitle">Sending</h2>'
-      + '<div class="readonly-note"><b>Not sent yet.</b> Your '
-      +   t.submitting.bytes + ' photo upload' + (t.submitting.bytes === 1 ? '' : 's')
-      +   ' and the status change are still on this phone'
-      +   (netUp() ? '' : ' — and this phone has no signal right now') + '. '
-      +   (left ? 'About <b class="num">'+left+'</b> step'+(left===1?'':'s')+' left. ' : 'Finishing the last step. ')
-      +   'It is safe to close the app: it picks up where it left off.'
-      + '</div>'
+    /* Same screen, deliberately. Pressing Send has to land somewhere that
+       acknowledges the work, and whether the queue has drained yet is not
+       something the person in the shop did or can do anything about — so the
+       heading is identical and fieldThanks() carries the whole difference in
+       the sentence beneath it, where "Not sent yet" is still the first thing
+       read. */
+    let body = fieldThanks(t)
       + fieldPhotoGrid(t, w.after, false);
     if(w.remarks){
       body += '<div class="card" style="margin-bottom:10px"><div class="hd"><h3>What you wrote</h3></div>'
         + '<div class="bd" style="font-size:13.5px;color:var(--text-2)">'+esc(w.remarks)+'</div></div>';
     }
-    return { body: body,
-      actions: back
-        + '<button class="btn" data-act="syncpanel">See what is left</button>'
-        + (netUp() ? '<button class="btn primary" data-act="syncnow">Try now</button>' : '') };
+    /* "Try now" loses its slot rather than crowding the bar to three: the sync
+       panel behind "See what is left" carries Sync now, Retry and Discard, and
+       the queue is kicked on `online` and on every return to the tab anyway,
+       so nothing here depends on the user finding a button. */
+    return { body: body, bare: true,
+      actions: '<button class="btn" data-act="syncpanel">See what is left</button>'
+        + '<button class="btn primary" data-act="nav" data-v="mytasks">'
+        + byMode("Back to Home page","Back to my jobs")+'</button>' };
   }
 
   const n = w.after.length;
@@ -7435,9 +7712,20 @@ function merchTaskDetail(t){
   const cur  = fieldStepIndex(t);
   const step = [fieldViewHere, fieldViewCheck, fieldViewShoot, fieldViewSend][cur](t);
 
+  /* A step that asks to be `bare` is one the person has finished walking: the
+     confirmation. It gets neither the four-step rail — there is nowhere left
+     to step to — nor the ordinary sync banner, which would say in a second
+     place, in different words, exactly what fieldThanks() has just said in the
+     first. A REFUSAL is the exception and still shows: it is the only thing on
+     this screen that can contradict the tick, and burying bad news under a
+     thank-you is the same lie as claiming a queued write has landed. */
+  const bare = (step.bare === true);
+  const sync = taskSync(t);
+  const showSync = !bare || (sync && sync.kind === "failed");
+
   return fieldReworkBanner(t)
-    + fieldSyncBanner(t)
-    + fieldRail(t, cur)
+    + (showSync ? fieldSyncBanner(t) : "")
+    + (bare ? "" : fieldRail(t, cur))
     + step.body
     + '<div class="actionbar">' + step.actions + '</div>';
 }
@@ -7782,7 +8070,15 @@ const ARC = {
   handles:[], quad:[],
   meas:{ distFt:null, yawDeg:null, yawVerified:false, distSrc:"", depthUsed:false, wallSeen:false },
   nudge:{x:0,y:0}, armT0:0, armed:false, posterImg:null, panel:null, busy:false,
-  assumeLevel:false, pendingCalib:false, lastGates:null, capture:null
+  assumeLevel:false, pendingCalib:false, lastGates:null, capture:null,
+  /* THE LOCATION, ASKED FOR ONCE WHEN THIS CAPTURE SCREEN OPENED rather than at
+     the shutter — arcPrimeLocation explains at length why the shutter was the
+     wrong moment to ask. `pos` is the browser's own GeolocationPosition, kept
+     exactly as it came, so that arcGeoFix reads coordinates and accuracy off the
+     same shape of object whether the fix arrived here or at the shutter.
+     `asking` is true only while a request is in flight, which is how the
+     explanation modal knows its own dismissal is not an answer. */
+  geo:{ state:"unknown", pos:null, at:0, denied:false, why:"", asked:false, asking:false }
 };
 
 /* ---------- tiny helpers ---------- */
@@ -8204,11 +8500,13 @@ function arcCameraImageToCanvas(gl, tex, w, h, d){
 
 /* ---------- capability probe ---------- */
 function arcProbe(){
-  const out = { secure: window.isSecureContext !== false, media:false, xr:false, ori:false, oriGate:false };
+  const out = { secure: window.isSecureContext !== false, media:false, xr:false, ori:false, oriGate:false,
+                geoPerm:"unknown" };
   out.media = !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
   out.ori = typeof window.DeviceOrientationEvent !== "undefined";
   out.oriGate = out.ori && typeof window.DeviceOrientationEvent.requestPermission === "function";
-  return new Promise(function(res){
+  if(!out.secure) out.geoPerm = "unsupported";
+  const xrP = new Promise(function(res){
     if(!out.secure || !navigator.xr || !navigator.xr.isSessionSupported){ res(out); return; }
     let settled = false;
     const t = setTimeout(function(){ if(!settled){ settled = true; res(out); } }, 2500);
@@ -8218,6 +8516,17 @@ function arcProbe(){
       }, function(){ if(settled) return; settled = true; clearTimeout(t); res(out); });
     }catch(e){ clearTimeout(t); res(out); }
   });
+  /* THE LOCATION PERMISSION STATE BELONGS IN THE PROBE, because it decides what
+     the very next screen has to do: nothing at all when it is already granted, a
+     sentence and a button when it has never been asked, and a plain warning that
+     the photos will carry no GPS when it has been refused. Reading it costs
+     nothing and cannot raise a prompt — that is the entire value of the
+     Permissions API here, and it is why this can be settled before the
+     merchandiser is anywhere near a camera. */
+  const geoP = out.secure
+    ? arcGeoPermState().then(function(st){ out.geoPerm = st; })
+    : Promise.resolve();
+  return Promise.all([xrP, geoP]).then(function(){ return out; });
 }
 
 /* ---------- sensors ---------- */
@@ -8377,6 +8686,16 @@ function arcStartPanel(caps){
     rows += line(caps.media,  "Camera (getUserMedia)");
     rows += line(caps.xr,     "WebXR immersive-ar + hit-test", caps.xr?"":"Android Chrome + ARCore only");
     rows += line(caps.ori,    "Motion / orientation sensors", caps.oriGate?"iOS asks for permission":"");
+    /* THE PERMISSION STATE, not merely whether the API exists. "denied" is the
+       one that silently costs every photo its location and the one nobody could
+       diagnose from the field, because a denied geolocation request returns
+       instantly with no prompt to notice and no dialog to describe down a phone
+       line. Putting it on the same matrix as the camera makes it answerable. */
+    rows += line(caps.geoPerm === "granted", "Location (GPS)",
+                 caps.geoPerm === "granted"     ? "allowed for this site"
+               : caps.geoPerm === "denied"      ? "blocked for this site — photos will carry no GPS"
+               : caps.geoPerm === "unsupported" ? "no geolocation on this origin"
+               : "will be asked for on this screen");
     rows += line(!!cal,       "Lens calibrated (focal length)",
                  cal?(Math.round(cal.f)+" px @ "+cal.vw+"w")
                     :byMode("reference scaling estimated; the drawn poster is scaled by f too",
@@ -8554,6 +8873,12 @@ function arcOpen(taskId, phase){
   ARC.xr.pendingShot = null; ARC.xr.cam = null; ARC.xr.camIntr = null;
   ARC.xr.camAccess = false; ARC.xr.binding = null; ARC.xr.aspectWarned = false;
   ARC.diag = null;
+  /* A fresh visit gets a fresh fix. The PERMISSION survives — that is the
+     browser's to remember and the whole point of only asking once — but the
+     COORDINATE must not, or the second office of the morning is quietly filed at
+     the first one's, which is the same error the typed office name exists to
+     prevent. */
+  ARC.geo = { state:"unknown", pos:null, at:0, denied:false, why:"", asked:false, asking:false };
 
   const layer = arcEl("arlayer");
   layer.innerHTML = arcShell(t);
@@ -8568,7 +8893,17 @@ function arcOpen(taskId, phase){
   arcLoadImage(t.posterArt && t.posterArt.src).then(function(im){ ARC.posterImg = im; },
     function(){ ARC.posterImg = null; toast("Poster artwork could not be decoded — the overlay will draw an outline only.", true); });
 
-  arcProbe().then(arcStartPanel);
+  /* THE START PANEL FIRST, THEN THE LOCATION QUESTION OVER THE TOP OF IT. The
+     panel is the context that makes the question answerable — it names the
+     poster and the two steps — and asking here means the request lands while
+     this is an ordinary page, seconds before any camera or AR session exists.
+     arcPrimeLocation never rejects and nothing waits on it; the tier buttons
+     underneath are live the moment it is dismissed, and the tap that starts the
+     camera is a fresh user activation of its own. */
+  arcProbe().then(function(caps){
+    arcStartPanel(caps);
+    arcPrimeLocation(caps);
+  });
 }
 function arcClose(){
   ARC.open = false;
@@ -9569,7 +9904,13 @@ function floorResolveHeight(){
     f.hRelSigma = st.relSigma;
     f.calibrated = false;          // NOT measured on this device, and never claims to be
     f.hSrcKey = "stature";
-    f.hSrc = "from your height — " + st.statureCm.toFixed(0) + " cm × " + st.ratio.toFixed(3)
+    /* Both units, on purpose. This line is shown to the merchandiser in a toast
+       and copied verbatim into placements.floorHeightSource, so it has to be
+       readable by the person who stated the height — in the feet and inches they
+       stated it in — and exact for whoever audits the record later, in the
+       centimetres the column actually holds. */
+    f.hSrc = "from your height — " + fmtFtIn(st.statureCm) + " (" + st.statureCm.toFixed(0)
+           + " cm) × " + st.ratio.toFixed(3)
            + " (phone held at neck level) = " + f.hM.toFixed(2) + " m, ± "
            + (st.relSigma*100).toFixed(1) + "%";
     return f;
@@ -9616,7 +9957,12 @@ function saveHeight(cm){
   const v = Math.round(Number(cm));
   const st = statureHold(v);
   if(!st){
-    toast("Enter a height between " + STATURE_MIN_CM + " and " + STATURE_MAX_CM + " cm.", true);
+    /* Unreachable from the picker, which cannot offer a height the CHECK would
+       refuse. It is the guard for every other caller, and it answers in the
+       units the question was asked in rather than the ones the column uses. */
+    const b = statureInchBand();
+    toast("Choose a height between " + fmtFtIn(Math.round(b.minIn*CM_PER_INCH))
+        + " and " + fmtFtIn(Math.round(b.maxIn*CM_PER_INCH)) + ".", true);
     return false;
   }
   Session.mergeProfile({ height_cm: v });
@@ -9624,8 +9970,11 @@ function saveHeight(cm){
   state.profiles = USERS;
   heightMarkAsked();
   save();
+  /* The payload is centimetres because the column is; the LABEL is feet and
+     inches because the person watching the queue drain is the person who
+     answered the question. */
   Outbox.push("profile.patch", { id: uid, patch: { height_cm: v } },
-              { label: "Save your height (" + v + " cm)" });
+              { label: "Save your height (" + fmtFtIn(v) + ")" });
   /* If the capture screen is already open, the new h takes effect on the next
      frame rather than on the next capture. */
   if(ARC.open && ARC.floor.on) floorResolveHeight();
@@ -9636,6 +9985,50 @@ function saveHeight(cm){
   return true;
 }
 
+/* The feet the band allows, and the inches that are legal INSIDE the chosen
+   foot. Two lists and not two number boxes: on a phone these are native wheels,
+   they need no keyboard, and there is no way to type 5.4, to leave the inches
+   half-typed, or to put 64 in the feet box — which is precisely the "typed in
+   inches" mistake 0006_profile_height.sql's CHECK exists to catch. A picker that
+   cannot express a wrong answer beats an error message that explains one, which
+   is the same argument POSTER_SIZES makes for being a picklist.
+
+   `sel` is null when nothing is on file, and the first option is then an
+   unchosen dash — never a pre-selected 5 ft 4 in, because that is a number
+   nobody said and Save would write it. */
+function statureFeetOptions(sel){
+  const b = statureInchBand();
+  const lo = Math.floor(b.minIn/INCHES_PER_FOOT), hi = Math.floor(b.maxIn/INCHES_PER_FOOT);
+  let out = (sel == null) ? '<option value="" selected>—</option>' : "";
+  for(let f = lo; f <= hi; f++)
+    out += '<option value="' + f + '"' + (f === sel ? ' selected' : '') + '>' + f + ' ft</option>';
+  return out;
+}
+
+/* The inches offered under one foot, which is how the pair stays inside the
+   CHECK without a validation step: at 7 ft only 0–2 in are listed, because
+   7 ft 3 in is 221 cm. With no foot chosen there is nothing sensible to offer,
+   so the list is a single dash — feet first is the order it would be said in
+   anyway. */
+function statureInchOptions(ft, sel){
+  if(ft == null) return '<option value="" selected>—</option>';
+  const b = statureInchBand(), legal = [];
+  for(let i = 0; i < INCHES_PER_FOOT; i++){
+    const total = ft*INCHES_PER_FOOT + i;
+    if(total >= b.minIn && total <= b.maxIn) legal.push(i);
+  }
+  /* An inch that was legal under the old foot and is not under the new one goes
+     back to the dash rather than becoming whatever happens to be first in the
+     list: changing 5 ft 9 in to 7 ft must not quietly write 7 ft 0 in. */
+  const keep = (legal.indexOf(sel) >= 0) ? sel : null;
+  let out = (keep == null) ? '<option value="" selected>—</option>' : "";
+  for(let k = 0; k < legal.length; k++)
+    out += '<option value="' + legal[k] + '"' + (legal[k] === keep ? ' selected' : '')
+         + '>' + legal[k] + ' in</option>';
+  return out;
+}
+
+
 function askHeight(manual){
   if(!signedIn()) return;
   if(!profileHeightSupported()){
@@ -9643,29 +10036,68 @@ function askHeight(manual){
                    + "the latest migration. Sizes will stay rough until then.", true);
     return;
   }
-  const cur = myStatureCm();
+  /* Whatever is on file comes back as feet and inches, because that is the only
+     form the question was ever asked in. This is a DISPLAY of the stored number
+     and never a write: somebody who opens this to check their height and closes
+     it again must change nothing, even though cm -> nearest inch is not exactly
+     reversible. Only Save writes. */
+  const cur  = myStatureCm();
+  const pick = (cur != null) ? statureFtInFor(cur) : null;
   openModal({
     title: manual ? "Your height" : "One quick question",
     body: '<p style="margin:0 0 12px;font-size:13.5px;line-height:1.55;color:var(--text-2)">'
         + 'To show a poster at its real size the app has to know how high off the floor you hold '
         + 'the phone. It works that out from your height — <b>you only answer this once</b>.'
         + '</p>'
-        + '<div class="field" style="max-width:220px"><label class="fl" for="hq_cm">How tall are you? (cm)</label>'
-        + '<input id="hq_cm" type="number" inputmode="numeric" step="1" min="' + STATURE_MIN_CM + '" '
-        + 'max="' + STATURE_MAX_CM + '" value="' + (cur || "") + '" placeholder="e.g. 170"></div>'
-        + '<div class="hint" style="margin-top:10px">Hold the phone up at <b>neck level</b> when you take a '
-        + 'measurement — that is the position this works from. Skip the question and the app falls back to a '
-        + 'standard guess, marks every capture <b>rough</b>, and still works.</div>',
+        + '<label class="fl" for="hq_ft">How tall are you?</label>'
+        /* Side by side and NOT .grid2: that class collapses to one column on
+           exactly the phone this runs on, and feet stacked above inches reads
+           as two questions. */
+        + '<div style="display:flex;gap:10px;max-width:260px">'
+        +   '<div class="field" style="flex:1;margin:0"><select id="hq_ft" aria-label="Height in feet">'
+        +     statureFeetOptions(pick ? pick.ft : null) + '</select></div>'
+        +   '<div class="field" style="flex:1;margin:0"><select id="hq_in" aria-label="Height in inches">'
+        +     statureInchOptions(pick ? pick.ft : null, pick ? pick.in : null) + '</select></div>'
+        + '</div>'
+        + '<div class="hint">e.g. 5 feet 4 inches</div>'
+        /* THE POSTURE, SAID THE WAY THE CAPTURE SCREEN SAYS IT. h is stature ×
+           HOLD_RATIO and HOLD_RATIO describes a posture, so the instruction is
+           not decoration — see section 1. The same figure and the same landmark
+           appear here and on the capture screen deliberately: two drawings or
+           two forms of words would teach two postures. "When you point the phone
+           at the wall" replaces "when you take a measurement", which is a word
+           for something the merchandiser does not know they are doing. */
+        + '<div class="hint" style="margin-top:10px;display:flex;gap:11px;align-items:flex-start">'
+        +   HOLD_CUE_SVG
+        +   '<span>When you point the phone at the wall, <b>hold it up at neck level</b> — the same '
+        +   'thing the capture screen asks for, and the position this works from. Skip the question and '
+        +   'the app falls back to a standard guess, marks every capture <b>rough</b>, and still works.</span>'
+        + '</div>',
     actions: [
       { label:"Save", cls:"btn primary", act: function(){
-          const el = $("#hq_cm");
-          saveHeight(el ? el.value : null);
+          const f = $("#hq_ft"), i = $("#hq_in");
+          /* Both halves or neither: a dash in either box means they have not
+             answered yet, and half a height is not a height. */
+          if(!f || !i || f.value === "" || i.value === ""){
+            toast("Choose the feet and the inches — e.g. 5 feet 4 inches.", true);
+            return;
+          }
+          saveHeight(ftInToCm(f.value, i.value));
         } },
       { label: manual ? "Cancel" : "Skip for now", cls:"btn ghost", act: function(){
           if(!manual) heightMarkAsked();
           closeModal();
         } }
     ]
+  });
+  /* The inches on offer depend on the feet, so the pair can never name a height
+     the database would refuse. Rebuilt on change rather than validated after the
+     fact — openModal has already written the DOM synchronously by the time this
+     runs, the way openPosterCropper wires its crop box. */
+  const ftSel = $("#hq_ft"), inSel = $("#hq_in");
+  if(ftSel && inSel) ftSel.addEventListener("change", function(){
+    inSel.innerHTML = statureInchOptions(ftSel.value === "" ? null : Number(ftSel.value),
+                                         inSel.value === "" ? null : Number(inSel.value));
   });
 }
 
@@ -12085,6 +12517,190 @@ function arcEnsureOffice(geo){
     });
 }
 
+/* The browser's own words for a geolocation failure are written for developers:
+   "Timeout expired", "User denied Geolocation". The merchandiser reading them
+   inside the office dialog is not a developer, and the deck came back with the
+   first of those quoted at us off a live screen. These say the same things in
+   the register the rest of the merchandiser's screens are written in. */
+function arcGeoWhy(err){
+  const c = err && err.code;
+  if(c === 1) return "location was turned down for this site";
+  if(c === 2) return "the phone could not work out where it is";
+  if(c === 3) return "the phone did not return a location in time";
+  return (err && err.message) ? String(err.message) : "the phone gave no location";
+}
+
+/* What the browser will do if asked, WITHOUT asking. Always resolves, and every
+   way of not knowing collapses to "unknown", which is then treated exactly like
+   "prompt": we explain ourselves and let the browser decide whether a dialog is
+   warranted. Safari before 16 throws on the "geolocation" descriptor rather than
+   rejecting, hence the try; some WebViews expose query() and never settle it,
+   hence the timer. */
+function arcGeoPermState(){
+  return new Promise(function(res){
+    if(!navigator.geolocation){ res("unsupported"); return; }
+    if(!navigator.permissions || !navigator.permissions.query){ res("unknown"); return; }
+    let settled = false;
+    const done = function(v){ if(settled) return; settled = true; res(v); };
+    const bail = setTimeout(function(){ done("unknown"); }, 1200);
+    try{
+      navigator.permissions.query({ name:"geolocation" }).then(function(st){
+        clearTimeout(bail); done((st && st.state) || "unknown");
+      }, function(){ clearTimeout(bail); done("unknown"); });
+    }catch(e){ clearTimeout(bail); done("unknown"); }
+  });
+}
+
+/* Take one fix and keep it. ALWAYS RESOLVES, and nothing waits on it: this is a
+   head start, not a step, and the start panel behind it is already usable. */
+function arcGeoWarm(){
+  return new Promise(function(res){
+    if(!navigator.geolocation){ res(); return; }
+    ARC.geo.asking = true;
+    let done = false;
+    const finish = function(){ if(done) return; done = true; ARC.geo.asking = false; res(); };
+    /* TWENTY-FIVE SECONDS, AND THAT IS NOT GENEROUS. The permission dialog's own
+       time is spent on this clock — the person has to read it, understand what
+       is being asked and tap — and the four-and-a-half-second budget this used
+       to get at the shutter expired while the dialog was still on screen. That
+       is the whole of the field's report that no prompt appeared: one did,
+       briefly, over a page that had already given up on it. */
+    const bail = setTimeout(finish, 25000);
+    /* enableHighAccuracy:FALSE, DELIBERATELY, and only here. Every one of these
+       photos is taken indoors, where the satellite fix frequently never arrives
+       at all, while the wifi-and-cell fix comes back in a second or two and is
+       good to tens of metres. Tens of metres is ample for the only question the
+       location on a mockup answers — which office is this — and a coarse fix
+       that exists beats a precise one that does not. The shutter still asks for
+       high accuracy; this is the one that must not come back empty. */
+    navigator.geolocation.getCurrentPosition(function(pos){
+      clearTimeout(bail);
+      ARC.geo.pos = pos; ARC.geo.at = Date.now();
+      ARC.geo.denied = false; ARC.geo.why = "";
+      finish();
+    }, function(err){
+      clearTimeout(bail);
+      ARC.geo.pos = null;
+      /* code 1 is the only one that means "do not bother asking again". A
+         timeout or an unavailable sensor may well succeed at the shutter. */
+      ARC.geo.denied = !!(err && err.code === 1);
+      ARC.geo.why = arcGeoWhy(err);
+      finish();
+    }, { enableHighAccuracy:false, timeout:20000, maximumAge:60000 });
+  });
+}
+
+/* ---------- THE LOCATION IS ASKED FOR BEFORE THE CAMERA IS OPEN ----------
+
+   The field's report was that the camera permission popped up and the location
+   permission never did, so every mockup came back with no GPS on it. The
+   getCurrentPosition call in arcGeoFix WAS firing — the note the merchandiser
+   was shown said "Timeout expired", which is the browser's own wording for the
+   4.5 s deadline running out, not for a refusal — but nothing that could
+   plausibly have produced a visible prompt was in place when it fired:
+
+     * it happened at SHUTTER TIME, several seconds into a promise chain that
+       began when the shutter was pressed, so the page held no transient user
+       activation. Chrome for Android answers an unprompted geolocation request
+       with the quiet chip in the omnibox rather than a dialog, and a chip is
+       exactly the thing somebody photographing a wall does not notice. The
+       camera prompt behaves differently because getUserMedia is reached
+       straight off a button tap;
+     * on the Tier A paths it fired immediately after `session.end()`, while the
+       browser was still unwinding immersive presentation and redrawing its own
+       chrome. A prompt raised in that window has nowhere to be drawn, and the
+       omnibox that would have carried the chip was not on screen a moment
+       before;
+     * and it had four and a half seconds. Even where a dialog does appear the
+       clock runs while it is up, so the request expired and askOffice opened a
+       modal of its own over whatever the browser was showing.
+
+   None of that is fixable at the shutter, so the ask moves to the one moment in
+   this flow when the merchandiser is not mid-capture and the page is an ordinary
+   page: the instant the capture screen opens. It is one sentence saying why the
+   app wants it and a button to tap, so the request carries a real user gesture
+   and gets a full dialog rather than a chip.
+
+   THE PERMISSIONS-POLICY HEADER IS NOT INVOLVED. vercel.json sends
+   `geolocation=(self)`, which GRANTS the feature to this origin's own documents
+   — it withholds it only from cross-origin iframes, and this page is the
+   top-level document. It grants `camera=(self)` on identical terms and the
+   camera prompt demonstrably works. Had it been `geolocation=()` the symptom
+   would have been different anyway: an instant PERMISSION_DENIED with no prompt,
+   not a timeout.
+
+   REFUSAL COSTS NOTHING. arcEnsureOffice and askOffice are untouched and still
+   catch every case where no location arrives, whether that is a refusal here, a
+   refusal at the browser dialog, or a phone that simply cannot see the sky. */
+function arcPrimeLocation(caps){
+  const st = (caps && caps.geoPerm) || "unknown";
+  ARC.geo.state = st;
+  ARC.geo.asked = true;
+
+  /* An insecure origin has no geolocation to ask for, and the start panel behind
+     this has already said so at length in its own banner. A second dialog about
+     the same thing would be piling on. */
+  if(!caps || caps.secure === false || st === "unsupported"){
+    ARC.geo.why = "this page cannot use location here";
+    return Promise.resolve();
+  }
+
+  if(st === "denied"){
+    ARC.geo.denied = true;
+    ARC.geo.why = "location is switched off for this site in the browser";
+    /* NOT A MODAL. There is nothing the merchandiser can do about this from
+       inside the page — the switch is in the browser's own site settings — so a
+       dialog they cannot act on would just be a door to close before taking a
+       photo. The honest thing is to say what will happen instead, say where the
+       switch is, and let them get on with it. */
+    toast("Location is blocked for this site, so the photo will have no GPS on it. You will be asked to "
+        + "type the office instead. To turn it back on, tap the padlock next to the address.", true);
+    return Promise.resolve();
+  }
+
+  /* Already allowed: no dialog and no sentence, because there is nothing to ask
+     and nothing to explain. Just go and get a fix so the shutter never has to
+     wait for one. */
+  if(st === "granted") return arcGeoWarm();
+
+  return new Promise(function(resolve){
+    let settled = false;
+    const finish = function(){ if(settled) return; settled = true; resolve(); };
+    openModal({
+      title: "Allow the app to see where you are",
+      body:
+        '<p>This photo is filed by <b>where it was taken</b>. If the phone tells the app where you are, '
+        + 'that is saved with the picture automatically and there is nothing for you to type.</p>'
+        + '<p>Your phone will ask you to allow it. Tap <b>Allow</b> — it only asks once.</p>'
+        + '<div class="hint" style="margin-top:8px">If you say no, nothing breaks: you will be asked to type '
+        + 'the office name instead, and the photo is filed under that.</div>',
+      actions: [{
+        label: "Ask me now", cls: "btn primary",
+        act: function(){
+          /* THE REQUEST GOES OUT FROM INSIDE THE CLICK. The modalact handler
+             calls this synchronously out of the real click event, so the page
+             still holds a transient user activation and Chrome for Android
+             raises a full permission dialog rather than the quiet omnibox chip
+             that nobody in the field noticed. The call is therefore made FIRST
+             and this modal comes down behind it; closing first would put a task
+             boundary between the gesture and the request for no gain. */
+          const p = arcGeoWarm();
+          closeModal();
+          p.then(finish, finish);
+        }
+      }, {
+        label: "Not now", cls: "btn ghost",
+        act: function(){ finish(); closeModal(); }
+      }],
+      /* A dismissal is an answer — unless a request is already in flight, in
+         which case this modal is being taken down BY that request and the real
+         answer is still coming from the browser's own dialog. */
+      onClose: function(){ if(!ARC.geo.asking) finish(); }
+    });
+  });
+}
+
+
 /* GPS fix at shutter time, reusing the geofence rule the rest of the app uses.
 
    MOCKUP MODE DOES NOT INVENT A POSITION. The verification build jitters a
@@ -12111,21 +12727,70 @@ function arcGeoFix(t){
       res({ lat:sim.lat, lng:sim.lng, accuracy:sim.accuracy, distance:sim.distance,
             pass: sim.distance <= GEOFENCE_M, source:"simulated", note:note });
     };
-    if(!navigator.geolocation){ fallback("no geolocation API"); return; }
+    /* ONE place that turns a GeolocationPosition into the record, so that a fix
+       taken on the start panel and a fix taken at the shutter are described
+       identically and only `note` says which of the two it was. */
+    const accept = function(pos, note){
+      const la = pos.coords.latitude, ln = pos.coords.longitude;
+      const dist = haversine(la, ln, t.lat, t.lng);
+      res({ lat:+la.toFixed(5), lng:+ln.toFixed(5), accuracy: pos.coords.accuracy || 20,
+            distance: dist, pass: dist <= GEOFENCE_M, source:"device", note: note || "" });
+    };
+    const warm = (ARC.geo.pos && (Date.now() - ARC.geo.at) <= GEO_PRIME_MAX_AGE_MS)
+      ? ARC.geo.pos : null;
+
+    /* MOCKUP TAKES THE PRIMED FIX AS IT STANDS. The location on a mockup answers
+       one question — which office is this — and the office does not change
+       between opening the capture screen and pressing the shutter a minute
+       later. Reading it again would buy nothing but a longer stare at a
+       "Capturing…" panel.
+
+       VERIFICATION ALWAYS READS FRESH. There the coordinate is evidence for a
+       geofence verdict, and the whole claim being made is that the phone was AT
+       the store when the shutter went. That is measured at the shutter or it is
+       not measured, so the primed fix is only ever the last thing tried below. */
+    if(warm && MOCKUP){ accept(warm, "location taken when the capture screen opened"); return; }
+
+    const giveUp = function(note){
+      /* A REAL FIX FROM A MINUTE AGO BEATS BOTH ALTERNATIVES: it beats no
+         location at all in mockup mode, and it beats a coordinate invented
+         around the store in verification mode. It is labelled as what it is, and
+         `accuracy` is the browser's own number for it either way, so nobody
+         reading the row later mistakes it for a shutter-time reading. */
+      if(warm){
+        accept(warm, "no live fix (" + note + ") — using the location taken when the capture screen opened");
+        return;
+      }
+      fallback(note);
+    };
+
+    if(!navigator.geolocation){ giveUp("this phone exposes no location API"); return; }
+    /* A DENIED PERMISSION PRODUCES NO PROMPT AND NO WAIT — the call fails
+       immediately — so there is nothing to be gained by making it, and saying so
+       plainly in the office dialog is far more use to a merchandiser than
+       "Timeout expired" ever was. */
+    if(ARC.geo.denied){ giveUp("location is switched off for this site in the browser"); return; }
     let done = false;
-    const bail = setTimeout(function(){ if(!done){ done = true; fallback("GPS timed out"); } }, 5000);
+    /* NINE SECONDS, NOT FOUR AND A HALF. The old budget was set when this call
+       was also expected to raise the permission prompt, which made it hopeless
+       at any length. Now the prompt has already been answered on the start
+       panel and the only thing being waited for is the fix itself, which indoors
+       routinely takes longer than five seconds to arrive. `maximumAge` lets the
+       browser hand back its own recent fix instantly, which is the ordinary case
+       once the start panel has warmed one, so the nine seconds is a ceiling
+       almost nobody meets rather than a wait almost everybody serves. */
+    const bail = setTimeout(function(){
+      if(!done){ done = true; giveUp("the phone did not return a location in time"); }
+    }, 9500);
     try{
       navigator.geolocation.getCurrentPosition(function(pos){
         if(done) return; done = true; clearTimeout(bail);
-        const la = pos.coords.latitude, ln = pos.coords.longitude;
-        const dist = haversine(la, ln, t.lat, t.lng);
-        res({ lat:+la.toFixed(5), lng:+ln.toFixed(5), accuracy: pos.coords.accuracy || 20,
-              distance: dist, pass: dist <= GEOFENCE_M, source:"device", note:"" });
+        accept(pos, "");
       }, function(err){
         if(done) return; done = true; clearTimeout(bail);
-        fallback("device GPS unavailable (" + ((err && err.message) || "denied") + ")");
-      }, { enableHighAccuracy:true, timeout:4500, maximumAge:0 });
-    }catch(e){ clearTimeout(bail); fallback("geolocation threw"); }
+        giveUp(arcGeoWhy(err));
+      }, { enableHighAccuracy:true, timeout:9000, maximumAge:GEO_PRIME_MAX_AGE_MS });
+    }catch(e){ clearTimeout(bail); giveUp("the phone refused the location request"); }
   });
 }
 /* FLOOR-LINE IS ALWAYS TIER 'Be', WHATEVER THE LENS IS DOING.
@@ -14818,9 +15483,47 @@ function runSelfTest(){
         !!statureHold(STATURE_MIN_CM) && !!statureHold(STATURE_MAX_CM), true);
       T("stature: a missing height is not a zero height", statureHold(null), null);
       T("stature: a value typed in inches is refused", statureHold(68), null,
-        null, "the mistake a bare number input actually produces");
+        null, "the mistake a bare number input produced — the feet/inches picker cannot make it");
       T("stature: a value typed in millimetres is refused", statureHold(1720), null);
       T("stature: nonsense is refused", statureHold("tall"), null);
+
+      /* --- the unit skin: asked in feet and inches, stored in centimetres --- */
+      T("ft/in: 5 ft 4 in — the height the client wrote on the slide — is 163 cm",
+        ftInToCm(5, 4), 163, 0, "64 in × 2.54 = 162.56");
+      T("ft/in: …and it reads back as it was said, not as 5 ft 3 in",
+        fmtFtIn(ftInToCm(5, 4)), "5 ft 4 in", 0);
+      T("ft/in: 6 ft 0 in does not come back as 5 ft 12 in",
+        fmtFtIn(ftInToCm(6, 0)), "6 ft 0 in", 0);
+      T("ft/in: every height the picker offers survives the round trip to the picker",
+        (function(){
+          const b = statureInchBand();
+          for(let t = b.minIn; t <= b.maxIn; t++){
+            const p = cmToFtIn(Math.round(t*CM_PER_INCH));
+            if(!p || p.totalIn !== t) return "broken at " + t + " in";
+          }
+          return true;
+        })(), true, 0, "in → cm → in is the identity across the whole band");
+      T("ft/in: nothing the picker offers can violate the CHECK the database enforces",
+        (function(){
+          const b = statureInchBand();
+          for(let t = b.minIn; t <= b.maxIn; t++){
+            const cm = Math.round(t*CM_PER_INCH);
+            if(cm < STATURE_MIN_CM || cm > STATURE_MAX_CM || !statureHold(cm))
+              return t + " in is " + cm + " cm, outside the band";
+          }
+          return true;
+        })(), true, 0, "the band is derived from the constraint, not written down twice");
+      T("ft/in: the band stops short of the constraint at both ends rather than over it",
+        !statureHold(Math.round((statureInchBand().minIn - 1)*CM_PER_INCH))
+        && !statureHold(Math.round((statureInchBand().maxIn + 1)*CM_PER_INCH)), true, 0,
+        "3 ft 11 in is 119 cm and 7 ft 3 in is 221 cm — neither is offered");
+      T("ft/in: a stored centimetre value the inch grid cannot name is pulled inside it",
+        statureFtInFor(STATURE_MIN_CM).totalIn, statureInchBand().minIn, 0,
+        "120 cm is 47.2 in; the picker starts at 48");
+      T("ft/in: a foot that cannot hold the chosen inches clears them to a dash",
+        statureInchOptions(Math.floor(statureInchBand().maxIn/INCHES_PER_FOOT), 9)
+          .indexOf('value="9"') < 0, true, 0,
+        "7 ft 9 in is not a height this offers, so the inches are not silently kept");
 
       /* --- provenance survives the round trip through placements.note --- */
       const nStat = "[floor h=1.394m/4.01% ang=37.32deg/0.60deg err=4.56% (height 4.01 / pitch 2.19) "
@@ -15150,23 +15853,31 @@ function runSelfTest(){
         so.roomEnough, !MOCKUP);
     })();
 
-    /* ---- THE THREE POSTER SIZES, IN A 4 FT OFFICE ----
-       The client prints A4, A3 and a 2 × 4 ft board, and the rooms are small
+    /* ---- THE TWO POSTER SIZES, IN A 4 FT OFFICE ----
+       The client prints A4 and A2 (deck slide 4), and the rooms are small
        enough that 4 ft is the most floor anyone has. Every assertion here is
        about that pairing: each size must FIT the frame from inside the ceiling,
        the guidance must never point past it, and the floor-line method must
-       actually be able to measure at the distance it recommends. */
+       actually be able to measure at the distance it recommends.
+
+       A2 is the binding case now that the 2 × 4 ft board is gone, and it binds
+       by an enormous margin — which is exactly why its numbers are PINNED below
+       rather than asserted as a bare boolean. If the frame, the assumed FOV or
+       the ceiling ever moves, that has to surface as a changed number and not
+       as a test that still passes. */
     (function posterSizeTests(){
-      T("three poster sizes, and only three", POSTER_SIZES.length, 3, 0);
+      T("two poster sizes, and only two", POSTER_SIZES.length, 2, 0);
       T("poster sizes carry unique keys",
-        POSTER_SIZES.map(function(p){ return p.key; }).sort().join(","), "2x4,a3,a4", 0);
+        POSTER_SIZES.map(function(p){ return p.key; }).sort().join(","), "a2,a4", 0);
       /* ISO 216 in feet, derived rather than typed. */
       T("A4 is 0.689 × 0.974 ft", posterSize("a4").widthFt, 0.6890, 1e-3, "210 mm");
-      T("A3 is 0.974 × 1.378 ft", posterSize("a3").heightFt, 1.3780, 1e-3, "420 mm");
-      T("A3's short side is A4's long side — the ISO halving rule",
-        posterSize("a3").widthFt, posterSize("a4").heightFt, 1e-12);
-      T("the board is exactly 2 × 4 ft", posterSize("2x4").widthFt + "x" + posterSize("2x4").heightFt,
-        "2x4", 0);
+      T("A2 is 1.378 × 1.949 ft", posterSize("a2").heightFt, 1.9488, 1e-3, "594 mm");
+      T("A2's short side is exactly twice A4's — two ISO steps up",
+        posterSize("a2").widthFt, posterSize("a4").widthFt*2, 1e-12);
+      T("A4 and A2 are the SAME SHAPE, so one crop serves both",
+        posterSize("a2").widthFt/posterSize("a2").heightFt,
+        posterSize("a4").widthFt/posterSize("a4").heightFt, 1e-12,
+        "ISO 216 halves the long side, so posterAspect() is identical and the manager's crop box never changes");
 
       const NW2 = NOMINAL_FRAME_W, NH2 = NOMINAL_FRAME_H;
       const fitAt = function(p, dFt){
@@ -15183,15 +15894,35 @@ function runSelfTest(){
       T("…with room to spare, not marginally",
         POSTER_SIZES.every(function(p){
           const v = fitAt(p, MOCKUP_MAX_STANDOFF_FT); return Math.max(v.fillW, v.fillH) < 0.55; }), true, null,
-        "A4 " + (fitAt(posterSize("a4"), 4).fillW*100).toFixed(0) + " % · A3 "
-          + (fitAt(posterSize("a3"), 4).fillW*100).toFixed(0) + " % · board "
-          + (fitAt(posterSize("2x4"), 4).fillH*100).toFixed(0) + " % of the frame");
+        "A4 " + (fitAt(posterSize("a4"), 4).fillW*100).toFixed(0) + " % · A2 "
+          + (fitAt(posterSize("a2"), 4).fillW*100).toFixed(0) + " % of the frame width");
       T("every size's fit minimum is inside the ceiling",
         POSTER_SIZES.every(function(p){ return minFor(p) < MOCKUP_MAX_STANDOFF_FT; }), true, null,
-        "A4 " + minFor(posterSize("a4")).toFixed(2) + " · A3 " + minFor(posterSize("a3")).toFixed(2)
-          + " · board " + minFor(posterSize("2x4")).toFixed(2) + " ft");
-      T("the 2×4 ft board is the tightest of the three, and is HEIGHT-limited",
-        fitAt(posterSize("2x4"), 4).limit, "height", 0);
+        "A4 " + minFor(posterSize("a4")).toFixed(2) + " · A2 " + minFor(posterSize("a2")).toFixed(2) + " ft");
+
+      /* THE NUMBER THE WHOLE SIZE CHANGE TURNS ON. A2 is the largest sheet the
+         programme prints, so if the 4 ft ceiling were going to break under the
+         client's real range, it would break here. It is not close: A2 needs
+         1.06 ft to fit the nominal portrait frame edge to edge — a quarter of
+         the ceiling — and at the ceiling it occupies 27 % of the frame width.
+         The ceiling therefore does not move, and taskStandoff keeps reporting
+         roomEnough for every published size. */
+      T("A2 needs 1.06 ft to fit the nominal frame — a quarter of the ceiling",
+        minFor(posterSize("a2")), 1.0609, 1e-3, "1080 × 1920 at an assumed 66° HFOV");
+      T("A2 fills 27 % of the frame width at the 4 ft ceiling",
+        fitAt(posterSize("a2"), MOCKUP_MAX_STANDOFF_FT).fillW, 0.2652, 1e-3);
+      T("A2 is the tighter of the two, and is WIDTH-limited",
+        fitAt(posterSize("a2"), 4).limit, "width", 0,
+        "the frame is portrait 1080 × 1920, so the narrow dimension binds for every ISO sheet");
+
+      /* NOTHING ON THE PICKLIST IS HEIGHT-LIMITED ANY MORE — both ISO sheets
+         are far narrower than the portrait frame is tall — and the 2 × 4 ft
+         board was the only case that ever exercised the height branch of
+         posterStandoff. Asserted here against a literal instead, so the branch
+         keeps its coverage without putting a board back on the menu. */
+      T("posterStandoff still picks the height when the height is what binds",
+        GEO.posterStandoff({ widthFt:2, heightFt:4, frameW:NW2, frameH:NH2,
+                             fx:fN, fy:fN, fill:FRAME_FILL_TARGET }).limit, "height", 0);
 
       /* THE MEASUREMENT, not just the framing. A recommendation the phone
          cannot read a distance at is worthless. */
@@ -15237,7 +15968,8 @@ function runSelfTest(){
         T("the room is big enough for " + p.label, so.roomEnough, true);
       });
       T("posterSizeOf recognises a stored width/height pair",
-        (posterSizeOf({ widthFt:2, heightFt:4 }) || {}).key, "2x4", 0);
+        (posterSizeOf({ widthFt:1.38, heightFt:1.95 }) || {}).key, "a2", 0,
+        "and A2 is the size the numeric(6,2) round trip rounds hardest");
       T("posterSizeOf tolerates the numeric(6,2) round trip",
         (posterSizeOf({ widthFt:0.69, heightFt:0.97 }) || {}).key, "a4", 0,
         "the database stores feet to two places, not the size key");
@@ -15524,9 +16256,45 @@ function openSelfTest(){
                    paused rather than drained under a dead token. Sign in as
                    the same user and the queue resumes exactly where it was.
    ========================================================== */
-const NIVA_LOGO = '<svg viewBox="0 0 32 32" fill="none" aria-hidden="true">'
-  + '<rect x="1" y="1" width="30" height="30" rx="8" fill="#0d9488"/>'
-  + '<path d="M9 23V9l14 14V9" stroke="#04211f" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+/* ---- THE REAL MARK ----
+   NIVA_LOGO above is a placeholder: a teal tile with an N in it, drawn inline
+   so the app had something to show before anybody supplied artwork. This is the
+   actual Niva Bupa logo, and it is embedded rather than fetched because this
+   application is ONE FILE — a <img src="logo.png"> would be a second request
+   that fails on exactly the device this thing is built for, a merchandiser in a
+   branch on a bad connection.
+
+   TRANSPARENT, NOT WHITE. The source is a JPEG on a white page, and pasting
+   that onto the gate would put a white slab on the dark theme. The background
+   was removed by flooding inward from the border only, which matters: the word
+   "Bupa" and the pulse line are WHITE and sit INSIDE the cyan square, so a
+   global white-to-transparent pass would have punched holes straight through
+   the brand mark. Filling only from the edges cannot reach them.
+
+   420 x 215, which is the mark's own 2:1 after its margin is trimmed. It is
+   displayed at whatever the panel gives it; the pixels are there for a 2x
+   screen. */
+const NIVA_LOGO_IMG = "data:image/png;base64,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";
+
+/* THE MARK ON EVERY GATE PANEL. One constant, four callers — sign in, sign
+   up, forgot password and the setup screen — so the real logo lands on all
+   four at once and nobody meets the brand on one screen and a placeholder on
+   the very next one, which is exactly what happens if only the two screens
+   the deck happens to show get changed. The teal "N" that used to live here
+   was a stand-in drawn in SVG; NIVA_LOGO_IMG is the actual Niva Bupa lockup.
+
+   ORDERING MATTERS: this is a const evaluated where it stands, so
+   NIVA_LOGO_IMG has to be declared ABOVE this line — it is a plain string, so
+   anywhere earlier in the IIFE will do. Declared below it instead, the
+   temporal dead zone throws before the app paints anything at all.
+
+   The alt text is the company, not the product name in the heading directly
+   underneath it; a screen reader that read "NIVA Field Ops" twice would be
+   describing the same words twice and naming the brand not at all. */
+const NIVA_LOGO = '<span class="brandmark">'
+  + '<img src="' + NIVA_LOGO_IMG + '" alt="Niva Bupa" decoding="async"></span>';
+
+
 
 function gateEl(){ return $("#gate"); }
 
@@ -15602,7 +16370,25 @@ function loginPanelHTML(expired){
               ? '<b>' + Outbox.pending() + ' queued change' + (Outbox.pending()===1?'':'s') + '</b> and every capture on this device are still here, '
               : 'your local work is still here, ')
           + 'and syncing resumes as soon as you sign back in.</p>'
-        : '<p class="sub">Sign in with your NIVA account. Your role and what you can see are decided by the server, not by this app.</p>')
+        /* WHAT THIS SCREEN IS FOR, in the client's own words. The sentence
+           this replaces explained that roles are decided by the server and
+           not by this app: true, and nobody signing in ever needed to be told
+           it — a merchandiser has exactly one screen either way, and a manager
+           learns what they can see by looking at it. In mockup mode this app
+           IS the poster survey, so the sign-in screen now says what the person
+           is about to go and do. That is deck slide 3, "Login to the
+           application on your mobile to capture the wall where the poster will
+           be displayed", minus "login to the application" — they are already
+           looking at it.
+
+           Verification mode keeps the old sentence. There is no wall to
+           shortlist over there: the poster is already up and the visit is
+           about checking it, so promising a wall capture would describe a
+           different product. */
+        : '<p class="sub">' + byMode(
+            "Sign in on your mobile to capture the wall where the poster will be displayed.",
+            "Sign in with your NIVA account. Your role and what you can see are decided by the server, not by this app.")
+          + '</p>')
     + (L.error ? '<div class="err">' + esc(L.error) + '</div>' : '')
     /* Not an error. The only thing that says this is a sign-up whose account
        was made but whose automatic sign-in did not land, and telling that
@@ -15709,8 +16495,20 @@ function signupPanelHTML(){
   return '<div class="gate"><div class="panel">'
     + '<div class="brandrow">' + NIVA_LOGO
     + '<div><h1>Create your account</h1></div></div>'
+    /* THE CLIENT WROTE THE FIRST SENTENCE. It says what this app is FOR, which
+       the old copy never did: a person lands here off a message from their
+       branch and needs to know in one line that they are here to photograph
+       the best spot for the month's poster. The second sentence is what
+       survives of the old paragraph, and it stays because it answers the
+       question this form provokes — there is no email box, and somebody who
+       has signed up for anything else in their life will look for one and then
+       wait for a verification mail that is never coming.
+
+       Only the mockup arm moved. Verification mode is a different product with
+       a different vocabulary ('execution', not 'poster'), and its wording is
+       left exactly as it was. */
     + '<p class="sub">' + byMode(
-        "For merchandisers. You sign in with your phone number — there is no email and nothing to activate — and every poster that is open to everyone is waiting the moment you are in.",
+        "Create your account in this application to capture the best location in your branch to display monthly employee poster. You sign in with the phone number you enter below — there is no email and nothing to activate.",
         "For merchandisers. You sign in with your phone number — there is no email and nothing to activate — and every execution open to everyone is assigned the moment you are in.")
       + '</p>'
     + (L.error ? '<div class="err">' + esc(L.error) + '</div>' : '')
@@ -16368,7 +17166,14 @@ function renderNav(){
                   task: myRole()==="Merchandiser" ? "mytasks" : "tasks" };
   const on = alias[active] || active;
   $("#nav").innerHTML =
-    (window.innerWidth > 900 ? '<div class="navgroup">'+esc(myRole())+' workspace</div>' : '')
+    /* THE ROLE HEADING IS NOT FOR THE FIELD. It groups destinations, and a
+       merchandiser has exactly one, so "MERCHANDISER WORKSPACE" set in caps
+       over a list of a single item is not navigation — it is telling somebody
+       their own job title in the largest voice the sidebar has. A manager keeps
+       it, because there it really does head three separate destinations. Role,
+       not mode: navFor() returns one item for a merchandiser in both builds. */
+    ((window.innerWidth > 900 && myRole() !== "Merchandiser")
+      ? '<div class="navgroup">'+esc(myRole())+' workspace</div>' : '')
     + items.map(function(it){
       return '<button class="navitem '+(on===it.v?"on":"")+'" data-act="nav" data-v="'+it.v+'">'
         + icon(it.i) + '<span>'+esc(it.label)+'</span>'
@@ -16411,13 +17216,27 @@ function renderChrome(){
 
   /* Identity, read-only. There is no switcher: `profiles.role` is the single
      source of authorisation and the UI must not offer a way to pretend
-     otherwise. */
+     otherwise.
+
+     AND IT IS NOT SHOWN TO THE FIELD AT ALL. A merchandiser signed in with
+     their own phone number a minute ago and has one screen to be on; a chip
+     that reads back their name over the word MERCHANDISER answers a question
+     nobody in a shop is asking, and the client read it as internal labelling
+     leaking onto a user's screen. Managers and admins keep it — they move
+     between four screens and several campaigns, and knowing which account is
+     looking is part of not filing a review against the wrong one.
+
+     Cleared with style.display and not the `hidden` attribute, because
+     `.whochip{display:flex}` outranks the UA's `[hidden]{display:none}` and the
+     chip would sit there in full view. */
   const who = $("#whochip");
   if(who){
-    who.innerHTML = signedIn()
+    const hideWho = signedIn() && role === "Merchandiser";
+    who.style.display = hideWho ? "none" : "";
+    who.innerHTML = hideWho ? "" : (signedIn()
       ? '<span class="n" title="'+esc(u.name)+(u.title?" — "+esc(u.title):"")+'">'+esc(u.name)+'</span>'
         + '<span class="r">'+esc(role || "no role")+'</span>'
-      : '<span class="n">Not signed in</span><span class="r">—</span>';
+      : '<span class="n">Not signed in</span><span class="r">—</span>');
   }
   renderSyncChip();
 
@@ -16451,10 +17270,23 @@ function renderChrome(){
     }
     return titles[view.name] || view.name;
   })();
-  $("#crumb").innerHTML = signedIn()
-    ? '<span class="cwho"><b>'+esc(u.name)+'</b> · '+esc(role)+' &nbsp;›&nbsp; </span>'
-      + '<span class="cnow">'+esc(here)+'</span>'
-    : 'NIVA Field Ops';
+  /* NO BREADCRUMB IN THE FIELD. A trail answers "where am I and how did I get
+     here", and a merchandiser cannot be anywhere else: one nav item, one list,
+     one task opened off it. What the trail actually printed was their name, the
+     word "Merchandiser", and — on a task screen — `here` resolving to
+     t.storeName, which in mockup mode is the SYNTHETIC "<name> - field" row
+     that exists only because tasks.store_id is NOT NULL. Three pieces of
+     plumbing in the one strip of chrome that is on screen the whole time.
+
+     Nothing is lost by leaving it empty: the page heading immediately below it
+     already says "My posters", and on a phone — where .cwho is hidden and the
+     crumb is the only text up there — the sync chip stays, which is the one
+     thing in that bar a merchandiser ever acts on. Managers and admins are
+     untouched; they genuinely move around. */
+  $("#crumb").innerHTML = !signedIn() ? 'NIVA Field Ops'
+    : (role === "Merchandiser" ? ""
+      : '<span class="cwho"><b>'+esc(u.name)+'</b> · '+esc(role)+' &nbsp;›&nbsp; </span>'
+        + '<span class="cnow">'+esc(here)+'</span>');
 
   renderBotNav();
 }
@@ -16585,7 +17417,7 @@ function toggleMenu(){
   const hcm = myStatureCm();
   const height = profileHeightSupported()
     ? '<button class="menuitem" data-act="myheight">'
-      + (hcm ? "Your height — " + hcm + " cm" : "Set your height (sizes are rough without it)")
+      + (hcm ? "Your height — " + fmtFtIn(hcm) : "Set your height (sizes are rough without it)")
       + '</button>'
     : '';
   $("#pops").innerHTML = '<div class="pop" style="width:268px"><div class="ph">Menu</div>'

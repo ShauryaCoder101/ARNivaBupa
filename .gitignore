@@ -14,3 +14,6 @@ Thumbs.db
 
 # Supabase CLI scratch (project ref cache, version checks)
 supabase/.temp/
+
+# Brand source artwork — the app embeds a derived, cropped copy as a data URI
+NIVA_Bupa_Logo*
