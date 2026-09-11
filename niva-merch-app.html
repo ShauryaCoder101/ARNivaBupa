@@ -1760,7 +1760,13 @@ const TRANSITIONS = {
   [S.DRAFT]:     [S.ASSIGNED],
   [S.ASSIGNED]:  [S.PROGRESS],
   [S.PROGRESS]:  [S.SUBMITTED],
-  [S.SUBMITTED]: [S.APPROVED, S.REWORK],
+  /* Submitted -> In Progress is the assignee WITHDRAWING their own submission,
+     added in migration 0011. It is not an un-approval: it exists only while
+     nobody has ruled on the task, it is refused for every actor except the
+     assignee, and an Approved or Closed task is a different status and stays
+     untouchable. Without it a sent job is frozen forever — there is no way to
+     replace a bad photo, which is precisely what the field asked for. */
+  [S.SUBMITTED]: [S.APPROVED, S.REWORK, S.PROGRESS],
   [S.REWORK]:    [S.PROGRESS],
   [S.APPROVED]:  [S.CLOSED],
   [S.CLOSED]:    []
@@ -5164,8 +5170,16 @@ const Repo = (function(){
     });
 
     const seq = Object.create(null);
+    /* Rows this device has asked the server to delete and the server has not
+       confirmed gone yet. Without this a poll that races a queued deletion
+       resurrects the photo the merchandiser just threw away, which reads as the
+       app refusing to do what it was told. Derived from the queue rather than
+       stored, so it clears itself the moment the DELETE lands — and so a
+       deletion that permanently fails brings the row back, which is the truth. */
+    const gone = pendingImageDeletes();
     imgRows.forEach(function(r){
       const t = byId[r.task_id]; if(!t) return;
+      if(gone[r.id]) return;
       const k = r.task_id + "|" + r.kind;
       const n = seq[k] = (seq[k] == null ? 0 : seq[k] + 1);
       const im = mapImage(r, t.storeCode, n);
@@ -5263,6 +5277,18 @@ const Repo = (function(){
 /* Re-apply values that are queued but not yet confirmed, so a server row that
    predates our write does not visually undo the user's action. Cleared as soon
    as the group has drained. */
+/* Which task_images rows are queued for deletion on this device. Same idea as
+   applyOverlay(): the server's answer is authoritative about everything except
+   the writes it has not seen yet, and hiding a row we have asked it to remove
+   is the honest reading of "this photo is gone" while the DELETE is in flight. */
+function pendingImageDeletes(){
+  const out = Object.create(null);
+  Outbox.items().forEach(function(it){
+    if(it.kind === "image.delete" && it.payload && it.payload.id) out[it.payload.id] = 1;
+  });
+  return out;
+}
+
 function applyOverlay(t){
   const pf = t.pendingFields;
   if(!pf) return;
@@ -7512,6 +7538,24 @@ function fieldViewShoot(t){
              + 'move closer or hold steady — take the shot when it says you are ready.')
     + '</p>';
 
+  /* PHOTOS THAT ARE ALREADY ON THE SERVER. Normally there are none here — a
+     first attempt uploads nothing until Send. They appear after a withdrawal:
+     the task is open again and the mockup the person was unhappy with is still
+     attached to it, and removing it is the whole reason they came back. Without
+     this block the shoot step would show an empty screen and quietly keep the
+     bad photo, which is the original complaint with extra steps.
+
+     MOCKUP only, matching withdrawable(). In verification the equivalent state
+     is Rework Required, where the previous evidence is deliberately kept whole
+     for the manager to compare against — that behaviour is untouched. */
+  if(byMode(true, false) && t.afterImages.length
+     && (t.status === S.PROGRESS || t.status === S.REWORK)){
+    body += '<div class="outcome" style="margin-bottom:10px"><div class="ot">'
+      + 'Already on this job ('+t.afterImages.length+')</div>'
+      + '<div class="ob">Sent earlier. Remove the one you are not happy with, then take a new photo below.</div></div>'
+      + fieldPhotoGrid(t, t.afterImages, "sent");
+  }
+
   if(shots.length){
     body += fieldPhotoGrid(t, shots, true);
     /* "Take another" is a secondary thought once there is a photo, so it moves
@@ -7538,13 +7582,20 @@ function fieldViewShoot(t){
           + byMode("Open the camera","Open camera")+'</button>');
   return { body: body, actions: actions };
 }
+/* `editable` is a three-way, not a boolean, because there are two different
+   kinds of removal behind the same-looking button and confusing them would
+   either destroy bytes or 403. `false` is read-only; `true` removes a capture
+   still held on this phone (doRemoveAfter, index into the workspace); "sent"
+   removes a task_images row the server already has (doRemoveSentAfter, index
+   into t.afterImages). The old boolean call sites are unchanged. */
 function fieldPhotoGrid(t, shots, editable){
   if(!shots.length) return '';
+  const sent = (editable === "sent");
   return '<div class="photogrid" style="margin-bottom:12px">' + shots.map(function(im, i){
     const v = fieldPhotoVerdict(im);
     return '<div class="photocell">' + shotHTML(im, byMode("MOCKUP ","PHOTO ") + (i+1))
       + (editable
-          ? '<button class="btn sm rm" data-act="rmafter" data-id="'+t.id+'" data-i="'+i+'">Remove</button>'
+          ? '<button class="btn sm rm" data-act="'+(sent?"rmsent":"rmafter")+'" data-id="'+t.id+'" data-i="'+i+'">Remove</button>'
           : '')
       + '<div style="margin-top:6px"><span class="plain '+v.cls+'">'+esc(v.text)+'</span></div></div>';
   }).join("") + '</div>';
@@ -7578,6 +7629,26 @@ function fieldPhotoGrid(t, shots, editable){
    Offline is worded separately again. "Going up now" said to a phone with no
    signal is the sentence that sends a merchandiser out of a basement believing
    the job is filed. */
+/* May the person looking at this take it back?
+
+   Three conditions, and each is doing work:
+
+   * MOCKUP ONLY. In VERIFICATION mode a submission is evidence entering an
+     approval workflow, and that workflow is the product: the manager approves
+     or asks for a fix, and "I changed my mind about what I filed" is their
+     decision to make, not the field's. The database permits the edge in both
+     modes (it cannot see APP_MODE, and a person withdrawing their own unread
+     work is reasonable either way) — this is a product choice on top of it, and
+     the verification screens are left exactly as they were.
+   * STILL SUBMITTED. Approved and Closed are decisions. This is a withdrawal,
+     never an undo of somebody else's judgement.
+   * NOT MID-FLIGHT. `submitting` means the group is still draining, so there
+     is nothing on the server to withdraw yet and the queue must be left alone;
+     doWithdrawSubmission() says so in words if it is reached anyway.        */
+function withdrawable(t){
+  return !!t && byMode(true, false) && t.status === S.SUBMITTED && !t.submitting;
+}
+
 function fieldThanks(t){
   const sent = (t.status === S.SUBMITTED);
   const left = t.submitting ? Outbox.groupPending(t.submitting.group) : 0;
@@ -7590,7 +7661,13 @@ function fieldThanks(t){
   let line, note;
   if(sent){
     line = 'Sent <span class="num">'+esc(fmtDT(t.submittedAt))+'</span>. '+what+' has been sent.';
-    note = byMode("Nothing more to do — you will hear back whether this wall is being used.",
+    /* MOCKUP: the old sentence promised "you will hear back whether this wall
+       is being used", and in this build nobody is going to. The manager
+       publishes posters and looks at the photos; there is no shortlisting
+       screen and no decision coming. Saying so, and pointing at the one thing
+       the person can still do about it, is better than a promise the product
+       does not keep. */
+    note = byMode("Nothing more to do. If you are not happy with it you can still take it back and do it again.",
                   "Nothing more to do — you will get an update when it is approved, or if something needs fixing.");
   }else if(netUp()){
     line = '<b>Not sent yet.</b> '+what+' and '
@@ -7637,6 +7714,25 @@ function fieldViewSend(t){
       body += '<div class="card" style="margin-bottom:10px"><div class="hd"><h3>What you wrote</h3></div>'
         + '<div class="bd" style="font-size:13.5px;color:var(--text-2)">'+esc(t.merchRemarks)+'</div></div>';
     }
+    /* THE WAY BACK. Until now this screen was a dead end by construction: the
+       task was Submitted, the server had no edge out of Submitted that the
+       person looking at it could take, and the photo they were unhappy with was
+       the final answer for that store. Migration 0011 gives them the edge and
+       this gives them the door.
+
+       Offered only while the task is still SUBMITTED — approved and closed jobs
+       fall through to the quiet card above and get nothing, because by then a
+       decision exists and withdrawing would be undoing somebody else's. */
+    if(withdrawable(t)){
+      body += '<div class="card" style="margin-bottom:10px"><div class="hd"><h3>'
+        + byMode("Not happy with it?","Need to change it?")+'</h3></div>'
+        + '<div class="bd" style="font-size:13.5px;color:var(--text-2)">'
+        + byMode("Your manager has not looked at this yet, so you can take it back, remove the mockup and photograph the wall again.",
+                 "This is still awaiting review, so you can withdraw it, replace the evidence and submit again.")
+        + '<div style="margin-top:10px">'
+        + '<button class="btn" data-act="withdraw" data-id="'+t.id+'">'+icon("back")
+        + byMode("Take it back and redo it","Withdraw and redo")+'</button></div></div></div>';
+    }
     body += '<details class="disc"><summary>'+icon("clock")+'What has happened so far</summary>'+fieldHistory(t)+'</details>';
     /* No rail and no back arrow. There is no step left to walk to, and the one
        chip that is still enabled — the camera — would cheerfully offer to
@@ -7662,6 +7758,20 @@ function fieldViewSend(t){
     if(w.remarks){
       body += '<div class="card" style="margin-bottom:10px"><div class="hd"><h3>What you wrote</h3></div>'
         + '<div class="bd" style="font-size:13.5px;color:var(--text-2)">'+esc(w.remarks)+'</div></div>';
+    }
+    /* AND THE ONE SENTENCE THAT KEEPS THIS HONEST NOW THAT WITHDRAWING EXISTS.
+       The confirmation above already says "Not sent yet". A person reading that
+       and wanting to change the photo will look for the same "take it back"
+       card the sent screen offers, and it is deliberately not here: there is
+       nothing on the server to withdraw, and the photos are mid-upload, so
+       pulling them out from under the queue would destroy the bytes it is
+       about to send — the same reason doRemoveAfter() refuses. The distinction
+       is real and it is the user's to understand, so it is stated rather than
+       left as an absence. */
+    if(byMode(true, false)){
+      body += '<div class="stepnote">This has not reached your manager yet, so there is nothing to take back — '
+        + 'it is still going up from this phone. Once it has arrived, this screen offers you a way to take it '
+        + 'back and photograph the wall again.</div>';
     }
     /* "Try now" loses its slot rather than crowding the bar to three: the sync
        panel behind "See what is left" carries Sync now, Retry and Discard, and
@@ -7999,6 +8109,155 @@ function doRemoveAfter(id, i){
   }
   w.after.splice(i,1); save(); render();
 }
+
+/* WITHDRAWING A SUBMISSION — "I sent the wrong photo, let me do it again".
+
+   The complaint this exists for is exactly one sentence long: there was no way
+   to edit a sent photo. There was not, and there could not be. The server's
+   state machine has no edge out of Submitted except a manager's decision, and
+   in this build the manager does not have a decision screen — they publish
+   posters and look at what came back. So a bad mockup was the permanent record
+   of that store, and the merchandiser standing in front of the wall could do
+   nothing about it.
+
+   Migration 0011 adds the one edge that fixes it: Submitted -> In Progress,
+   performed by the assignee and nobody else. It is a WITHDRAWAL, not an
+   un-approval. It is only reachable while nobody has ruled on the task — the
+   moment a manager approves it the status is Approved, this edge does not
+   exist for it, and no amount of pressing will bring it back.
+
+   Nothing new is invented here to make it travel: it goes through transition()
+   and the Outbox like every other state change, so it queues offline, retries,
+   and shows up in the same sync panel as everything else. */
+function doWithdrawSubmission(id){
+  const t = taskById(id); if(!t) return;
+
+  /* Still draining. The bytes for the submission are mid-flight — some
+     uploaded, some not, placements possibly already inserted and placements are
+     append-only for every principal including the service key. Cancelling half
+     of that group would leave the server holding an incoherent fragment of a
+     submission, which is a worse outcome than waiting a moment. And it is not
+     a real withdrawal anyway: there is nothing on the server yet to withdraw.
+     So say so plainly rather than offering a button that lies. */
+  if(t.submitting){
+    toast(byMode("Your photos are still going up from this phone. Once they have arrived you can take the job back and redo it.",
+                 "This submission is still uploading. Once it has landed you can withdraw it."), true);
+    return;
+  }
+  if(t.status !== S.SUBMITTED){
+    toast(byMode("This job is not waiting with your manager.","This task is not awaiting review."), true);
+    return;
+  }
+
+  openModal({
+    title: byMode("Take this back?","Withdraw this submission?"),
+    body: '<p>'+byMode("This puts <b>"+esc(t.storeName)+"</b> back in your hands so you can remove the mockup you are not happy with and take another one.",
+                       "This returns <b>"+esc(t.storeName)+"</b> to you so you can replace the evidence and submit again.")+'</p>'
+      + '<p style="color:var(--text-2);font-size:13px">Your manager has not decided on it yet, so nothing is being undone. '
+      + 'The fact that you sent it once, and that you took it back, stays in the history either way — '
+      + 'that is what makes it safe to do.</p>',
+    actions: [
+      { label:"Leave it", cls:"btn" },
+      { label: byMode("Take it back","Withdraw"), cls:"btn primary", act:function(){ doWithdrawExec(id); } }
+    ]
+  });
+}
+function doWithdrawExec(id){
+  const t = taskById(id); if(!t) return;
+  if(t.submitting || t.status !== S.SUBMITTED) return;
+  const group = uuid4();
+  /* Optimistic, unlike doSubmitExec(). The asymmetry is deliberate and it is
+     the same principle both times: never claim more than has happened. Claiming
+     a submission has landed when it is still queued tells someone their job is
+     filed when it is not. Claiming a task is open again when the re-open is
+     still queued costs nothing — the work in front of them is on this phone,
+     and if the server refuses, applyOverlay() drops the overlay and the next
+     poll puts the task back to Submitted in front of them. */
+  if(!transition(t, S.PROGRESS, {
+    group: group,
+    action: "Submission withdrawn",
+    detail: me().name + " took this task back before it was reviewed · device "
+          + deviceString() + " · " + new Date().toISOString(),
+    gps: t.checkIn ? {lat:t.checkIn.lat, lng:t.checkIn.lng} : null
+  })) return;
+  notify("Task Withdrawn","Manager", t.managerId, t.id,
+    t.storeName+" ("+t.storeCode+") was taken back by "+me().name+" to be redone", group);
+  /* Land them on the camera step, not on the send screen they were just
+     looking at. fieldStepSig() is computed from the status we have already set
+     optimistically, so this override survives exactly as long as the status
+     does — if the server refuses the withdrawal the signature stops matching
+     and the override falls away with it. */
+  fieldStep[t.id] = { step: 2, sig: fieldStepSig(t) };
+  closeModal(); save(); render();
+  toast(netUp()
+    ? byMode("Taken back — you can change the mockup now.","Withdrawn — you can replace the evidence now.")
+    : byMode("Taken back on this phone. Your manager stops seeing it as sent once you have signal.",
+             "Withdrawal queued on this device — it reaches the server when you reconnect."));
+}
+
+/* Removing a photo that HAS reached the server, which is a different act from
+   doRemoveAfter() above: that one throws away bytes still sitting on the phone,
+   this one asks the database to delete a task_images row.
+
+   The server allows it under exactly one condition — task_images_delete_field
+   in 0002_rls.sql requires kind='after', uploaded_by = me, and
+   niva_task_open_for_me(), which is true only for In Progress and Rework
+   Required. So this is reachable only after a withdrawal has actually landed,
+   which is why the caller checks the status rather than trusting the button.
+   The placements row measured from that photo is NOT deleted and cannot be:
+   placements are append-only for every principal. The measurement history of
+   the withdrawn attempt survives, which is the correct behaviour — the photo
+   was wrong, the fact that it was taken was not. */
+function doRemoveSentAfter(id, i){
+  const t = taskById(id); if(!t) return;
+  const im = t.afterImages[i];
+  if(!im) return;
+  if(t.submitting){
+    toast("This job is being sent. You cannot change the photos now.", true);
+    return;
+  }
+  if(t.status !== S.PROGRESS && t.status !== S.REWORK){
+    toast(byMode("Take the job back first, then you can change the mockup.",
+                 "Withdraw the submission before removing evidence."), true);
+    return;
+  }
+  openModal({
+    title: byMode("Remove this mockup?","Remove this photo?"),
+    body: '<p>'+byMode("It comes off this job for good. Take another one before you send it again.",
+                       "This deletes the image from the record. You will need to capture a replacement before submitting.")+'</p>'
+      + '<p style="color:var(--text-2);font-size:13px">The measurement taken from it stays in the history — '
+      + 'that cannot be removed by anyone, and is not meant to be.</p>',
+    actions: [
+      { label:"Keep it", cls:"btn" },
+      { label:"Remove", cls:"btn danger", act:function(){ doRemoveSentExec(id, im.id); } }
+    ]
+  });
+}
+function doRemoveSentExec(id, imageId){
+  const t = taskById(id); if(!t) return;
+  const j = t.afterImages.map(function(x){ return x.id; }).indexOf(imageId);
+  if(j < 0){ closeModal(); return; }
+  const im = t.afterImages[j];
+  const group = uuid4();
+  Outbox.push("image.delete", { id: imageId },
+              { group: group, taskId: t.id, label: "Remove evidence photo" });
+  audit(t, "Evidence photo removed",
+        me().name + " removed a photo from this task before re-submitting", null, group);
+  /* Local bytes, if this device still holds any for that path, are no longer
+     needed by anything. The queued DELETE addresses the ROW by id and does not
+     read them. */
+  if(im.local){
+    if(im.path)      Blobs.del((im.bucket||"evidence") + "/" + im.path);
+    if(im.cleanPath) Blobs.del((im.bucket||"evidence") + "/" + im.cleanPath);
+  }
+  t.afterImages.splice(j, 1);
+  t.placement = bestPlacement(t.afterImages);
+  closeModal(); save(); render();
+  toast(netUp() ? byMode("Mockup removed.","Photo removed.")
+                : byMode("Removed on this phone — the server is told when you have signal.",
+                         "Removal queued on this device."));
+}
+
 function doAssign(id){
   const t = taskById(id); if(!t) return;
   if(!MOCKUP && !t.beforeImage){ toast("Attach a BEFORE image before assigning.", true); return; }
@@ -17138,19 +17397,26 @@ function navFor(role){
   }
   /* THREE ITEMS, in the order the work happens: publish a poster, give somebody
      an account to shoot it with, look at what came back. */
+  const pending = state.tasks.filter(t=>t.status===S.SUBMITTED).length;
+  /* The approvals queue is a destination only where approving is a thing that
+     happens — see APPROVAL_VIEWS above for why that is verification only. It
+     had no nav entry at all, which is the other half of why the review screen
+     became unreachable: gating the VIEW without ever offering the LINK leaves a
+     workflow that exists in the source and nowhere else. */
+  const approvals = APPROVAL_VIEWS.length
+    ? [{v:"approvals", label:"Approvals", i:"check", count: pending}] : [];
   if(role === "Manager"){
     return [
       {v:"posters",  label:"Posters", i:"poster"},
       {v:"accounts", label:"Merchandisers", i:"users"},
       {v:"photos",   label:"Photos", i:"camp", count: allPhotos().length}
-    ];
+    ].concat(approvals);
   }
-  const pending = state.tasks.filter(t=>t.status===S.SUBMITTED).length;
   const base = [
     {v:"dashboard", label:"Dashboard", i:"dash"},
     {v:"campaigns", label:"Campaigns", i:"camp"},
     {v:"tasks",     label:byMode("All Stores","All Tasks"), i:"list"}
-  ];
+  ].concat(approvals);
   if(role === "Admin"){
     base.push({v:"photos",   label:"Photos", i:"camp"});
     base.push({v:"accounts", label:"Merchandisers", i:"users"});
@@ -17468,6 +17734,45 @@ const VIEWS = {
    affordance only — the same rules are enforced by RLS and by the guard
    triggers, so a user who reaches a view they should not see still cannot read
    or write anything they should not. */
+/* THE APPROVAL WORKFLOW, AND WHO STILL HAS IT.
+
+   When the manager's screen was cut down to Posters / Merchandisers / Photos,
+   "approvals" and "review" went with it — and they went out of EVERY role's
+   list, admin included. viewApprovals() and viewReview() are still here, still
+   correct, and were unreachable by anybody. That is not a simplification, it is
+   a hole: Submitted -> Approved and Submitted -> Rework Required are the only
+   two edges out of Submitted the database knows, both require a manager, and
+   there was no screen in the build that could send either. No task could be
+   approved, no task could be sent back, and no task could leave Submitted at
+   all. A status with no exit is a bug however tidy the navigation looks.
+
+   The honest fix is not one answer for both products, because they are not the
+   same product:
+
+   * VERIFICATION is an execution-audit programme. Evidence goes up, a manager
+     who is not the person who took it approves or rejects it, and a completion
+     record is issued. Approval is the entire point, so the screens come back
+     for Manager and Admin. This restores behaviour that existed before the
+     simplification and is a straight regression fix.
+
+   * MOCKUP is a site survey. The client's manager publishes posters, creates
+     the accounts that photograph them, and looks at what came back; there is no
+     shortlisting step in what they asked for and no approve/reject screen in
+     what they use. Adding one back would be inventing a workflow to justify a
+     status. So in this mode the screens stay gone — deliberately, stated here,
+     rather than silently orphaned — and the exit from Submitted is the one the
+     field asked for instead: migration 0011's withdrawal, which lets the person
+     who took a bad photo replace it. See withdrawable().
+
+   ADMIN follows the same split rather than keeping everything, which is the one
+   place this departs from the "admin keeps everything" rule below. An admin
+   reaching an approve button in mockup mode could move a task to Approved and
+   then Closed through a workflow the client does not run and the merchandiser
+   never sees an outcome from — a state nothing else in the mockup build knows
+   what to do with. Every RECORD stays reachable for them either way: the task
+   detail, the audit trail, the placements and the photos are all still there. */
+const APPROVAL_VIEWS = byMode([], ["approvals", "review"]);
+
 function allowedView(name){
   const r = myRole();
   if(r === "Merchandiser") return ["mytasks","task"].indexOf(name) >= 0;
@@ -17477,12 +17782,12 @@ function allowedView(name){
      rejected. That is the admin, and it is also the escape hatch if the client
      wants any of it back. */
   if(r === "Admin") return ["dashboard","campaigns","campaign","tasks","task","users","audit",
-                            "accounts","photos","posters"].indexOf(name) >= 0;
+                            "accounts","photos","posters"].concat(APPROVAL_VIEWS).indexOf(name) >= 0;
   /* A MANAGER DOES THREE THINGS: hand out posters, make the accounts that shoot
      them, and look at what came back. `task` stays reachable so clicking a row
      in the photo list opens the capture it came from; it is a detail view of
      what they are already looking at, not a workflow. */
-  if(r === "Manager") return ["posters","accounts","photos","task"].indexOf(name) >= 0;
+  if(r === "Manager") return ["posters","accounts","photos","task"].concat(APPROVAL_VIEWS).indexOf(name) >= 0;
   return false;   // no session, or a role this build does not know
 }
 function homeView(){
@@ -17636,6 +17941,10 @@ document.addEventListener("click", function(e){
     case "startwork":  doStartWork(id); break;
     case "simafter":   doSimAfter(id); break;
     case "rmafter":    doRemoveAfter(id, Number(el.dataset.i)); break;
+    /* Two removals, two verbs: "rmafter" throws away bytes still on this phone,
+       "rmsent" asks the server to delete a task_images row it already holds. */
+    case "rmsent":     doRemoveSentAfter(id, Number(el.dataset.i)); break;
+    case "withdraw":   doWithdrawSubmission(id); break;
     case "submitexec": doSubmitExec(id); break;
     case "markread":   markNotifsRead(); break;
     case "mkmerch":    doCreateMerchandiser(); break;
