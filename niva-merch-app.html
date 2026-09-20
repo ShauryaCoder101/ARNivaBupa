@@ -8791,12 +8791,19 @@ function arcProbe(){
 /* ---------- sensors ---------- */
 function arcStopSensors(){
   const s = ARC.sensors;
+  /* THE `true` IS LOAD-BEARING. arcStartSensors attaches all three of these in
+     the capture phase, and removeEventListener only unhooks a listener whose
+     capture flag matches the one it was added with — a bubble-phase removal of
+     a capture-phase listener is a silent no-op. Without it this function
+     cleared its own bookkeeping and left the handlers wired to window, so the
+     orientation and motion callbacks kept firing (and kept writing pitch and
+     roll into ARC.sensors) long after the capture screen was closed. */
   if(s.onOri){
-    window.removeEventListener("deviceorientationabsolute", s.onOri);
-    window.removeEventListener("deviceorientation", s.onOri);
+    window.removeEventListener("deviceorientationabsolute", s.onOri, true);
+    window.removeEventListener("deviceorientation", s.onOri, true);
     s.onOri = null;
   }
-  if(s.onMot){ window.removeEventListener("devicemotion", s.onMot); s.onMot = null; }
+  if(s.onMot){ window.removeEventListener("devicemotion", s.onMot, true); s.onMot = null; }
   s.on = false; s.src = "none"; s.pitchDeg = null; s.rollDeg = null;
 }
 function arcScreenAngle(){
@@ -13194,6 +13201,51 @@ function arcBuildRecord(g, tierKey, focalPx, captureMode, camInfo){
   return p;
 }
 
+/* ---------- freezing the shutter frame ----------
+   THE PHOTOGRAPHED PIXELS AND THE MEASURED NUMBERS HAVE TO COME FROM THE SAME
+   INSTANT, and the two tiers reach that agreement from opposite directions.
+
+   Tier A moves the NUMBERS to the frame: arcTrySingleFrame runs inside the XR
+   animation-frame callback where the camera texture is still readable, so it
+   re-reads the gates from that frame (see the comment above it) and the record
+   describes the photographed instant rather than the instant the button was
+   pressed. It can do that because it is standing in the frame already.
+
+   Tier B and the handover path cannot. There is no callback to run inside —
+   there is only an <video> element playing a live stream, and the gates were
+   measured and armed some time before the tap. So these paths do the mirror
+   image: they freeze the FRAME to the numbers. Whatever the camera is showing
+   at the tap is copied into an offscreen canvas synchronously, right there in
+   the tap handler, and everything downstream composites that copy.
+
+   This matters because arcFinishCapture is not synchronous at all. It waits on
+   arcGeoFix (a getCurrentPosition with a five second timeout) and then on
+   arcEnsureOffice, which opens a modal with a text input and raises the
+   on-screen keyboard. The merchandiser lowers the phone to type the office
+   name. openModal is a scrim over the page, not a teardown, so the stream
+   underneath keeps producing frames the whole time — and a live <video> passed
+   down as `source` would hand arcComposite whichever of those frames happened
+   to be current when the modal closed. That is how a finished mockup ended up
+   showing the floor with a perfectly square poster centred on it: the poster
+   quad was still being built from the frozen gates, so it was drawn correctly
+   for a wall the picture no longer contained. The gates were never the problem;
+   the pixels were simply from later.
+
+   Handing back a canvas rather than the element also means the downstream code
+   cannot accidentally reacquire liveness: a canvas is a snapshot and stays one.
+   If the copy cannot be made at all (no dimensions yet, or drawImage throws)
+   this returns null and the caller passes the element through exactly as it
+   used to, which is no worse than the old behaviour and better than composite
+   over a blank rectangle. */
+function arcFreezeFrame(el, w, h){
+  if(!el || !(w > 0) || !(h > 0)) return null;
+  const c = document.createElement("canvas");
+  c.width = w; c.height = h;
+  try{ c.getContext("2d").drawImage(el, 0, 0, w, h); }
+  catch(e){ return null; }
+  return c;
+}
+
 function arcShoot(){
   if(ARC.busy) return;
   if(!ARC.armed){ toast("Hold the gates for " + (ARM_MS/1000).toFixed(1) + " s first.", true); return; }
@@ -13216,8 +13268,12 @@ function arcShoot(){
       ARC.xr.camAccess ? "raw camera access was granted but no usable binding is available"
                        : "raw camera access is not available in this session");
   }
-  arcFinishCapture(ARC.video, ARC.video.videoWidth, ARC.video.videoHeight,
-                   arcIsoIntr(ARC.focal.f, ARC.video.videoWidth, ARC.video.videoHeight),
+  /* Nothing asynchronous has happened yet in this handler, and nothing may
+     happen before this line: the copy is the shutter. See arcFreezeFrame. */
+  const vw = ARC.video.videoWidth, vh = ARC.video.videoHeight;
+  const frame = arcFreezeFrame(ARC.video, vw, vh) || ARC.video;
+  arcFinishCapture(frame, vw, vh,
+                   arcIsoIntr(ARC.focal.f, vw, vh),
                    g, tierKey, nn, "camera")
     .catch(function(err){
       ARC.busy = false;
@@ -13356,7 +13412,14 @@ function arcHandoverCapture(g, tierKey, nn, why){
       // the XR focal is in XR viewport pixels; rescale it to the video's pixels
       const vw = ARC.video.videoWidth, vh = ARC.video.videoHeight;
       const f = (focalXR && ARC.xr.vpW) ? focalXR * (vw/ARC.xr.vpW) : arcResolveFocal().f;
-      return arcFinishCapture(ARC.video, vw, vh, arcIsoIntr(f, vw, vh),
+      /* The gates were frozen above, at the tap; freeze the pixels to match.
+         This path has already spent a session teardown and a fresh
+         getUserMedia getting here, and arcFinishCapture is about to spend a
+         GPS fix and the office modal on top, so the first frame the reopened
+         camera produced is the closest thing to the tap that still exists.
+         Take it now rather than letting the modal choose one. */
+      const frame = arcFreezeFrame(ARC.video, vw, vh) || ARC.video;
+      return arcFinishCapture(frame, vw, vh, arcIsoIntr(f, vw, vh),
                               frozen, tierKey, nn, "handover");
     }).catch(function(err){
       ARC.busy = false;
@@ -15249,6 +15312,40 @@ function runSelfTest(){
     } finally {
       ARC.xr.readFB = saved.fb; ARC.xr.blit = saved.blit; ARC.xr.pixelBuf = saved.buf;
     }
+  })();
+
+  /* --- the shutter freeze -------------------------------------------------
+     The field bug was that the Tier B and handover paths handed arcFinishCapture
+     the live <video>, so the pixels composited were the ones on screen when the
+     office modal closed rather than the ones at the tap. A live camera cannot be
+     driven headlessly, but the property that was missing is not about cameras:
+     it is that the value handed downstream must stop tracking its source the
+     moment it is made. That is exactly what a canvas source lets us assert —
+     draw, freeze, repaint the source, and read the copy back. If arcFreezeFrame
+     ever went back to returning the element (or to a lazily-drawn wrapper) the
+     third assertion below is the one that would fail. */
+  (function(){
+    const src = document.createElement("canvas"); src.width = 4; src.height = 4;
+    const sx = src.getContext("2d");
+    sx.fillStyle = "#00ff00"; sx.fillRect(0, 0, 4, 4);          // the "tap" frame
+    const frozen = arcFreezeFrame(src, 4, 4);
+    T("freeze: returns a canvas", !!(frozen && frozen.getContext), true);
+    T("freeze: keeps the source's natural size",
+      frozen ? (frozen.width + "x" + frozen.height) : "", "4x4", 0);
+    if(frozen){
+      const read = function(c){
+        return Array.prototype.slice.call(
+          c.getContext("2d", { willReadFrequently:true }).getImageData(1, 1, 1, 1).data, 0, 3).join(",");
+      };
+      T("freeze: carries the pixels as they were at the call", read(frozen), "0,255,0", 0);
+      sx.fillStyle = "#ff0000"; sx.fillRect(0, 0, 4, 4);        // the floor, seconds later
+      T("freeze: the copy does NOT follow the source afterwards", read(frozen), "0,255,0", 0,
+        "this is the whole bug: the office modal must not be able to change the photo");
+      T("freeze: …and the source really did change", read(src), "255,0,0", 0);
+    }
+    T("freeze: no element means no frame", arcFreezeFrame(null, 4, 4), null);
+    T("freeze: a video with no dimensions yet means no frame", arcFreezeFrame(src, 0, 4), null,
+      null, "caller falls back to the element rather than compositing over a blank rectangle");
   })();
 
   /* --- capture-mode / tier bookkeeping --- */
