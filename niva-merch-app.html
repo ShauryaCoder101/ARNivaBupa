@@ -1245,7 +1245,13 @@ const STANDOFF_FT     = 6.0;   // target camera-to-wall distance
 const STANDOFF_TOL_FT = 0.5;   // ± band
 const ANGLE_TOL_DEG   = 5;     // ± per axis
 const ARM_MS          = 800;   // gates must hold continuously this long
-const ASSUMED_HFOV_DEG= 66;    // last-resort smartphone horizontal FOV
+/* Last-resort smartphone field of view, and it is a LANDSCAPE HORIZONTAL one:
+   the angle across the LONG edge of the sensor, which is what a spec sheet
+   quotes. It is NOT the angle across the width of whatever frame happens to
+   arrive — a portrait stream's width is the SHORT axis. Never hand this to
+   GEO.focalFromFov directly; GEO.assumedFocal(w, h) picks the long axis, and
+   the comment on it explains what went wrong when every call site did not. */
+const ASSUMED_HFOV_DEG= 66;
 
 /* ---- MOCKUP MODE: the standoff comes from the POSTER, not from a constant ----
 
@@ -1262,7 +1268,9 @@ const ASSUMED_HFOV_DEG= 66;    // last-resort smartphone horizontal FOV
 
        S_visible = d · px / f                      (GEO.visibleSpan)
 
-   At 6 ft a 66°-HFOV phone therefore sees about 7.8 ft of wall, and a 9 × 8 ft
+   At 6 ft a phone held portrait therefore sees about 4.4 ft of wall across the
+   frame (the assumed 66° runs along the frame's LONG edge — see assumedFocal —
+   so on a portrait frame the width subtends only about 40°), and a 9 × 8 ft
    poster CANNOT be drawn complete from there. The old fixed gate was not merely
    wrong for that task, it was unsatisfiable — which is exactly what the
    merchandiser hit. Rearranged, the distance at which a poster W wide fills a
@@ -1274,10 +1282,10 @@ const ASSUMED_HFOV_DEG= 66;    // last-resort smartphone horizontal FOV
 
      · RECOMMENDED — fill = FRAME_FILL_TARGET. The poster is big in frame with
        room around it to see the wall it is sitting on. 9 × 8 ft on a portrait
-       phone lands at 9.9 ft.
+       phone lands at 17.6 ft.
      · MINIMUM — fill = 1, the poster exactly filling the frame. Below this the
        capture is not off-spec, it is IMPOSSIBLE, and it is the only hard block
-       left in mockup mode. 9 × 8 ft lands at 6.9 ft, which is why 6 ft could
+       left in mockup mode. 9 × 8 ft lands at 12.3 ft, which is why 6 ft could
        never have worked.
 
    Everything from the minimum outwards is allowed: the merchandiser stands
@@ -1328,7 +1336,8 @@ const NOMINAL_FRAME_H   = 1920;
 const FOCAL_SIGMA_FLOOR   = 0.012;  // focus breathing: a phone's focal length genuinely
                                     // moves ~1 % between near and far focus
 const FOCAL_SIGMA_TRACK   = 0.030;  // MediaStreamTrack FOV, reported in whole degrees
-const FOCAL_SIGMA_ASSUMED = 0.120;  // an assumed 66° HFOV across the whole Android fleet
+const FOCAL_SIGMA_ASSUMED = 0.120;  // an assumed 66° across the frame's LONG edge,
+                                    // applied to the whole Android fleet
 const CALIB_DIST_SIGMA_FT = 0.0417; // ±0.5 in on the tape, plus where the user stood
 const CALIB_EDGE_SIGMA_PX = 1.5;    // per handle, dragging onto an edge by eye
 /* Uncorrected radial distortion, as a fraction of scale at the frame corner.
@@ -1577,9 +1586,14 @@ const M_TO_FT         = 3.28084;
    a change of one number rather than a re-crop and a re-upload.
 
    Both fit the frame comfortably at the 4 ft ceiling: at the nominal portrait
-   phone an A4 fills 13 % of the frame width and an A2 27 %, and A2 — the
-   largest thing the programme prints — needs only 1.06 ft to fit the frame edge
-   to edge, a quarter of the ceiling. See the poster-fit self-tests. */
+   phone an A4 fills 24 % of the frame width and an A2 47 %, and A2 — the
+   largest thing the programme prints — needs 1.89 ft to fit the frame edge to
+   edge, under half the ceiling. Those three numbers all grew by 16/9 when the
+   assumed lens was corrected to run along the frame's LONG edge (GEO.assumedFocal):
+   a portrait phone sees less wall across than the old arithmetic claimed, so
+   every sheet sits bigger in frame and needs more standoff. Both still fit with
+   room to spare, which is why the ceiling did not have to move. See the
+   poster-fit self-tests. */
 const POSTER_SIZES = [
   { key:"a4",  label:"A4",  detail:"210 × 297 mm",
     widthFt: 210/1000*M_TO_FT, heightFt: 297/1000*M_TO_FT },
@@ -1941,9 +1955,54 @@ const GEO = (function(){
   const ftToM = f => f/M_TO_FT;
 
   /* ---- pinhole camera ---- */
-  // f in pixels from a horizontal field of view over `px` pixels
+  /* f in pixels from the field of view subtended by `px` pixels. It is agnostic
+     about WHICH axis those pixels run along — the caller has to hand it the
+     axis the angle was actually measured on, which is the whole point of
+     assumedFocal() below. */
   function focalFromFov(px, fovDeg){ return (px/2)/Math.tan(rad(fovDeg)/2); }
   function fovFromFocal(px, f){ return deg(2*Math.atan((px/2)/f)); }
+
+  /* ---- THE ASSUMED LENS, APPLIED TO THE AXIS IT WAS MEASURED ON ----
+
+     ASSUMED_HFOV_DEG is a LANDSCAPE horizontal field of view: the angle a phone
+     main camera spans across the LONG edge of its sensor, which is the number
+     every spec sheet quotes. A capture stream from a phone held PORTRAIT is
+     portrait-shaped (videoWidth < videoHeight — see arcCameraConstraints, which
+     asks for 1280 × 720 and gets 720 × 1280 back), so on that frame the WIDTH
+     is the SHORT axis. Every call site used to hand the frame's width straight
+     to focalFromFov, spreading a long-axis angle across the short axis, and
+     since focalFromFov is linear in `px` that made f too small by exactly
+     long/short — 1.778 on a 16:9 frame. The poster is drawn at f·W/d, so it
+     came out 1.778× too small, which is what the field reported: an A4 mockup
+     rendered visibly smaller than a notebook of the same width in the same
+     frame.
+
+     THE PROOF THAT THE OLD FORM WAS IMPOSSIBLE, independent of any poster. On a
+     720 × 1280 portrait frame the old expression gave f = 554.35 px, which
+     implies a DIAGONAL field of view of
+
+         2·atan(√(360² + 640²) / 554.35) = 105.9°
+
+     No phone main camera is anywhere near that — mains run 77° to 84° diagonal,
+     and 106° is an ultrawide. Applied to the long axis the same frame gives
+     f = 985.51: HFOV 40.1°, VFOV 66.0°, DFOV 73.4°, which is an ordinary main
+     camera. selfTest pins that diagonal so a future axis mix-up fails loudly.
+
+     WHY IT STAYED INVISIBLE UNTIL MOCKUP MODE. In reference-scale mode the
+     distance is itself derived from f (distanceFromWidth: d = W_ref·f/px_ref),
+     so the drawn width collapses to
+
+         f·W/d  =  f·W·px_ref/(W_ref·f)  =  W·px_ref/W_ref
+
+     and f cancels IDENTICALLY — a wrong focal moved the distance and the
+     drawing by the same factor and nothing on screen ever disagreed. Floor-line
+     distance is d = h/tan θ and contains no f at all, so there is nothing left
+     to cancel against and the error shows at full strength. Mockup mode is
+     floor-line, which is why it surfaced there and only there. */
+  function assumedFocal(frameW, frameH){
+    const a = (frameW > 0) ? frameW : 0, b = (frameH > 0) ? frameH : 0;
+    return focalFromFov(Math.max(a, b), ASSUMED_HFOV_DEG);
+  }
   // d = realWidth * f / apparentWidthPx   (units of d follow units of realWidth)
   function distanceFromWidth(realWidth, focalPx, apparentPx){
     if(!(apparentPx > 0) || !(focalPx > 0)) return NaN;
@@ -1996,10 +2055,11 @@ const GEO = (function(){
 
      BOTH DIMENSIONS ARE CHECKED and the FURTHER of the two wins, because a
      poster that fits across the frame but runs off the top is not in the shot.
-     On the phone the field build actually runs on — portrait, wide FOV across
-     the narrow dimension — the width is what binds, and a 9 × 8 ft poster comes
-     out at 9.9 ft. Turn the same frame on its side and the height binds and the
-     answer grows, which is correct and not a special case. */
+     On the phone the field build actually runs on — portrait, so the frame is
+     NARROW across and the assumed 66° runs down its long edge, not across it
+     (assumedFocal) — the width is what binds for a wide poster, and a 9 × 8 ft
+     poster comes out at 17.6 ft. Turn the same frame on its side and the height
+     binds and the answer grows, which is correct and not a special case. */
   function posterStandoff(o){
     const fx = (o.fx > 0) ? o.fx : NaN;
     const fy = (o.fy > 0) ? o.fy : fx;
@@ -2354,7 +2414,7 @@ const GEO = (function(){
 
   return {
     D2R:D2R, R2D:R2D, deg:deg, rad:rad, mToFt:mToFt, ftToM:ftToM,
-    focalFromFov:focalFromFov, fovFromFocal:fovFromFocal,
+    focalFromFov:focalFromFov, fovFromFocal:fovFromFocal, assumedFocal:assumedFocal,
     distanceFromWidth:distanceFromWidth, focalFromCalibration:focalFromCalibration,
     angularSize:angularSize, pixelWidthFromAngle:pixelWidthFromAngle, posterPixelWidth:posterPixelWidth,
     fitsWithin:fitsWithin, visibleSpan:visibleSpan, distanceForFill:distanceForFill,
@@ -2956,7 +3016,10 @@ const DET = (function(){
     const w = ws.w, h = ws.h, sw = ws.sw, sh = ws.sh, M = sw*sh;
     const aspect = o.aspect > 0 ? o.aspect : 1;
     // intrinsics expressed in DETECT-plane pixels
-    const f  = (o.focalPx || GEO.focalFromFov(w, 66)) * (sw/w);
+    /* The caller normally supplies focalPx. The fallback is the assumed lens,
+       which has to be spread over the work plane's LONG axis like every other
+       assumed-lens site in the file — see GEO.assumedFocal. */
+    const f  = (o.focalPx || GEO.assumedFocal(w, h)) * (sw/w);
     const cx = (o.cx == null ? w/2 : o.cx) * (sw/w);
     const cy = (o.cy == null ? h/2 : o.cy) * (sh/h);
     const minArea = (o.minAreaFrac == null ? 0.012 : o.minAreaFrac) * M;
@@ -8410,11 +8473,21 @@ function arcCalibAll(){
   try{ return JSON.parse(localStorage.getItem(CALIB_KEY) || "{}") || {}; }catch(e){ return {}; }
 }
 /* Exact match on device+resolution first. Failing that, ANY record for this
-   device is still usable: arcResolveFocal() rescales f by the width ratio, and
-   a focal length in pixels is linear in raster width. This matters now that the
-   capture path caps getUserMedia resolution on weak hardware — without the
+   device is still usable: arcResolveFocal() rescales f by the ratio of the two
+   rasters' LONG EDGES, and a focal length in pixels is linear in how densely
+   the sensor is sampled along the axis it is measured on. This matters now that
+   the capture path caps getUserMedia resolution on weak hardware — without the
    fallback, capping the camera would silently throw away a calibration the
-   merchandiser had already done and drop them back to the estimated tier. */
+   merchandiser had already done and drop them back to the estimated tier.
+
+   IT USED TO RESCALE BY THE WIDTH, which is the same number for two rasters of
+   the same orientation — 1280 × 720 to 1440 × 810 is ×1.125 read either way —
+   but is wrong by long/short the moment the orientation flips, because a
+   1280 × 720 record and a 720 × 1280 stream are the SAME sampling density and
+   must keep the SAME f. That is the identical long-axis-versus-short-axis
+   mistake GEO.assumedFocal exists to prevent, so it is spelled the same way
+   here. Nothing changes for a same-orientation record, which is every record
+   the field has actually written. */
 function arcCalibGet(){
   const all = arcCalibAll();
   const exact = all[arcCalibKey()];
@@ -8441,12 +8514,23 @@ function arcCalibSet(rec){
 function arcResolveFocal(){
   const v = ARC.video;
   const vw = (v && v.videoWidth) ? v.videoWidth : 1280;
+  const vh = (v && v.videoHeight) ? v.videoHeight : 720;
   try{
     const tr = ARC.stream && ARC.stream.getVideoTracks && ARC.stream.getVideoTracks()[0];
     if(tr){
       const st = tr.getSettings ? (tr.getSettings() || {}) : {};
       const cp = tr.getCapabilities ? (tr.getCapabilities() || {}) : {};
-      // None of these are standardised; read them defensively where a UA offers them.
+      /* None of these are standardised; read them defensively where a UA offers
+         them. DELIBERATELY NOT ROUTED THROUGH assumedFocal: this is a number the
+         UA reports about the track it is handing us, not a guess of ours, and it
+         is spread across the width of that track's own raster. It carries the
+         same long-axis-versus-short-axis ambiguity the assumed lens did — a UA
+         that means "horizontal" in SENSOR coordinates on a portrait stream would
+         be off by long/short in exactly the old way — but which axis a given UA
+         means is not something this file can know, and no measurement in the
+         fleet settles it. Guessing a rotation onto a reported value would be
+         substituting one unverified assumption for another, so it is left as
+         reported and flagged here instead. */
       const fov = st.fieldOfView || cp.fieldOfView || st.horizontalFieldOfView || cp.horizontalFieldOfView;
       const fovN = (fov && typeof fov === "object") ? fov.max : fov;
       if(fovN && fovN > 20 && fovN < 160){
@@ -8462,7 +8546,12 @@ function arcResolveFocal(){
   }catch(e){ /* capability probing is best-effort */ }
   const c = arcCalibGet();
   if(c && c.f > 0){
-    const scaled = c.f * (vw / (c.vw || vw));
+    /* A TAPE CALIBRATION IS A MEASUREMENT AND IS LEFT ALONE. The only thing
+       done to it is the raster rescale above, and only when the record came
+       from a different resolution than the stream in hand. */
+    const longNow = Math.max(vw, vh);
+    const longCal = Math.max(c.vw > 0 ? c.vw : 0, c.vh > 0 ? c.vh : 0) || longNow;
+    const scaled = c.f * (longNow / longCal);
     /* A calibration knows how good it is: it was solved from a tape measure and
        two dragged handles, and both of those uncertainties were recorded when
        it was saved. Records written before that existed fall back to a
@@ -8470,12 +8559,16 @@ function arcResolveFocal(){
     const sig = (c.relSigma > 0) ? c.relSigma : 0.025;
     return { f: scaled,
              src:"device calibration ("+c.refLabel+", "+fmtD(c.ts)+")"
-                 + (c.rescaled ? ", rescaled from "+c.vw+"px" : ""),
+                 + (c.rescaled ? ", rescaled from a "+longCal+"px long edge" : ""),
              estimated:false, relSigma: arcQuad(sig, FOCAL_SIGMA_FLOOR) };
   }
-  return { f: GEO.focalFromFov(vw, ASSUMED_HFOV_DEG),
-           src:"assumed "+ASSUMED_HFOV_DEG+"° HFOV (estimated)", estimated:true,
-           relSigma: FOCAL_SIGMA_ASSUMED };
+  /* THE FALLBACK, and the only branch of this function the assumed lens reaches.
+     It goes through assumedFocal so the 66° lands on the frame's long edge: a
+     portrait stream is 720 × 1280, and spreading a long-axis angle across 720
+     px used to under-state f by 16/9 and shrink every drawn poster with it. */
+  return { f: GEO.assumedFocal(vw, vh),
+           src:"assumed "+ASSUMED_HFOV_DEG+"° across the frame's long edge (estimated)",
+           estimated:true, relSigma: FOCAL_SIGMA_ASSUMED };
 }
 /* quadrature sum — the only way independent relative errors ever combine here */
 function arcQuad(){
@@ -9893,7 +9986,8 @@ function arcDetStep(){
      that turns a rough outline into something worth trusting, so the confidence
      the user is shown must reflect the corners actually being used. */
   const asp = res.flipped ? hMm/wMm : wMm/hMm;
-  const fit = DET.rectFit(res.refined, asp, ARC.focal.f ? ARC.focal.f/d.scale : GEO.focalFromFov(d.workW, ASSUMED_HFOV_DEG),
+  const fit = DET.rectFit(res.refined, asp,
+                          ARC.focal.f ? ARC.focal.f/d.scale : GEO.assumedFocal(d.workW, d.workH),
                           d.workW/2, d.workH/2);
   const areaFrac = DET.quadArea(res.refined)/(d.workW*d.workH);
   const conf = fit
@@ -11197,26 +11291,30 @@ function arcViewIntrinsics(){
                relSigma:FOCAL_SIGMA_FLOOR, estimated:false, src:"XR view projection matrix" };
   } else if(ARC.tier === "B"){
     const m = arcMap();
-    const f = (ARC.focal && ARC.focal.f > 0) ? ARC.focal.f : GEO.focalFromFov(m.vw, ASSUMED_HFOV_DEG);
+    const f = (ARC.focal && ARC.focal.f > 0) ? ARC.focal.f : GEO.assumedFocal(m.vw, m.vh);
     return { fx:f, fy:f, w:m.vw, h:m.vh,
              relSigma:(ARC.focal && ARC.focal.relSigma > 0) ? ARC.focal.relSigma : FOCAL_SIGMA_ASSUMED,
              estimated:!(ARC.focal && ARC.focal.estimated === false),
-             src:(ARC.focal && ARC.focal.src) || ("assumed " + ASSUMED_HFOV_DEG + "° HFOV") };
+             src:(ARC.focal && ARC.focal.src)
+                 || ("assumed " + ASSUMED_HFOV_DEG + "° across the frame's long edge") };
   }
   /* No camera and no XR — tier C, or a stage that has not started yet. The gate
      still has to answer, so it answers off the stage at the assumed lens. */
   const st = arcEl("arStage");
   const w = st ? st.clientWidth : NOMINAL_FRAME_W, h = st ? st.clientHeight : NOMINAL_FRAME_H;
-  const f = GEO.focalFromFov(w, ASSUMED_HFOV_DEG);
+  const f = GEO.assumedFocal(w, h);
   return { fx:f, fy:f, w:w, h:h, relSigma:FOCAL_SIGMA_ASSUMED, estimated:true,
-           src:"assumed " + ASSUMED_HFOV_DEG + "° HFOV" };
+           src:"assumed " + ASSUMED_HFOV_DEG + "° across the frame's long edge" };
 }
-/* A nominal portrait phone at the assumed lens — see NOMINAL_FRAME_W. */
+/* A nominal portrait phone at the assumed lens — see NOMINAL_FRAME_W. The frame
+   is PORTRAIT, so the assumed angle belongs to NOMINAL_FRAME_H, and the width
+   subtends the narrower angle that follows from it; assumedFocal takes the long
+   axis whichever way round the two are handed to it. */
 function nominalIntrinsics(){
-  const f = GEO.focalFromFov(NOMINAL_FRAME_W, ASSUMED_HFOV_DEG);
+  const f = GEO.assumedFocal(NOMINAL_FRAME_W, NOMINAL_FRAME_H);
   return { fx:f, fy:f, w:NOMINAL_FRAME_W, h:NOMINAL_FRAME_H,
            relSigma:FOCAL_SIGMA_ASSUMED, estimated:true,
-           src:"assumed " + ASSUMED_HFOV_DEG + "° HFOV, portrait "
+           src:"assumed " + ASSUMED_HFOV_DEG + "° across the long edge, portrait "
                + NOMINAL_FRAME_W + "×" + NOMINAL_FRAME_H };
 }
 /* Where the merchandiser is TOLD to stand, before any camera is open.
@@ -11452,12 +11550,17 @@ function arcGates(){
 function arcDisplayFocalCss(){
   const st = arcEl("arStage");
   const cw = st ? st.clientWidth : 360;
+  /* The stage is as portrait as the phone is, so the assumed lens has to be
+     spread over its HEIGHT — the same long-axis rule the capture frame follows,
+     and it has to be the same one or the overlay and the shutter would disagree
+     about how big the poster is. */
+  const ch = st ? st.clientHeight : 640;
   if(ARC.tier === "A"){
-    const f = ARC.xr.focalPx || GEO.focalFromFov(cw, ASSUMED_HFOV_DEG);
+    const f = ARC.xr.focalPx || GEO.assumedFocal(cw, ch);
     return f * (ARC.xr.vpW ? (cw/ARC.xr.vpW) : 1);
   }
   if(ARC.tier === "B" && ARC.focal.f) return ARC.focal.f * arcMap().s;
-  return GEO.focalFromFov(cw, ASSUMED_HFOV_DEG);
+  return GEO.assumedFocal(cw, ch);
 }
 function arcNudgeNorm(){
   const f = arcDisplayFocalCss();
@@ -11596,7 +11699,7 @@ function arcRenderSimple(g, prog){
       dEl.style.display = "";
       /* MOCKUP: the line is derived from the poster, so it can say WHY. "Move
          back 0.9 ft" was an instruction to hit a number nobody could see; "you
-         can only see 7.8 ft of wall" is the reason, in the unit the merchandiser
+         can only see 4.4 ft of wall" is the reason, in the unit the merchandiser
          is standing in. VERIFICATION keeps the ± band verbatim — there the
          number IS the spec. */
       const useFit = MOCKUP && fit && fit.view;
@@ -12094,7 +12197,7 @@ function arcDetBenchmark(){
   const W = (prof.work >> 1) << 1, H = ((Math.round(prof.work*9/16)) >> 1) << 1;
   const ws = new DET.Workspace();
   ws.fit(W, H);
-  const f = GEO.focalFromFov(W, ASSUMED_HFOV_DEG);
+  const f = GEO.assumedFocal(W, H);
   arcDetSynth(ws, { focalPx:f, distFt:6, wFt:4, hFt:3, yawDeg:12, noise:4, clutter:4, seed:23 });
 
   /* A pass is not just the maths. Every real pass also pays a drawImage from
@@ -12584,7 +12687,7 @@ function arcComposite(source, srcW, srcH, intr, g, tierKey, geo, nudgeNorm, capt
   try{ x.drawImage(source, 0, 0, d.w, d.h); }
   catch(e){ x.fillStyle = "#111827"; x.fillRect(0,0,d.w,d.h); }
 
-  const I = intr || arcIsoIntr(GEO.focalFromFov(srcW, ASSUMED_HFOV_DEG), srcW, srcH);
+  const I = intr || arcIsoIntr(GEO.assumedFocal(srcW, srcH), srcW, srcH);
   const fx = I.fx * d.k, fy = I.fy * d.k;        // focal scales with the downscale
   const cx = I.cx * d.k, cy = I.cy * d.k;        // so does the principal point
   const nn = nudgeNorm || { ax:0, ay:0 };        // nudge is an angle, so it transfers cleanly
@@ -13172,7 +13275,8 @@ function arcBuildRecord(g, tierKey, focalPx, captureMode, camInfo){
              ? " The lens is also uncalibrated: that plays no part in the distance, but the poster is DRAWN "
                + "at f·W/d, so it still scales the overlay. Calibrate the device to tighten the picture."
              : ""))
-      : "Focal length is an assumed " + ASSUMED_HFOV_DEG + "° HFOV. Calibrate the device for a real number.");
+      : "Focal length is an assumed " + ASSUMED_HFOV_DEG
+        + "° across the frame's long edge. Calibrate the device for a real number.");
   }
   floorNotes(p, notes);
   fitNotes(p, notes);
@@ -13449,7 +13553,7 @@ function arcManualShoot(){
   arcPanel('<h2>Compositing…</h2><p>Building the frame from the generated store image.</p>');
   const backdrop = new Image();
   backdrop.onload = function(){
-    const f = GEO.focalFromFov(backdrop.width, ASSUMED_HFOV_DEG);
+    const f = GEO.assumedFocal(backdrop.width, backdrop.height);
     arcFinishCapture(backdrop, backdrop.width, backdrop.height,
       arcIsoIntr(f, backdrop.width, backdrop.height), g, "C", null, "manual")
       .catch(function(err){ ARC.busy = false; toast("Capture failed: "+((err&&err.message)||"unknown"), true); });
@@ -13459,7 +13563,7 @@ function arcManualShoot(){
 }
 function arcFinishCapture(source, w, h, intr, g, tierKey, nudgeNorm, captureMode, camInfo){
   const t = ARC.task;
-  const I = intr || arcIsoIntr(GEO.focalFromFov(w, ASSUMED_HFOV_DEG), w, h);
+  const I = intr || arcIsoIntr(GEO.assumedFocal(w, h), w, h);
   /* THE OFFICE IS SETTLED BEFORE THE IMAGE IS COMPOSITED, because the name is
      stamped into the pixels along with everything else. Asking afterwards would
      mean either a second rasterisation or a photo whose burned-in caption and
@@ -15011,6 +15115,40 @@ function runSelfTest(){
   /* --- pinhole identities --- */
   T("focalFromFov(1280px, 66°)", GEO.focalFromFov(1280, 66), 985.5136, 1e-3, "(1280/2)/tan(33°)");
   T("fovFromFocal round-trip", GEO.fovFromFocal(1280, GEO.focalFromFov(1280, 66)), 66, 1e-6);
+
+  /* --- THE ASSUMED LENS MUST BE A LENS THAT EXISTS -----------------------
+     The regression these four exist for: ASSUMED_HFOV_DEG is a LANDSCAPE
+     horizontal FOV, and every call site used to spread it across the frame's
+     WIDTH — which on a portrait capture stream is the SHORT axis. That made f
+     too small by long/short (1.778 at 16:9) and drew every poster that much
+     too small, and NOTHING caught it, because in reference-scale mode f
+     cancels out of f·W/d exactly.
+
+     What does catch it is the lens itself. A focal length plus a raster imply
+     a DIAGONAL field of view, and phone main cameras live in a narrow band —
+     roughly 77° to 84° diagonal, with 100°+ meaning an ultrawide. The old
+     expression put a 720 × 1280 portrait frame at 105.9° diagonal, which is
+     not a main camera on any handset. Asserting the diagonal is plausible is
+     therefore an assertion about physics rather than about our arithmetic, and
+     it fails loudly the moment somebody spreads the angle over the wrong axis
+     again. The band is deliberately wide (65° to 90°): it is there to catch an
+     axis mix-up, not to pin ASSUMED_HFOV_DEG to a particular value. */
+  (function assumedLensIsPlausible(){
+    const dfov = function(w, h){
+      return GEO.fovFromFocal(Math.hypot(w, h), GEO.assumedFocal(w, h));
+    };
+    T("assumed lens on a 720×1280 portrait frame implies a plausible 73.4° diagonal",
+      dfov(720, 1280), 73.3793, 1e-3,
+      "a phone main camera is 77–84°; the pre-fix code implied 105.9°, an ultrawide");
+    T("…inside the band a real main camera occupies",
+      dfov(720, 1280) > 65 && dfov(720, 1280) < 90, true, null,
+      "65°–90° — wide enough to survive a different ASSUMED_HFOV_DEG, tight enough to fail an axis swap");
+    T("…and the nominal 1080×1920 frame agrees, because only the shape matters",
+      dfov(NOMINAL_FRAME_W, NOMINAL_FRAME_H), dfov(720, 1280), 1e-9);
+    T("the assumed lens does not care which way round the frame is handed to it",
+      GEO.assumedFocal(1080, 1920), GEO.assumedFocal(1920, 1080), 1e-12,
+      "one phone, one lens — rotating the handset cannot change its focal length in pixels");
+  })();
   T("posterPixelWidth(4ft @ 6ft, f=800)  [brief's worked example]",
     GEO.posterPixelWidth(4, 6, 800), 533.3333, 1e-3, "f·W/D");
   T("angularSize(4ft @ 6ft) in degrees", GEO.deg(GEO.angularSize(4, 6)), 36.8699, 1e-3);
@@ -15424,7 +15562,7 @@ function runSelfTest(){
     T("minSide picks the short edge", DET.minSide(ord), 60, 1e-9);
 
     /* --- rectangularity: the residual that survives perspective --- */
-    const W = 640, H = 360, f = GEO.focalFromFov(W, ASSUMED_HFOV_DEG);
+    const W = 640, H = 360, f = GEO.assumedFocal(W, H);
     const truth = GEO.posterQuad({ focalPx:f, cx:W/2, cy:H/2, distance:6,
                                    widthFt:4, heightFt:3, yawDeg:20, pitchDeg:6 });
     const flat = new Float64Array([truth[0][0],truth[0][1], truth[1][0],truth[1][1],
@@ -15564,7 +15702,7 @@ function runSelfTest(){
       const ws = new DET.Workspace();
       const WW = 640, HH = 360;
       ws.fit(WW, HH);
-      const fw = GEO.focalFromFov(WW, ASSUMED_HFOV_DEG);
+      const fw = GEO.assumedFocal(WW, HH);
       const cases = [
         { name:"poster 4×3 ft square-on at 6 ft", wFt:4, hFt:3, distFt:6, yawDeg:0,  seed:11 },
         { name:"poster 4×3 ft at 6 ft, yaw 20°",  wFt:4, hFt:3, distFt:6, yawDeg:20, seed:12 },
@@ -16050,7 +16188,10 @@ function runSelfTest(){
      contract, which is asserted as a contract rather than as a number. */
   (function(){
     const NW = NOMINAL_FRAME_W, NH = NOMINAL_FRAME_H;
-    const fN = GEO.focalFromFov(NW, ASSUMED_HFOV_DEG);         // 831.527 px
+    /* The assumed 66° belongs to the LONG edge, so on this portrait frame it is
+       NH that subtends it and the width subtends 40.1°. Written with the same
+       helper the app uses, so a change to one cannot pass the other. */
+    const fN = GEO.assumedFocal(NW, NH);                       // 1478.270 px
     const nom = function(wFt, hFt, fill){
       return GEO.posterStandoff({ widthFt:wFt, heightFt:hFt, frameW:NW, frameH:NH,
                                   fx:fN, fy:fN, fill:fill });
@@ -16061,9 +16202,10 @@ function runSelfTest(){
     };
 
     /* ---- visible wall from intrinsics ---- */
-    T("focalFromFov(1080px, 66°) — the nominal portrait phone", fN, 831.5271, 1e-3);
-    T("visibleSpan: 6 ft away a 66° phone sees only 7.79 ft of wall",
-      GEO.visibleSpan(6, NW, fN), 7.7929, 1e-3,
+    T("assumedFocal(1080×1920) — the nominal portrait phone, 66° down its LONG edge",
+      fN, 1478.2704, 1e-3, "(1920/2)/tan(33°) — NOT (1080/2)/tan(33°), which is a 106° ultrawide");
+    T("visibleSpan: 6 ft away a portrait phone sees only 4.38 ft of wall across",
+      GEO.visibleSpan(6, NW, fN), 4.3835, 1e-3,
       "d·px/f — the exact reason a 9 ft poster could not be shot from the old 6 ft standoff");
     T("visibleSpan is linear in distance",
       GEO.visibleSpan(12, NW, fN)/GEO.visibleSpan(6, NW, fN), 2, 1e-12);
@@ -16077,23 +16219,23 @@ function runSelfTest(){
 
     /* ---- recommended / minimum standoff, several poster sizes ---- */
     const s98 = nom(9, 8);
-    T("standoff 9×8 ft: recommended 9.90 ft", s98.recommendedFt, 9.8991, 1e-3,
+    T("standoff 9×8 ft: recommended 17.60 ft", s98.recommendedFt, 17.5985, 1e-3,
       "f·W/(0.70·px) — the user's failing case, and it is nowhere near 6 ft");
-    T("standoff 9×8 ft: minimum 6.93 ft", s98.minimumFt, 6.9294, 1e-3, "the poster exactly fills the frame");
+    T("standoff 9×8 ft: minimum 12.32 ft", s98.minimumFt, 12.3189, 1e-3, "the poster exactly fills the frame");
     T("standoff 9×8 ft: the width is what binds on a portrait frame", s98.limit, "width");
     T("standoff 9×8 ft: the OLD fixed 6 ft standoff was below the minimum",
       STANDOFF_FT < s98.minimumFt, true, null,
       "6 ft < " + s98.minimumFt.toFixed(2) + " ft — the gate was unsatisfiable, not merely wrong");
     const s43 = nom(4, 3);
-    T("standoff 4×3 ft: recommended 4.40 ft", s43.recommendedFt, 4.3996, 1e-3);
-    T("standoff 4×3 ft: minimum 3.08 ft", s43.minimumFt, 3.0797, 1e-3);
+    T("standoff 4×3 ft: recommended 7.82 ft", s43.recommendedFt, 7.8215, 1e-3);
+    T("standoff 4×3 ft: minimum 5.48 ft", s43.minimumFt, 5.4751, 1e-3);
     const s310 = nom(3, 10);
     T("standoff 3×10 ft: a TALL poster is height-limited, not width-limited", s310.limit, "height");
-    T("standoff 3×10 ft: recommended 6.19 ft comes from the height", s310.recommendedFt, 6.1870, 1e-3,
-      "width alone would have said 3.30 ft, and the top would have run off frame");
-    T("standoff 3×10 ft: minimum 4.33 ft", s310.minimumFt, 4.3309, 1e-3);
+    T("standoff 3×10 ft: recommended 11.00 ft comes from the height", s310.recommendedFt, 10.9990, 1e-3,
+      "width alone would have said 5.87 ft, and the top would have run off frame");
+    T("standoff 3×10 ft: minimum 7.70 ft", s310.minimumFt, 7.6993, 1e-3);
     const s124 = nom(12, 4);
-    T("standoff 12×4 ft: recommended 13.20 ft", s124.recommendedFt, 13.1988, 1e-3);
+    T("standoff 12×4 ft: recommended 23.46 ft", s124.recommendedFt, 23.4646, 1e-3);
     T("recommended is always further out than the minimum",
       [s98, s43, s310, s124].every(function(x){ return x.recommendedFt > x.minimumFt; }), true, null,
       "fill target " + FRAME_FILL_TARGET + " < 1");
@@ -16104,7 +16246,9 @@ function runSelfTest(){
     /* Turn the same frame on its side and an 8 ft height becomes the binding
        dimension. Correct physics, not a special case. */
     (function(){
-      const fL = GEO.focalFromFov(1920, ASSUMED_HFOV_DEG);
+      /* Same phone, same lens: assumedFocal(1920, 1080) is the very number
+         assumedFocal(1080, 1920) returned above. Only the raster turned. */
+      const fL = GEO.assumedFocal(1920, 1080);
       const land = GEO.posterStandoff({ widthFt:9, heightFt:8, frameW:1920, frameH:1080,
                                         fx:fL, fy:fL, fill:FRAME_FILL_TARGET });
       T("standoff 9×8 ft on a LANDSCAPE frame flips to height-limited", land.limit, "height");
@@ -16115,7 +16259,7 @@ function runSelfTest(){
     const at6 = seen(6, 9, 8);
     T("viewFit 9×8 ft at 6 ft: does NOT fit", at6.fits, false);
     T("viewFit 9×8 ft at 6 ft: the width is the problem", at6.limit, "width");
-    T("viewFit 9×8 ft at 6 ft: 7.79 ft of wall in view", at6.visibleWFt, 7.7929, 1e-3);
+    T("viewFit 9×8 ft at 6 ft: 4.38 ft of wall in view", at6.visibleWFt, 4.3835, 1e-3);
     const atRec = seen(s98.recommendedFt, 9, 8);
     T("viewFit 9×8 ft at the recommended distance: fits", atRec.fits, true);
     T("…filling exactly the fill target across the frame", atRec.fillW, FRAME_FILL_TARGET, 1e-12);
@@ -16164,15 +16308,15 @@ function runSelfTest(){
     /* ---- the wall's own edges (check b) ---- */
     const c0 = NW/2;
     const sym = GEO.spanFromPixels(10, 200, 880, c0, fN);
-    T("spanFromPixels: two marks 680 px apart at 10 ft span 8.18 ft",
-      sym.ft, 8.1777, 1e-3, "d·(tan α_right − tan α_left)");
-    T("spanFromPixels: the right mark sits 22.24° off axis", sym.alphaBDeg, 22.2390, 1e-3);
+    T("spanFromPixels: two marks 680 px apart at 10 ft span 4.60 ft",
+      sym.ft, 4.6000, 1e-3, "d·(tan α_right − tan α_left)");
+    T("spanFromPixels: the right mark sits 12.95° off axis", sym.alphaBDeg, 12.9527, 1e-3);
     T("spanFromPixels: symmetric marks give equal and opposite angles",
       sym.alphaADeg, -sym.alphaBDeg, 1e-12);
     T("spanFromPixels across the whole frame == visibleSpan",
       GEO.spanFromPixels(10, 0, NW, c0, fN).ft, GEO.visibleSpan(10, NW, fN), 1e-9);
     T("spanFromPixels: marks both off to one side still measure their own span",
-      GEO.spanFromPixels(10, 700, 1000, c0, fN).ft, 3.6078, 1e-3);
+      GEO.spanFromPixels(10, 700, 1000, c0, fN).ft, 2.0294, 1e-3);
     T("spanFromPixels: order of the two marks does not change the span",
       GEO.spanFromPixels(10, 1000, 700, c0, fN).ft,
       GEO.spanFromPixels(10, 700, 1000, c0, fN).ft, 1e-12);
@@ -16202,8 +16346,8 @@ function runSelfTest(){
       const so = taskStandoff(t9);
       T("taskStandoff derives the standoff in mockup mode and only there",
         so.derived, MOCKUP, null, "APP_MODE = " + APP_MODE);
-      T("taskStandoff: a 9×8 poster needs 6.93 ft, which no office has",
-        so.recommendedFt, MOCKUP ? 6.9294 : STANDOFF_FT, 1e-3,
+      T("taskStandoff: a 9×8 poster needs 12.32 ft, which no office has",
+        so.recommendedFt, MOCKUP ? 12.3189 : STANDOFF_FT, 1e-3,
         MOCKUP ? "falls back to the true minimum and flags roomEnough" : "verification keeps the task's 6.0 ft");
       T("taskStandoff: …and says so rather than gating in silence",
         so.roomEnough, !MOCKUP);
@@ -16259,14 +16403,21 @@ function runSelfTest(){
       /* THE NUMBER THE WHOLE SIZE CHANGE TURNS ON. A2 is the largest sheet the
          programme prints, so if the 4 ft ceiling were going to break under the
          client's real range, it would break here. It is not close: A2 needs
-         1.06 ft to fit the nominal portrait frame edge to edge — a quarter of
-         the ceiling — and at the ceiling it occupies 27 % of the frame width.
+         1.89 ft to fit the nominal portrait frame edge to edge — under half the
+         ceiling — and at the ceiling it occupies 47 % of the frame width.
          The ceiling therefore does not move, and taskStandoff keeps reporting
-         roomEnough for every published size. */
-      T("A2 needs 1.06 ft to fit the nominal frame — a quarter of the ceiling",
-        minFor(posterSize("a2")), 1.0609, 1e-3, "1080 × 1920 at an assumed 66° HFOV");
-      T("A2 fills 27 % of the frame width at the 4 ft ceiling",
-        fitAt(posterSize("a2"), MOCKUP_MAX_STANDOFF_FT).fillW, 0.2652, 1e-3);
+         roomEnough for every published size.
+
+         BOTH NUMBERS GREW BY 16/9 when the assumed lens was corrected to run
+         along the frame's long edge (assumedFocal), because a narrower true
+         HFOV sees less wall and therefore needs more standoff for the same
+         sheet. 1.89 ft is still less than half the room, so the correction
+         changes what the app SAYS and not what the merchandiser can DO. */
+      T("A2 needs 1.89 ft to fit the nominal frame — under half the ceiling",
+        minFor(posterSize("a2")), 1.8861, 1e-3,
+        "1080 × 1920 at an assumed 66° across the long edge");
+      T("A2 fills 47 % of the frame width at the 4 ft ceiling",
+        fitAt(posterSize("a2"), MOCKUP_MAX_STANDOFF_FT).fillW, 0.4715, 1e-3);
       T("A2 is the tighter of the two, and is WIDTH-limited",
         fitAt(posterSize("a2"), 4).limit, "width", 0,
         "the frame is portrait 1080 × 1920, so the narrow dimension binds for every ISO sheet");
@@ -16366,8 +16517,17 @@ function runSelfTest(){
          workable distance in mockup, the bottom of the manager's band in
          verification — but "just inside it is refused, just outside it is
          allowed" is the same statement either way. */
-      const fit = arcFit(12);
+      const fit = arcFit(18);
       const edge = MOCKUP ? fit.minimumFt : (t.standoffFt - t.standoffTolFt);
+      /* The probe distances below are DERIVED from that edge rather than typed,
+         because every one of them moved when the assumed lens was corrected to
+         run along the frame's long edge: a 9 × 8 ft poster's minimum went from
+         6.93 ft to 12.32 ft, and 12 ft — which used to be the comfortable spot
+         this block probed with — is now INSIDE the minimum. Deriving them keeps
+         the block asserting the behaviour it was written for instead of
+         quietly asserting the opposite. */
+      const okFt  = edge*1.46;          // comfortably inside the frame, nothing to say
+      const farFt = MOCKUP ? edge/FRAME_FILL_LOOSE*1.28 : t.standoffFt*7.5;
 
       T("freeze gate: a reading that does not exist is never freezable",
         floorReadingGate(null).ok, false);
@@ -16383,23 +16543,25 @@ function runSelfTest(){
       T("freeze gate: …and a hair outside it is allowed",
         floorReadingGate(edge*(1 + 1e-6)).ok, true);
 
-      /* THE FAILING CASE, at the distance a 9 × 8 ft poster actually needs. */
-      const g12 = floorReadingGate(12);
-      T("freeze gate: THE BUG — 12 ft from a 9×8 ft poster freezes in mockup, not in verification",
-        g12.ok, MOCKUP, null,
-        "12 ft is " + Math.abs(12 - t.standoffFt).toFixed(1) + " ft outside the old ± "
-          + t.standoffTolFt + " ft band, and the poster needs " + fit.minimumFt.toFixed(2) + " ft");
+      /* THE FAILING CASE, at a distance a 9 × 8 ft poster actually fits from. */
+      const gOk = floorReadingGate(okFt);
+      T("freeze gate: THE BUG — a spot that fits the poster freezes in mockup, not in verification",
+        gOk.ok, MOCKUP, null,
+        okFt.toFixed(1) + " ft is " + Math.abs(okFt - t.standoffFt).toFixed(1)
+          + " ft outside the old ± " + t.standoffTolFt + " ft band, and the poster needs "
+          + fit.minimumFt.toFixed(2) + " ft");
       T("freeze gate: …and in mockup it is an ordinary good spot, with nothing to add",
-        MOCKUP ? (g12.code === "ok" && g12.why === "" && g12.note === "") : (g12.code === "far"),
+        MOCKUP ? (gOk.code === "ok" && gOk.why === "" && gOk.note === "") : (gOk.code === "far"),
         true);
 
       /* FAR: the same direction in both modes, and the whole of the change is
          what each mode does about it. */
-      const g30 = floorReadingGate(30);
-      T("freeze gate: standing well back is the FAR case in both modes", g30.code, "far", 0);
-      T("freeze gate: …but only verification refuses it", g30.ok, MOCKUP);
+      const gFar = floorReadingGate(farFt);
+      T("freeze gate: standing well back is the FAR case in both modes", gFar.code, "far", 0,
+        farFt.toFixed(1) + " ft");
+      T("freeze gate: …but only verification refuses it", gFar.ok, MOCKUP);
       T("freeze gate: mockup answers far with advice, verification with a refusal",
-        (g30.note !== "") === MOCKUP && (g30.why !== "") === !MOCKUP, true,
+        (gFar.note !== "") === MOCKUP && (gFar.why !== "") === !MOCKUP, true,
         null, "exactly one of note/why is ever non-empty");
       const gGood = floorReadingGate(MOCKUP ? fit.recommendedFt : t.standoffFt);
       T("freeze gate: the recommended distance is silent — no refusal and no advice",
@@ -16407,7 +16569,11 @@ function runSelfTest(){
 
       /* The invariant the bug violated. */
       const disagreed = [];
-      [2, 3, 4, 5, 5.6, 6, 6.5, 6.93, 7, 8, 9.9, 12, 18, 30, 45].forEach(function(d){
+      /* Straddling BOTH modes' edges: the manager's 6 ± 0.5 ft band, and the
+         mockup minimum of 12.32 ft that the corrected long-edge focal moved it
+         to (it was 6.93 ft while the assumed angle was spread across the frame's
+         short axis, which is why the old list clustered around 7). */
+      [2, 3, 5.4, 5.6, 6, 6.5, 8, 12.31, 12.33, 14, 17.6, 24, 30, 36, 45].forEach(function(d){
         if(floorReadingGate(d).ok !== distOkAt(d)) disagreed.push(d.toFixed(2));
       });
       T("freeze gate: every distance the button offers can actually be frozen, and no other",

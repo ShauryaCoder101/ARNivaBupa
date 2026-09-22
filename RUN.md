@@ -217,7 +217,9 @@ Tier B's distance is only as good as the focal length. The app looks for one in 
 2. **Your stored calibration** — `localStorage["niva.calib.v1"]`, keyed by device string + capture
    resolution, so it is a genuine once-per-phone step. Reach it from the capture view's tool row
    (*Calibrate — readings are estimated*) or the start panel.
-3. An assumed 66° horizontal FOV. The badge then reads **Estimated**, never *Reference-scaled*.
+3. An assumed 66° across the frame's **long edge** — the landscape horizontal FOV of a typical phone
+   main camera, which on a portrait capture stream is the angle down the frame's *height*, not across
+   its width (`GEO.assumedFocal`). The badge then reads **Estimated**, never *Reference-scaled*.
 
 Calibration procedure: tape an A4 sheet (or a credit card) flat to a wall, stand a **tape-measured**
 distance back, drag handles **A** and **B** onto its left and right edges, enter the width in mm and
